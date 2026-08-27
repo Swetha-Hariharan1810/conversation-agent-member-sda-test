@@ -1,0 +1,31 @@
+ai: Thank you for calling Sagility Health. For quality assurance purposes, your call may be monitored or recorded. Please tell me how I can assist you today.
+human: I need to find a primary care physician in my area.
+ai: I can help with that. Can I get your first name, please?
+human: emily
+ai: Thank you, Emily. Can you provide your last name?
+human: carter
+ai: Thank you. Just to confirm — is your name Emily Carter, E-M-I-L-Y C-A-R-T-E-R, correct?
+human: yes that's correct
+ai: May I ask for your Member ID, please?
+human: m nine zero seven five zero three
+ai: To validate your account, can I get your date of birth?
+human: April twelfth nineteen eighty-eight
+ai: Thank you. I found your account. Are you the plan holder, or are you calling for a dependent?
+human: I'm calling for myself
+ai: Thank you. What type of provider are you looking for?
+human: Primary Care Physician
+ai: Thank you. Your ZIP code on file is 12139. Is that correct?
+human: yes that's correct
+ai: I have a list of in-network providers ready. How would you like us to send it — via fax or email?
+human: send it to my fax
+ai: The fax number we have on file is 617-555-4199. Is that correct?
+human: yes that's correct
+ai: Great! Expect to receive the provider list within 30 minutes. Since you're looking for a Primary Care Physician, would you also like to hear about your plan benefits for PCP visits?
+human: yes please
+ai: Your individual deductible is $750 per calendar year. Your family deductible is $2500. After meeting the deductible, coinsurance is 20% for covered services. Your individual out-of-pocket maximum is $3000, and the family out-of-pocket maximum is $7000. Also, you are eligible for a free Care Coach. Would you like us to send you details about the Care Coach program?
+human: yes that sounds interesting
+ai: Wonderful! We will send the Care Coach details to your fax at 617-555-4199. Expect it within 30 minutes. Is there anything else I can help you with?
+human: can you summarize the PCP benefits?
+ai: Of course! Your individual deductible is $750 per year, and the family deductible is $2500. After meeting the deductible, you pay 20% coinsurance for covered in-network services until reaching your out-of-pocket maximums of $3000 individual and $7000 family. After that, the plan covers 100%. Is there anything else I can help you with?
+human: no thanks that was helpful
+ai: Thank you for calling Sagility Health. Have a great day!
