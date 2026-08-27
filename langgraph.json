@@ -9,3 +9,30 @@
   "env": ".env",
   "image_distro": "wolfi"
 }
+
+/home/azureuser/PCA/conversation-agent-member-sda one issue i see is does every retry require the llm call can we use a flag in extractor that tells if a freeform response is required or we can use the existing constants as for example this "ai
+Thank you for calling Sagility Health. This call may be monitored or recorded for quality. How can I help today?
+human
+I'm calling to check the list of in network providers in Korea.
+ai
+Absolutely. Let me pull that up for you — first, what's your first name?
+human
+Lemony. My name is Monique.
+ai
+Could you please provide your last name?
+human
+Customer.
+ai
+Monique Customer — and your Member ID?
+human
+My member ID is m nine zero seven five zero three.
+ai
+Got that — and your date of birth?
+human
+April twelfth nineteen eighty eight.
+ai
+And your date of birth?
+human
+Yeah. It's April twelfth nineteen eighty eight.
+ai
+I wasn't able to capture your last name after a few tries. Let me connect you with a representative who can help. Your reference number for this call is REF253573018. Thank you for calling Sagility Health. Have a great day!" where the gemini model is hallucinating instead of retry for last name it asked for memberid
