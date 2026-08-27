@@ -1,0 +1,11 @@
+{
+  "dependencies": [
+    "."
+  ],
+  "python_version": "3.13",
+  "graphs": {
+    "agent": "./src/agent/app_graph.py:graph"
+  },
+  "env": ".env",
+  "image_distro": "wolfi"
+}

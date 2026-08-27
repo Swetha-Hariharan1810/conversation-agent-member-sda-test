@@ -1,0 +1,144 @@
+[project]
+name = "conversation-agent-cigna-member-sdo-langgraph"
+version = "0.1.0"
+description = "Self-directing orchestrator conversational agent"
+authors = [
+    {name = "Swetha hariharan"}
+]
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "deptry (>=0.24.0,<0.25.0)",
+    "langchain-core>=1.3.2",
+    "langchain-openai>=1.2.1",
+    "jinja2 (>=3.1.6,<4.0.0)",
+    "langgraph>=1.1.10",
+    "pydantic>=2.13.3",
+    "pytest>=9.0.3",
+    "python-json-logger>=4.1.0",
+    "urllib3>=2.6.3",
+    "langchain-google-genai>=4.2.2",
+    "pyyaml>=6.0.3",
+    "typing-extensions>=4.15.0",
+    "langgraph-cli[inmem]>=0.2.0",
+    "langgraph-api>=0.11.0",
+    "google-genai>=1.75.0",
+    "httpx>=0.27.0",
+    "langsmith>=0.7.38",
+    "aiofiles>=25.1.0",
+    "pytest-repeat>=0.9.4",
+    "langgraph-sdk>=0.3.15",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent"]
+
+[tool.hatch.build]
+artifacts = [
+    "src/agent/prompts/**/*.md",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit (>=4.4.0,<5.0.0)",
+    "deptry (>=0.24.0,<0.25.0)",
+    "python-dotenv (>=1.2.1,<2.0.0)",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-mock>=3.14.0",
+]
+
+[tool.uv]
+default-groups = [
+    "dev"
+]
+python-preference = "system"
+
+[tool.deptry]
+experimental_namespace_package = true
+ignore = ["DEP002"]
+
+[tool.deptry.package_module_name_map]
+python-json-logger = "pythonjsonlogger"
+asgi-correlation-id = "asgi_correlation_id"
+
+[tool.deptry.per_rule_ignores]
+DEP003 = ["agent"]
+
+[tool.ruff]
+exclude = [
+    ".git",
+    ".git-rewrite",
+    ".mypy_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".env.*",
+    ".venv",
+    "__pypackages__",
+    "__pycache__",
+    "_build",
+    "build",
+    "dist",
+    "venv",
+    "alembic",
+    "test_client"
+]
+
+line-length = 110
+target-version = "py313"
+
+[tool.ruff.lint]
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+ignore = []
+select = [
+    "E",
+    "W",
+    "I",
+    "F",
+    "C",
+    "ASYNC",
+]
+
+[tool.ruff.lint.isort]
+split-on-trailing-comma = true
+
+[tool.ruff.lint.mccabe]
+max-complexity = 20
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.pytest.ini_options]
+testpaths = ["src/agent/tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_test_loop_scope = "session"
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::UserWarning:pydantic",
+]
+markers = [
+    "happy: happy-path tests",
+    "unhappy: non-happy-path tests",
+    "slot_retry: slot retry exhaustion tests",
+    "corrections: slot correction tests",
+    "multi_slot: multi-slot extraction tests",
+    "lookup: Salesforce lookup tests",
+    "guards: guard trigger tests",
+    "ambiguous: ambiguous event tests",
+    "correction_retry: correction + retry interaction tests",
+    "post_lookup: post-lookup slot collection tests",
+    "response_check: response content checks",
+    "latency: latency benchmark tests",
+    "stress: concurrent stress tests",
+    "regression: bug regression tests",
+    "followup: follow-up agent tests",
+    "slow: tests with many parametrized LLM calls",
+]
