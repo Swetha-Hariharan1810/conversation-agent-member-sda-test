@@ -159,6 +159,21 @@ class VerificationAgent(BaseAgent):
         return any(phrase in t for phrase in MEMBER_ID_DENIAL_PHRASES)
 
     @staticmethod
+    def _pivots_to_member_id(extraction: object | None, text: str) -> bool:
+        """Caller wants their Member ID instead of the SSN.
+
+        The extraction model decides (SsnIntent.HAS_MEMBER_ID, or the shared
+        fallback_pivot field); the phrase list is only the backstop for when it
+        misses or the extraction call failed outright.
+        """
+        intent = getattr(getattr(extraction, "ssn_intent", None), "value", None)
+        if intent == "has_member_id":
+            return True
+        if (getattr(extraction, "fallback_pivot", None) or "").strip() == "member_id":
+            return True
+        return VerificationAgent._wants_member_id(text)
+
+    @staticmethod
     def _wants_member_id(text: str) -> bool:
         """Caller is pivoting back to their Member ID mid-SSN-fallback.
 
@@ -268,7 +283,7 @@ class VerificationAgent(BaseAgent):
 
         # Caller pivoted back to the Member ID — honour it instead of re-asking
         # a question they have stopped answering.
-        if intent == "has_member_id" or self._wants_member_id(last_user):
+        if self._pivots_to_member_id(extraction, last_user):
             return self._resume_member_id_collection(state, last_user)
 
         # Ambiguous — re-ask with the same hardcoded question, but only so many
@@ -320,7 +335,7 @@ class VerificationAgent(BaseAgent):
             return self.signal_escalate(state, MSG_SSN_ESCALATE, reason="no identifier available")
 
         # Caller found their Member ID after all — take it over the SSN.
-        if intent == "has_member_id" or self._wants_member_id(last_user):
+        if self._pivots_to_member_id(extraction, last_user):
             return self._resume_member_id_collection(state, last_user)
 
         # Ambiguous or failed normalization — retry with LLM 2 re-ask
@@ -490,7 +505,7 @@ class VerificationAgent(BaseAgent):
 
         # Caller says they have the Member ID but the extraction found no digits
         # — ask for it plainly rather than repeating the either/or prompt.
-        if self._wants_member_id(last_user):
+        if self._pivots_to_member_id(llm_result, last_user):
             return self._resume_member_id_collection(state, last_user)
 
         # Bounded, like every other stage — this prompt used to repeat forever.
@@ -749,6 +764,31 @@ class VerificationAgent(BaseAgent):
         # guarantees a mid-verification update request ("also I need to update
         # my last name") reaches the pipeline as update_target.
         result = reconcile_worker_result(result, last_user)
+
+        # ── Member ID denial → SSN fallback (semantic) ───────────────────────
+        # The pre-extraction gate above is a keyword fast path. This is the one
+        # that actually generalises: the extraction model judges meaning, so
+        # phrasings no list anticipates ("that's in my wallet at home") still
+        # reach the SSN offer instead of the escalation in _collect_slot.
+        # fallback_pivot == "ssn" is the caller naming the alternative outright.
+        if (
+            awaiting_slot == "member_id"
+            and not state.get("member_id")
+            and not state.get("ssn")
+            and not (result.extracted or {}).get("member_id")
+            and (
+                getattr(result, "cannot_provide", False)
+                or (getattr(result, "fallback_pivot", None) or "").strip() == "ssn"
+            )
+        ):
+            logger.info(
+                "VerificationAgent: member_id unavailable (extraction) — starting SSN fallback",
+                extra={"fallback_pivot": getattr(result, "fallback_pivot", None)},
+            )
+            ssn_offer = self.ask_member(state, MSG_SSN_ASK)
+            ssn_offer["ssn_fallback_stage"] = "ssn_ask"
+            return ssn_offer
+        # ─────────────────────────────────────────────────────────────────────
 
         corrected_fields: list[str] = []
         _was_verified = bool(state.get("member_status_verify"))

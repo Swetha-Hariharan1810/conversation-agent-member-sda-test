@@ -67,8 +67,15 @@ class WorkerResult(BaseModel):
     # Shape of the cross-call request when update_target is set (Phase 6):
     # "update" (default for bare value changes), "redo", or "replay"
     request_kind: RequestKind = RequestKind.NONE
-    # Claim fallback pivot: caller signals they want to use a different identifier
-    # (no value yet). Values: "reference_number" | "claim_number" | "dos_billed" | None
+    # Caller cannot supply the slot being collected, in any phrasing ("I do not
+    # have it", "I never received a card", "that was in my wallet"). Semantic,
+    # so it does not depend on a phrase list finishing the English language;
+    # agents use it to offer an alternative identifier instead of escalating.
+    # A value given in the same utterance always wins — never set both.
+    cannot_provide: bool = False
+    # Fallback pivot: caller signals they want to use a different identifier
+    # (no value yet). Values: "reference_number" | "claim_number" | "dos_billed"
+    # | "member_id" | "ssn" | None
     fallback_pivot: Optional[str] = None
     # Does this turn need a freeform, generated sentence (LLM 2 / Gemini)?
     # False (the default) means a plain non-answer with nothing to acknowledge:

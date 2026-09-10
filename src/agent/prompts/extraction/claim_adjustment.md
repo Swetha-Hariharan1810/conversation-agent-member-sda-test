@@ -162,6 +162,21 @@ Values: "reference_number" | "claim_number" | "dos_billed"
   "I can't find the dates or amounts, but I have my claim number."
     → fallback_pivot: "claim_number", extracted: {}
 
+### Caller cannot provide it and names NO alternative → cannot_provide
+
+When the caller says they cannot supply the identifier being collected and does
+NOT name another one, set cannot_provide: true and leave fallback_pivot null.
+Judge the meaning, not the wording:
+
+  "I don't have the reference number"        → cannot_provide: true
+  "I never got a reference number"           → cannot_provide: true
+  "that letter is at home in my wallet"      → cannot_provide: true
+  "my husband handles all of that"           → cannot_provide: true
+  "I've no idea what a claim number is"      → cannot_provide: true
+
+The system offers the next identifier itself — do not guess which one. When
+they DO name the alternative, that is a pivot: set fallback_pivot instead.
+
 ### Do NOT set fallback_pivot when the caller provides the value in the same utterance
 
   "My claim number is 882301" (awaiting: reference_number)
