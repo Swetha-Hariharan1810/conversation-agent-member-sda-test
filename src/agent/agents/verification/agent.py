@@ -39,6 +39,7 @@ from agent.agents.verification.constants import (
     MSG_SSN_EITHER,
     MSG_SSN_ESCALATE,
     MSG_SSN_INVALID,
+    MSG_SSN_NEED_FIELD,
     MSG_SSN_RETRY_EXHAUSTED,
     MSG_SSN_SUCCESS,
     NAME_CORRECTION_PROMPTS,
@@ -117,6 +118,14 @@ def _build_name_readback_message(first: str, last: str) -> str:
     """Pick a random readback template and fill in the spelled name."""
     spelled = _spell_name(first, last)
     return random.choice(NAME_READBACK_TEMPLATES).format(spelled=spelled)
+
+
+_SSN_FIELD_LABELS = {
+    "first_name": "first name",
+    "last_name": "last name",
+    "ssn": "Social Security Number",
+    "dob": "date of birth",
+}
 
 
 class VerificationAgent(BaseAgent):
@@ -414,8 +423,13 @@ class VerificationAgent(BaseAgent):
             dob_normalized = normalize_dob(dob_raw)
             if dob_normalized and validate_dob(dob_normalized).valid:
                 logger.info("VerificationAgent SSN fallback: DOB collected — proceeding to SF lookup")
-                state["dob"] = dob_normalized
-                state["ssn_fallback_stage"] = "ssn_lookup"
+                # slot_ok, not just a local dict write: ask_member persists
+                # confirmed slots into every interrupt it builds, and that is
+                # the only way this value reaches graph state. Without it the
+                # DOB lived in one call frame, and the next turn looked up an
+                # identity with an empty date.
+                self.slot_ok("dob", dob_normalized)
+                state = {**state, "dob": dob_normalized, "ssn_fallback_stage": "ssn_lookup"}
                 return await self._finish_after_ssn(state, messages, call_intent)
 
         # DOB invalid or absent — retry with LLM 2
@@ -612,21 +626,39 @@ class VerificationAgent(BaseAgent):
         )
         return self._ask_ssn_recheck(state, mismatched, slot_attempts)
 
-    _SSN_RECHECK_PROMPTS = {
+    _SSN_RECHECK_PROMPTS = {  # noqa: RUF012
         "first_name": MSG_REASK_FIRST_NAME,
         "last_name": MSG_REASK_LAST_NAME,
         "dob": MSG_REASK_DOB,
         "ssn": MSG_SSN_COLLECT,
     }
 
-    def _ask_ssn_recheck(self, state: State, fields: list[str], slot_attempts: dict) -> dict:
-        """Ask for the first field to re-check and queue the rest."""
+    def _ask_ssn_recheck(
+        self, state: State, fields: list[str], slot_attempts: dict, *, missing: bool = False
+    ) -> dict:
+        """Ask for the first field to re-check and queue the rest.
+
+        ``missing`` distinguishes "we never got this" from "this did not match":
+        telling a caller their date of birth did not match, when in fact it was
+        dropped along the way, sends them looking for a problem that is ours.
+        """
         field = fields[0]
-        # Multi-field re-asks open with the non-disclosing generic prompt: reading
-        # back several wrong details to a caller we have not verified is not
-        # something to do out loud.
-        message = pick(MSG_REASK_GENERIC) if len(fields) > 1 else pick(self._SSN_RECHECK_PROMPTS[field])
+        if missing:
+            message = pick(MSG_SSN_NEED_FIELD).format(field_label=_SSN_FIELD_LABELS[field])
+        elif len(fields) > 1:
+            # Multi-field re-asks open with the non-disclosing generic prompt:
+            # reading back several wrong details to a caller we have not
+            # verified is not something to do out loud.
+            message = pick(MSG_REASK_GENERIC)
+        else:
+            message = pick(self._SSN_RECHECK_PROMPTS[field])
         r = self.ask_member(state, message)
+        # Carry forward every identity field being kept. ask_member only
+        # persists slot-confirmed values, so anything that reached this frame
+        # in the state dict alone would silently vanish from the next turn.
+        for keep in self._SSN_IDENTITY_FIELDS:
+            if keep not in fields and str(state.get(keep) or "").strip():
+                r[keep] = state[keep]
         for stale in fields:
             r[stale] = ""
             self.get_slot(stale).reset()
@@ -663,7 +695,9 @@ class VerificationAgent(BaseAgent):
                     "VerificationAgent SSN fallback: recheck queue lost — rebuilding from state",
                     extra={"missing": missing},
                 )
-                return self._ask_ssn_recheck(state, missing, dict(state.get("slot_attempts") or {}))
+                return self._ask_ssn_recheck(
+                    state, missing, dict(state.get("slot_attempts") or {}), missing=True
+                )
             return await self._finish_after_ssn(dict(state), messages, call_intent)
 
         field = pending[0]
@@ -765,7 +799,7 @@ class VerificationAgent(BaseAgent):
                 "VerificationAgent SSN fallback: lookup skipped — identity incomplete",
                 extra={"missing": missing},
             )
-            return self._ask_ssn_recheck(state, missing, dict(state.get("slot_attempts") or {}))
+            return self._ask_ssn_recheck(state, missing, dict(state.get("slot_attempts") or {}), missing=True)
 
         ssn = state.get("ssn", "")
         dob = state.get("dob", "")

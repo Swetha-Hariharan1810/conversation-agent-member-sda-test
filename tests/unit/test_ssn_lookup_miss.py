@@ -77,8 +77,11 @@ async def test_name_mismatch_asks_only_for_the_name(agent, monkeypatch):
 
     assert _queued(result) == ["last_name"]
     assert result["last_name"] == ""
-    assert "ssn" not in result, "a correct SSN must not be cleared"
-    assert "dob" not in result, "a correct DOB must not be cleared"
+    # Kept fields are carried forward explicitly, not merely left uncleared:
+    # ask_member only persists slot-confirmed values, so a field living in the
+    # state dict alone would vanish from the next turn.
+    assert result["ssn"] == "527-41-3820", "a correct SSN must be preserved"
+    assert result["dob"] == "04/12/1988", "a correct DOB must be preserved"
     assert "social security" not in _text(result).lower()
 
 
@@ -89,8 +92,8 @@ async def test_dob_mismatch_asks_only_for_the_dob(agent, monkeypatch):
 
     assert _queued(result) == ["dob"]
     assert result["dob"] == ""
-    assert "ssn" not in result
-    assert "last_name" not in result
+    assert result["ssn"] == "527-41-3820"
+    assert result["last_name"] == "Parker"
 
 
 async def test_first_name_mismatch_asks_only_for_the_first_name(agent, monkeypatch):
