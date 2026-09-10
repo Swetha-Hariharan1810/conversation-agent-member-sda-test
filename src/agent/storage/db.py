@@ -228,7 +228,12 @@ async def _sf_query_store(
     conds: List[str] = []
     if where:
         for k, v in where.items():
-            if v is None:
+            # Empty is not a filter. An empty string used to reach SOQL as
+            # `Field = ''`, which Salesforce rejects outright on Date fields
+            # ("must be of type date and should not be enclosed in quotes") and
+            # fails the whole graph run. Callers must not rely on this to widen
+            # a query — an incomplete identity is refused upstream.
+            if v is None or (isinstance(v, str) and not v.strip()):
                 continue
             sf_field = fmap.get(k)
             if not sf_field:

@@ -638,6 +638,15 @@ class VerificationAgent(BaseAgent):
         r["slot_attempts"] = slot_attempts
         return r
 
+    # The SSN-path lookup matches on all of these; a hole in any one of them
+    # means there is nothing to look up yet.
+    _SSN_IDENTITY_FIELDS = ("first_name", "last_name", "ssn", "dob")
+
+    @classmethod
+    def _missing_ssn_identity(cls, state: State) -> list[str]:
+        """Which fields the SSN lookup still needs, in the order they are asked."""
+        return [f for f in cls._SSN_IDENTITY_FIELDS if not str(state.get(f) or "").strip()]
+
     async def _ssn_recheck_stage(self, state: State, last_user: str, messages: list) -> dict:
         """Re-collect the fields the diagnosis flagged, then run the lookup again."""
         from agent.responses.static import build_slot_exhausted_message
@@ -645,6 +654,16 @@ class VerificationAgent(BaseAgent):
         pending = [f for f in (state.get("ssn_recheck_fields") or "").split(",") if f]
         call_intent = state.get("call_intent", "")
         if not pending:
+            # The queue is gone but fields may still be cleared. Re-deriving it
+            # from state is what keeps a lost queue from reaching the store with
+            # a hole in the identity.
+            missing = self._missing_ssn_identity(state)
+            if missing:
+                logger.warning(
+                    "VerificationAgent SSN fallback: recheck queue lost — rebuilding from state",
+                    extra={"missing": missing},
+                )
+                return self._ask_ssn_recheck(state, missing, dict(state.get("slot_attempts") or {}))
             return await self._finish_after_ssn(dict(state), messages, call_intent)
 
         field = pending[0]
@@ -736,6 +755,17 @@ class VerificationAgent(BaseAgent):
     async def _finish_after_ssn(self, state: State, messages: list, call_intent: str) -> dict:
         """Lookup by SSN + DOB + names — reuses find_member_by_identity, no new tool needed."""
         from agent.storage.queries.members import find_member_by_identity
+
+        missing = self._missing_ssn_identity(state)
+        if missing:
+            # Reaching the store with a cleared field is how an empty DOB got
+            # into a SOQL date filter and took down the run. There is nothing to
+            # match on until the hole is filled, so ask for it instead.
+            logger.warning(
+                "VerificationAgent SSN fallback: lookup skipped — identity incomplete",
+                extra={"missing": missing},
+            )
+            return self._ask_ssn_recheck(state, missing, dict(state.get("slot_attempts") or {}))
 
         ssn = state.get("ssn", "")
         dob = state.get("dob", "")
