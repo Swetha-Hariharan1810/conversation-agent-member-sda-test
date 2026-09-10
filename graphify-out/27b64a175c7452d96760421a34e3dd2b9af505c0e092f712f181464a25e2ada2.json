@@ -1,0 +1,1 @@
+{"nodes": [{"id": "extraction_name_confirmation", "label": "Name Confirmation Extraction Rules", "file_type": "document", "source_file": "src/agent/prompts/extraction/name_confirmation.md", "source_location": "L1-79", "source_url": null, "captured_at": null, "author": null, "contributor": null}], "edges": [], "hyperedges": []}
