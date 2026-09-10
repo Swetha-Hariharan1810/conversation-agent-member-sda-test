@@ -215,18 +215,25 @@ def _mentions(sentence: str, terms: Sequence[str]) -> bool:
     return any(t in lowered for t in terms)
 
 
-def _foreign_slot_terms(collecting_slot: str) -> list[tuple[str, ...]]:
-    """Match terms for every known slot OTHER than the one being collected.
+def _foreign_slot_terms(
+    collecting_slot: str,
+    exempt_slots: Sequence[str] = (),
+) -> list[tuple[str, ...]]:
+    """Match terms for every known slot OTHER than the ones this turn may name.
 
-    A foreign term that overlaps the collecting slot's own wording is dropped
-    (either direction of containment): ``phone`` / ``phone_confirmed`` /
+    ``exempt_slots`` are slots the turn is legitimately allowed to mention —
+    the fields a correction acknowledgement reads back, for instance.
+
+    A foreign term that overlaps an allowed slot's wording is dropped (either
+    direction of containment): ``phone`` / ``phone_confirmed`` /
     ``phone_confirmation`` all say "phone number", and stripping the
     legitimate ask would be worse than the hallucination we guard against.
     """
-    own = tuple(t for t in _slot_match_terms(collecting_slot) if t)
+    allowed = {collecting_slot, *exempt_slots}
+    own = tuple(t for name in allowed for t in _slot_match_terms(name) if t)
     terms: list[tuple[str, ...]] = []
     for name in set(_SLOT_LABELS) | set(SLOT_ASK_SYNONYMS):
-        if name == collecting_slot:
+        if name in allowed:
             continue
         candidate = tuple(t for t in _slot_match_terms(name) if t and not any(t in o or o in t for o in own))
         if candidate:
@@ -243,6 +250,7 @@ def sanitize_generated(
     will_append_ask: bool = False,
     fallback_slot_label: str = "",
     collecting_slot: str | None = None,
+    exempt_slots: Sequence[str] = (),
 ) -> str:
     """Enforce the single-ask invariant on LLM-2 output (Bug A).
 
@@ -254,7 +262,8 @@ def sanitize_generated(
       is the cross-slot hallucination guard: on a re-ask turn the model has
       been seen to drop the slot it was told to collect and ask for the next
       one instead ("...and your Member ID?" while last_name is still missing),
-      which silently skips a required field.
+      which silently skips a required field. ``exempt_slots`` widens what the
+      turn may name — the fields a correction acknowledgement reads back.
     - When ``will_append_ask`` is True (Python appends _next_slot_ask after
       this text), sentences mentioning ``next_slot_label`` and any trailing
       question sentences are also stripped, so the appended ask is the one
@@ -267,7 +276,7 @@ def sanitize_generated(
     """
     sentences = [s for s in _SENTENCE_SPLIT_RE.split((text or "").strip()) if s.strip()]
     confirmed_terms = [_slot_match_terms(label) for label in confirmed_labels]
-    foreign_terms = _foreign_slot_terms(collecting_slot) if collecting_slot else []
+    foreign_terms = _foreign_slot_terms(collecting_slot, exempt_slots) if collecting_slot else []
 
     kept: list[str] = []
     for sentence in sentences:

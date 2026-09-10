@@ -24,6 +24,7 @@ __all__ = [
     "build_initial_prompt",
     "build_transition_prompt",
     "build_retry_prompt",
+    "has_static_retry",
 ]
 
 # ---------------------------------------------------------------------------
@@ -287,6 +288,67 @@ _RETRY_HINTED_TEMPLATES: dict[SlotType, list[str]] = {
     ],
 }
 
+# Slots that have no SlotType (yes/no confirmations, multi-option choices).
+# Keyed by slot NAME, because that is all the call site has. Without these the
+# generic template would say "could you repeat your upload method?", which is
+# not a question anyone can answer.
+_RETRY_BY_SLOT_NAME: dict[str, list[str]] = {
+    "timeline_question": [
+        "Sorry, I didn't catch that — did you have any questions about the timeline?",
+        "Just to check — any questions about the timeline, or shall I move on?",
+    ],
+    "upload_consent": [
+        "Sorry, I didn't catch that — would you like me to email you a secure upload link?",
+        "Just to confirm — should I send you that secure upload link by email?",
+    ],
+    "personal_guide_consent": [
+        "Sorry, I didn't catch that — would you like a Personal Guide to contact your "
+        "provider and request those records for you?",
+        "Just to confirm — should we have a Personal Guide reach out to your provider for those records?",
+    ],
+    "upload_method": [
+        "Sorry, I didn't catch that — would you like to upload the records yourself, "
+        "have your doctor send them, or have us contact your provider for you?",
+        "There are three ways we can get those records — you upload them, your doctor sends them, "
+        "or we contact your provider. Which works best?",
+    ],
+    "phone_confirmed": [
+        "Sorry, I didn't catch that — is that still the best number to reach you?",
+    ],
+    "phone_confirmation": [
+        "Sorry, I didn't catch that — is that still the best number to reach you?",
+    ],
+    "email_confirmed": [
+        "Sorry, I didn't catch that — is that email address correct?",
+    ],
+    "contact_confirmed": [
+        "Sorry, I didn't catch that — are those contact details still correct?",
+    ],
+    "relationship": [
+        "Sorry, I didn't catch that — are you the subscriber, or calling for a dependent?",
+    ],
+    "ssn_ask": [
+        "Sorry, I didn't catch that — do you have your Social Security Number available?",
+    ],
+    "name_correction": [
+        "Sorry, I didn't catch that — could you say the correct name for me?",
+    ],
+}
+
+# Same slots, used when the call site can supply the value under discussion —
+# a confirmation that names what it is confirming is far clearer to a caller.
+_RETRY_BY_SLOT_NAME_WITH_VALUE: dict[str, list[str]] = {
+    "phone_confirmed": [
+        "Sorry, I didn't catch that — is {value} still the best number to reach you?",
+    ],
+    "phone_confirmation": [
+        "Sorry, I didn't catch that — is {value} still the best number to reach you?",
+    ],
+    "email_confirmed": [
+        "Sorry, I didn't catch that — is {value} the right email address?",
+    ],
+}
+
 _DEFAULT_RETRY = [
     "Sorry, I didn't catch that — could you repeat your {slot_label}?",
     "Could you say your {slot_label} once more for me?",
@@ -345,8 +407,10 @@ def build_transition_prompt(
 def build_retry_prompt(
     slot_type: SlotType | None,
     *,
+    slot_name: str = "",
     attempt: int = 1,
     slot_label: str = "",
+    value: str = "",
 ) -> str:
     """Re-ask for the SAME slot after a non-answer — static, no LLM call.
 
@@ -354,19 +418,42 @@ def build_retry_prompt(
     Attempt 1 gets a gentle "didn't catch that"; attempt 2 and beyond get the
     hinted variant that names the expected shape of the value.
 
-    ``slot_label`` is the spoken label used when the slot has no SlotType (or
-    no template) — e.g. "your Member ID". It is only consulted for the generic
-    templates.
+    ``slot_name`` covers slots with no SlotType — yes/no confirmations and
+    multi-option choices, whose re-ask has to restate the question rather than
+    name a field. ``value`` lets a confirmation name what it is confirming
+    ("is 555-867-5309 still the best number...").
+
+    ``slot_label`` is the spoken label for the generic fallback templates —
+    e.g. "Member ID". Only consulted when nothing more specific matched.
     """
     label = (slot_label or (slot_type.value.replace("_", " ") if slot_type else "that")).strip()
     hinted = attempt >= 2
     pool: list[str] | None = None
+
     if slot_type is not None:
         pool = (_RETRY_HINTED_TEMPLATES if hinted else _RETRY_TEMPLATES).get(slot_type)
         if pool is None and hinted:
             # No hinted variant for this slot — the gentle pool still re-asks
             # the right slot, which matters more than the escalation in tone.
             pool = _RETRY_TEMPLATES.get(slot_type)
+    if pool is None and slot_name:
+        if value:
+            pool = _RETRY_BY_SLOT_NAME_WITH_VALUE.get(slot_name)
+        if pool is None:
+            pool = _RETRY_BY_SLOT_NAME.get(slot_name)
     if pool is None:
         pool = _DEFAULT_RETRY_HINTED if hinted else _DEFAULT_RETRY
-    return random.choice(pool).format(slot_label=label)
+    return random.choice(pool).format(slot_label=label, value=value)
+
+
+def has_static_retry(slot_type: SlotType | None, slot_name: str = "") -> bool:
+    """Is there a purpose-written re-ask for this slot?
+
+    False means build_retry_prompt would fall back to the generic
+    "could you repeat your <slot name>?", which reads badly for slots whose
+    name is not a spoken noun ("upload consent", "timeline question"). Call
+    sites use this to keep such slots on the generation-LLM path.
+    """
+    if slot_type is not None and slot_type in _RETRY_TEMPLATES:
+        return True
+    return bool(slot_name) and slot_name in _RETRY_BY_SLOT_NAME

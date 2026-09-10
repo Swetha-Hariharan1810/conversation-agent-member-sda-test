@@ -27,6 +27,7 @@ from agent.responses.builder import (
     build_initial_prompt,
     build_retry_prompt,
     build_transition_prompt,
+    has_static_retry,
 )
 from agent.responses.static import MSG_WAIT_ACK, MSG_WAIT_NUDGE, build_slot_exhausted_message
 from agent.slots.types import SlotType
@@ -170,6 +171,26 @@ class SlotManagerMixin:
     # LLM 2 retry response helper
     # -------------------------------------------------------------------------
 
+    @staticmethod
+    def _format_phone(raw: str) -> str:
+        """555-867-5309 from whatever shape the number is stored in."""
+        digits = "".join(c for c in raw if c.isdigit())
+        return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}" if len(digits) == 10 else raw
+
+    @classmethod
+    def _confirmation_value(cls, state: State, slot_name: str) -> str:
+        """The value a yes/no confirmation slot is asking the caller to confirm.
+
+        Lets a static re-ask name what it is confirming ("is 555-867-5309 still
+        the best number...") instead of an unanchored "is that still correct?".
+        Empty when the slot is not a confirmation or the value is not in state.
+        """
+        if slot_name in ("phone_confirmed", "phone_confirmation"):
+            return cls._format_phone(str(state.get("phone_number") or "").strip())
+        if slot_name == "email_confirmed":
+            return str(state.get("email") or "").strip()
+        return ""
+
     async def _generate_slot_retry_response(
         self,
         state: State,
@@ -203,18 +224,26 @@ class SlotManagerMixin:
         # with zero latency and zero chance of drifting onto another slot.
         # The extraction LLM already flagged whether this turn needs freeform
         # prose (WorkerResult.needs_freeform_response) — no extra call.
-        if Config.STATIC_RETRY_FAST_PATH and not needs_freeform_response(
-            guard=guard,
-            decision=decision,
-            followup_query=sc.get("followup_query"),
-            extracted_value=extracted_this_turn
-            if extracted_this_turn is not None
-            else sc.get("extracted_val"),
+        # has_static_retry keeps slots with no purpose-written template on the
+        # LLM path rather than reading out their field name at the caller.
+        if (
+            Config.STATIC_RETRY_FAST_PATH
+            and has_static_retry(slot_type, slot_name)
+            and not needs_freeform_response(
+                guard=guard,
+                decision=decision,
+                followup_query=sc.get("followup_query"),
+                extracted_value=extracted_this_turn
+                if extracted_this_turn is not None
+                else sc.get("extracted_val"),
+            )
         ):
             static_msg = build_retry_prompt(
                 slot_type,
+                slot_name=slot_name,
                 attempt=slot_state.attempt_count,
                 slot_label=fallback_slot_label or slot_name.replace("_", " "),
+                value=self._confirmation_value(state, slot_name),
             )
             self.logger.info(
                 "_generate_slot_retry_response: static re-ask (no generation LLM call)",
@@ -226,10 +255,7 @@ class SlotManagerMixin:
         if slot_name == "relationship" and state.get("relationship"):
             slot_label_override = "relationship — whether they are the subscriber or dependent"
         elif slot_name in ("phone_confirmed", "phone_confirmation") and state.get("phone_number"):
-            digits = "".join(c for c in state["phone_number"] if c.isdigit())
-            formatted = (
-                f"{digits[:3]}-{digits[3:6]}-{digits[6:]}" if len(digits) == 10 else state["phone_number"]
-            )
+            formatted = self._format_phone(state["phone_number"])
             slot_label_override = (
                 f"phone confirmation — whether {formatted} is still the number on file (yes or no)"
             )
@@ -336,6 +362,11 @@ class SlotManagerMixin:
             ),
             will_append_ask=False,
             fallback_slot_label=awaiting_slot.replace("_", " "),
+            # The ack ends by re-asking awaiting_slot; the corrected fields are
+            # exempt because it is told to read them back. Any OTHER slot asked
+            # for here is the cross-slot hallucination and skips a field.
+            collecting_slot=awaiting_slot,
+            exempt_slots=tuple(corrected_fields),
         )
 
     # -------------------------------------------------------------------------
