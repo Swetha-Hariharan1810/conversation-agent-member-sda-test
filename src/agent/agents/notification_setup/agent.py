@@ -56,6 +56,7 @@ from agent.slots.normalizers import (
     normalize_phone_number,
     normalize_yes_no,
 )
+from agent.slots.types import SlotType
 from agent.slots.validators import validate_email, validate_phone_number
 from agent.state import State, normalize_cross_agent_request
 from agent.utils import (
@@ -228,7 +229,7 @@ class NotificationSetupAgent(BaseAgent):
                 )
             ctx = ConversationContext.from_state(state)
             msg = await self._generate_slot_retry_response(
-                state, "timeline_question", ctx, messages, guard="RETRY"
+                state, "timeline_question", ctx, messages, guard="RETRY", decision=result
             )
             retry = self.ask_member(state, msg)
             retry["awaiting_slot"] = "timeline_question"
@@ -255,7 +256,14 @@ class NotificationSetupAgent(BaseAgent):
                     state, pick(MSG_METHOD_EXHAUST), reason="notification_method_exhausted"
                 )
             ctx = ConversationContext.from_state(state)
-            msg = await self._generate_slot_retry_response(state, "notification_method", ctx, messages)
+            msg = await self._generate_slot_retry_response(
+                state,
+                "notification_method",
+                ctx,
+                messages,
+                decision=result,
+                slot_type=SlotType.NOTIFICATION_METHOD,
+            )
             retry = self.ask_member(state, msg)
             retry["awaiting_slot"] = "notification_method"
             return retry
@@ -351,7 +359,9 @@ class NotificationSetupAgent(BaseAgent):
                     state, pick(MSG_CONTACT_EXHAUST), reason="phone_confirmed_exhausted_in_notification"
                 )
             ctx = ConversationContext.from_state(state)
-            retry_msg = await self._generate_slot_retry_response(state, "phone_confirmed", ctx, messages)
+            retry_msg = await self._generate_slot_retry_response(
+                state, "phone_confirmed", ctx, messages, decision=result
+            )
             retry_result = self.ask_member(state, retry_msg)
             retry_result["awaiting_slot"] = "phone_confirmed"
             retry_result["notification_channel"] = "sms"
@@ -381,7 +391,9 @@ class NotificationSetupAgent(BaseAgent):
                     state, pick(MSG_CONTACT_EXHAUST), reason="phone_update_exhausted_in_notification"
                 )
             ctx = ConversationContext.from_state(state)
-            msg = await self._generate_slot_retry_response(state, "phone", ctx, messages)
+            msg = await self._generate_slot_retry_response(
+                state, "phone", ctx, messages, decision=result, slot_type=SlotType.PHONE_NUMBER
+            )
             ask_result = self.ask_member(state, msg)
             ask_result["awaiting_slot"] = "phone"
             return ask_result
@@ -523,7 +535,9 @@ class NotificationSetupAgent(BaseAgent):
                     state, pick(MSG_CONTACT_EXHAUST), reason="email_update_exhausted_in_notification"
                 )
             ctx = ConversationContext.from_state(state)
-            msg = await self._generate_slot_retry_response(state, "email", ctx, messages)
+            msg = await self._generate_slot_retry_response(
+                state, "email", ctx, messages, decision=result, slot_type=SlotType.EMAIL
+            )
             ask_result = self.ask_member(state, msg)
             ask_result["awaiting_slot"] = "email"
             return ask_result
@@ -582,7 +596,14 @@ class NotificationSetupAgent(BaseAgent):
                     state, pick(MSG_METHOD_EXHAUST), reason="n2_notification_method_exhausted"
                 )
             ctx = ConversationContext.from_state(state)
-            msg = await self._generate_slot_retry_response(state, "n2_notification_method", ctx, messages)
+            msg = await self._generate_slot_retry_response(
+                state,
+                "n2_notification_method",
+                ctx,
+                messages,
+                decision=result,
+                slot_type=SlotType.NOTIFICATION_METHOD,
+            )
             retry = self.ask_member(state, msg)
             retry["awaiting_slot"] = "n2_notification_method"
             return retry

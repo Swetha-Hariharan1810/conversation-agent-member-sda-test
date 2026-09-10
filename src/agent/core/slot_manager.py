@@ -22,9 +22,12 @@ from typing import Any, Callable, Optional, Tuple
 from agent.conversation.context import ConversationContext
 from agent.core.constants import MAX_WAIT_TURNS
 from agent.core.models import SlotAttempt
+from agent.llm.config import Config
 from agent.responses.builder import (
     build_initial_prompt,
+    build_retry_prompt,
     build_transition_prompt,
+    has_static_retry,
 )
 from agent.responses.static import MSG_WAIT_ACK, MSG_WAIT_NUDGE, build_slot_exhausted_message
 from agent.slots.types import SlotType
@@ -168,6 +171,26 @@ class SlotManagerMixin:
     # LLM 2 retry response helper
     # -------------------------------------------------------------------------
 
+    @staticmethod
+    def _format_phone(raw: str) -> str:
+        """555-867-5309 from whatever shape the number is stored in."""
+        digits = "".join(c for c in raw if c.isdigit())
+        return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}" if len(digits) == 10 else raw
+
+    @classmethod
+    def _confirmation_value(cls, state: State, slot_name: str) -> str:
+        """The value a yes/no confirmation slot is asking the caller to confirm.
+
+        Lets a static re-ask name what it is confirming ("is 555-867-5309 still
+        the best number...") instead of an unanchored "is that still correct?".
+        Empty when the slot is not a confirmation or the value is not in state.
+        """
+        if slot_name in ("phone_confirmed", "phone_confirmation"):
+            return cls._format_phone(str(state.get("phone_number") or "").strip())
+        if slot_name == "email_confirmed":
+            return str(state.get("email") or "").strip()
+        return ""
+
     async def _generate_slot_retry_response(
         self,
         state: State,
@@ -181,24 +204,61 @@ class SlotManagerMixin:
         next_slot_label: str | None = None,
         will_append_ask: bool = False,
         fallback_slot_label: str | None = None,
+        decision: Any = None,
+        slot_type: Optional["SlotType"] = None,
     ) -> str:
         # Lazy import: core.slot_manager → llm.response_generator → llm.config → core (via schema);
         # importing at module level would create a core → llm → core cycle.
-        from agent.llm.response_generator import generate_recovery_message, sanitize_generated
+        from agent.llm.response_generator import (
+            generate_recovery_message,
+            needs_freeform_response,
+            sanitize_generated,
+        )
 
         slot_state = self.get_slot(slot_name)
+        sc = session_context or {}
+
+        # ── Static fast path ────────────────────────────────────────────────
+        # A plain non-answer with nothing to acknowledge does not need the
+        # generation LLM: build_retry_prompt re-asks the same slot, always,
+        # with zero latency and zero chance of drifting onto another slot.
+        # The extraction LLM already flagged whether this turn needs freeform
+        # prose (WorkerResult.needs_freeform_response) — no extra call.
+        # has_static_retry keeps slots with no purpose-written template on the
+        # LLM path rather than reading out their field name at the caller.
+        if (
+            Config.STATIC_RETRY_FAST_PATH
+            and has_static_retry(slot_type, slot_name)
+            and not needs_freeform_response(
+                guard=guard,
+                decision=decision,
+                followup_query=sc.get("followup_query"),
+                extracted_value=extracted_this_turn
+                if extracted_this_turn is not None
+                else sc.get("extracted_val"),
+            )
+        ):
+            static_msg = build_retry_prompt(
+                slot_type,
+                slot_name=slot_name,
+                attempt=slot_state.attempt_count,
+                slot_label=fallback_slot_label or slot_name.replace("_", " "),
+                value=self._confirmation_value(state, slot_name),
+            )
+            self.logger.info(
+                "_generate_slot_retry_response: static re-ask (no generation LLM call)",
+                extra={"slot": slot_name, "guard": guard, "attempt": slot_state.attempt_count},
+            )
+            return static_msg
+
         slot_label_override: str | None = None
         if slot_name == "relationship" and state.get("relationship"):
             slot_label_override = "relationship — whether they are the subscriber or dependent"
         elif slot_name in ("phone_confirmed", "phone_confirmation") and state.get("phone_number"):
-            digits = "".join(c for c in state["phone_number"] if c.isdigit())
-            formatted = (
-                f"{digits[:3]}-{digits[3:6]}-{digits[6:]}" if len(digits) == 10 else state["phone_number"]
-            )
+            formatted = self._format_phone(state["phone_number"])
             slot_label_override = (
                 f"phone confirmation — whether {formatted} is still the number on file (yes or no)"
             )
-        sc = session_context or {}
         text = await generate_recovery_message(
             slot_name=slot_name,
             attempt=slot_state.attempt_count,
@@ -230,6 +290,9 @@ class SlotManagerMixin:
             confirmed_labels=tuple(s for s in (ctx.confirmed_slots or []) if s != slot_name),
             will_append_ask=will_append_ask,
             fallback_slot_label=fallback_slot_label or slot_name.replace("_", " "),
+            # Re-ask turns must ask for slot_name and nothing else — strip any
+            # other slot the generation LLM decided to ask for instead.
+            collecting_slot=slot_name if guard in ("RETRY", "CLARIFY") else None,
         )
 
     async def _generate_correction_ack(
@@ -299,6 +362,11 @@ class SlotManagerMixin:
             ),
             will_append_ask=False,
             fallback_slot_label=awaiting_slot.replace("_", " "),
+            # The ack ends by re-asking awaiting_slot; the corrected fields are
+            # exempt because it is told to read them back. Any OTHER slot asked
+            # for here is the cross-slot hallucination and skips a field.
+            collecting_slot=awaiting_slot,
+            exempt_slots=tuple(corrected_fields),
         )
 
     # -------------------------------------------------------------------------
@@ -1214,7 +1282,9 @@ class SlotManagerMixin:
                     f"{slot_name} exhausted",
                     initiator="Agent",
                 )
-            msg = await self._generate_slot_retry_response(state, slot_name, ctx, messages)
+            msg = await self._generate_slot_retry_response(
+                state, slot_name, ctx, messages, decision=decision, slot_type=slot_type
+            )
             interrupt = self.ask_member_with_context(state, msg, ctx)
             interrupt["awaiting_slot"] = slot_name
             interrupt["wait_count"] = 0  # non-WAIT turn resets the wait streak
@@ -1488,7 +1558,9 @@ class SlotManagerMixin:
                             f"{slot_name} exhausted",
                             initiator="Agent",
                         )
-                    msg = await self._generate_slot_retry_response(state, slot_name, ctx, messages)
+                    msg = await self._generate_slot_retry_response(
+                        state, slot_name, ctx, messages, decision=decision, slot_type=slot_type
+                    )
                     interrupt = self.ask_member_with_context(state, msg, ctx)
                     interrupt["awaiting_slot"] = slot_name
                     interrupt["ambiguous_counts"] = ambiguous_counts
@@ -1516,6 +1588,8 @@ class SlotManagerMixin:
                         messages,
                         guard="CLARIFY",
                         session_context=_mk_session_ctx(followup_query=clarify_fq) if clarify_fq else None,
+                        decision=decision,
+                        slot_type=slot_type,
                     )
                 interrupt = self.ask_member_with_context(state, msg, ctx)
                 interrupt["awaiting_slot"] = slot_name
@@ -1551,7 +1625,9 @@ class SlotManagerMixin:
                     f"{slot_name} exhausted",
                     initiator="Agent",
                 )
-            msg = await self._generate_slot_retry_response(state, slot_name, ctx, messages)
+            msg = await self._generate_slot_retry_response(
+                state, slot_name, ctx, messages, decision=decision, slot_type=slot_type
+            )
             interrupt = self.ask_member_with_context(state, msg, ctx)
             interrupt["awaiting_slot"] = slot_name
             interrupt["ambiguous_counts"] = ambiguous_counts

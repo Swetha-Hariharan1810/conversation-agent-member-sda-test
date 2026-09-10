@@ -138,9 +138,32 @@ Add caller_type to extracted{} only on direct statements:
   "I am a member"                           → member
 If not explicitly stated → omit caller_type from extracted{}.
 
+## NEEDS FREEFORM RESPONSE
+`needs_freeform_response` decides whether the reply to this turn has to be
+written by a second LLM, or whether a canned re-ask of the same slot is
+enough. Default it to **false**.
+
+Set it **true** only when a canned re-ask would leave something the caller
+said unaddressed:
+  - the caller asked a question, or asked what you meant / to repeat
+  - the caller is confused, objects, or pushes back on being asked
+  - the caller corrected or wants to change something (corrections{} or
+    update_target set)
+  - the caller explained or apologised in a way that needs acknowledging
+    ("sorry, my dog was barking", "I'm driving right now")
+  - the caller gave a partial or half-right value that should be named back
+    ("I only have the last four digits")
+
+Keep it **false** for a plain non-answer with nothing to acknowledge:
+  silence, "what?", "huh", garbled speech, an unrelated mumble, a value the
+  system could not use, or a bare repeat of something already said.
+
+This field never changes what you extract or how you classify event_type —
+it only picks which response path runs. When unsure, use false.
+
 ## Return
 Return JSON only — no markdown, no explanation.
-{"extracted": {}, "event_type": "answered", "guard": null, "guard_confidence": 0.0, "followup_disposition": "none", "followup_query": null, "update_target": null, "request_kind": "none"}
+{"extracted": {}, "event_type": "answered", "guard": null, "guard_confidence": 0.0, "followup_disposition": "none", "followup_query": null, "update_target": null, "request_kind": "none", "needs_freeform_response": false}
 
 event_type: "answered" | "answered_with_followup" | "wait" | "ambiguous" | "none"
   answered  — caller directly provided a value for the slot
@@ -166,3 +189,5 @@ guard_confidence: 0.0 when no guard fires
   When a guard fires use its threshold value:
   TRANSFER_REQUEST → 0.95, ABUSE → 0.90, SELF_HARM → 0.90,
   OFFTOPIC_GLOBAL → 0.85
+needs_freeform_response: true only when a canned re-ask would leave the
+  caller unaddressed (see NEEDS FREEFORM RESPONSE); false by default

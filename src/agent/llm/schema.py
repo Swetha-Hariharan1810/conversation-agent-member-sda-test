@@ -70,6 +70,14 @@ class WorkerResult(BaseModel):
     # Claim fallback pivot: caller signals they want to use a different identifier
     # (no value yet). Values: "reference_number" | "claim_number" | "dos_billed" | None
     fallback_pivot: Optional[str] = None
+    # Does this turn need a freeform, generated sentence (LLM 2 / Gemini)?
+    # False (the default) means a plain non-answer with nothing to acknowledge:
+    # the deterministic static re-ask template is correct and cheaper, and it
+    # cannot hallucinate a different slot. Set True only when the caller said
+    # something that a canned re-ask would leave unaddressed — a side question,
+    # confusion about what was asked, a correction, an apology/explanation, or
+    # a partial value that needs to be named back.
+    needs_freeform_response: bool = False
 
 
 class FollowUpIntent(str, Enum):

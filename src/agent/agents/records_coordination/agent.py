@@ -48,6 +48,7 @@ from agent.llm.config import get_extraction_llm
 from agent.llm.extractor import remaining_slots
 from agent.logger import get_logger
 from agent.slots.normalizers import normalize_email, normalize_yes_no
+from agent.slots.types import SlotType
 from agent.slots.validators import validate_email
 from agent.state import State
 from agent.utils import (
@@ -186,6 +187,7 @@ class RecordsCoordinationAgent(BaseAgent):
                 messages,
                 guard="CLARIFY",
                 session_context=_mk_session_ctx(followup_query=followup_q) if followup_q else None,
+                decision=result,
             )
             retry = self.ask_member(state, msg)
             retry["awaiting_slot"] = "upload_method"
@@ -233,6 +235,7 @@ class RecordsCoordinationAgent(BaseAgent):
                 messages,
                 guard=_guard,
                 session_context=_mk_session_ctx(followup_query=followup_q) if followup_q else None,
+                decision=result,
             )
             retry = self.ask_member(state, msg)
             retry["awaiting_slot"] = "upload_consent"
@@ -386,7 +389,9 @@ class RecordsCoordinationAgent(BaseAgent):
                     reason="email_exhausted_in_records",
                 )
             ctx = ConversationContext.from_state(state)
-            msg = await self._generate_slot_retry_response(state, "email", ctx, messages)
+            msg = await self._generate_slot_retry_response(
+                state, "email", ctx, messages, decision=result, slot_type=SlotType.EMAIL
+            )
             ask_result = self.ask_member(state, msg)
             ask_result["awaiting_slot"] = "email"
             return ask_result
@@ -443,6 +448,7 @@ class RecordsCoordinationAgent(BaseAgent):
                 messages,
                 guard=_guard,
                 session_context=_mk_session_ctx(followup_query=followup_q) if followup_q else None,
+                decision=result,
             )
             retry = self.ask_member(state, msg)
             retry["awaiting_slot"] = "personal_guide_consent"

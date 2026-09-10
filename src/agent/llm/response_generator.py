@@ -117,6 +117,58 @@ _POST_CAPTURE_GUARDS = ("FOLLOWUP_ANSWER", "FOLLOWUP_RESPOND", "FOLLOWUP_PARK", 
 _COLLECTING_NOTHING = "(nothing — this turn's value was captured; do not ask for or re-confirm any slot)"
 
 
+# ── Static fast path (no LLM 2 call) ─────────────────────────────────────────
+# RETRY and CLARIFY are the only guards whose whole job is "ask the same slot
+# again". On those turns there is nothing for the generation LLM to add — and
+# a great deal for it to get wrong, since a hallucinated ask lands on a
+# different slot and the caller answers the wrong question. Every other guard
+# has real content to convey (an answer, an acknowledgement, a redirect) and
+# always goes to the LLM.
+_STATIC_ELIGIBLE_GUARDS = frozenset({"RETRY", "CLARIFY"})
+
+
+def needs_freeform_response(
+    *,
+    guard: str,
+    decision: object | None = None,
+    followup_query: str | None = None,
+    extracted_value: str | None = None,
+) -> bool:
+    """Does this turn need a generated sentence, or will a static re-ask do?
+
+    True  → call LLM 2 (Gemini).
+    False → the caller gave a plain non-answer with nothing to acknowledge;
+            ``build_retry_prompt`` says the same thing deterministically.
+
+    The decision is driven by ``WorkerResult.needs_freeform_response``, set by
+    the extraction LLM that already read the utterance — no extra call. It is
+    overridden to True whenever there is content the static template cannot
+    carry (a side question, a value to name back), and defaults to True when
+    no extraction result was passed, so un-wired call sites keep the old
+    always-generate behaviour.
+    """
+    if guard not in _STATIC_ELIGIBLE_GUARDS:
+        return True
+    if followup_query:
+        return True
+    if extracted_value:
+        return True
+    if decision is None:
+        return True
+    # Safety net: content the caller supplied that a canned re-ask cannot
+    # carry always wins over the model's flag, however it was set.
+    if any(v for v in (getattr(decision, "corrections", None) or {}).values()):
+        return True
+    if (getattr(decision, "update_target", None) or "").strip():
+        return True
+    if (getattr(decision, "followup_query", None) or "").strip():
+        return True
+    flag = getattr(decision, "needs_freeform_response", None)
+    if flag is None:
+        return True
+    return bool(flag)
+
+
 def _tone_hint(attempt: int) -> str:
     """Coarse Python-derived tone label — raw attempt counts never reach LLM 2."""
     if attempt == 0:
@@ -163,6 +215,32 @@ def _mentions(sentence: str, terms: Sequence[str]) -> bool:
     return any(t in lowered for t in terms)
 
 
+def _foreign_slot_terms(
+    collecting_slot: str,
+    exempt_slots: Sequence[str] = (),
+) -> list[tuple[str, ...]]:
+    """Match terms for every known slot OTHER than the ones this turn may name.
+
+    ``exempt_slots`` are slots the turn is legitimately allowed to mention —
+    the fields a correction acknowledgement reads back, for instance.
+
+    A foreign term that overlaps an allowed slot's wording is dropped (either
+    direction of containment): ``phone`` / ``phone_confirmed`` /
+    ``phone_confirmation`` all say "phone number", and stripping the
+    legitimate ask would be worse than the hallucination we guard against.
+    """
+    allowed = {collecting_slot, *exempt_slots}
+    own = tuple(t for name in allowed for t in _slot_match_terms(name) if t)
+    terms: list[tuple[str, ...]] = []
+    for name in set(_SLOT_LABELS) | set(SLOT_ASK_SYNONYMS):
+        if name in allowed:
+            continue
+        candidate = tuple(t for t in _slot_match_terms(name) if t and not any(t in o or o in t for o in own))
+        if candidate:
+            terms.append(candidate)
+    return terms
+
+
 def sanitize_generated(
     text: str,
     *,
@@ -171,12 +249,21 @@ def sanitize_generated(
     confirmed_labels: Sequence[str] = (),
     will_append_ask: bool = False,
     fallback_slot_label: str = "",
+    collecting_slot: str | None = None,
+    exempt_slots: Sequence[str] = (),
 ) -> str:
     """Enforce the single-ask invariant on LLM-2 output (Bug A).
 
     - Any sentence that asks for (contains "?" and fuzzy-matches) a slot in
       ``confirmed_labels`` is stripped — the model must never re-ask a
       confirmed slot.
+    - When ``collecting_slot`` is given, any sentence that asks for a *different*
+      known slot is stripped too, whether or not that slot was confirmed. This
+      is the cross-slot hallucination guard: on a re-ask turn the model has
+      been seen to drop the slot it was told to collect and ask for the next
+      one instead ("...and your Member ID?" while last_name is still missing),
+      which silently skips a required field. ``exempt_slots`` widens what the
+      turn may name — the fields a correction acknowledgement reads back.
     - When ``will_append_ask`` is True (Python appends _next_slot_ask after
       this text), sentences mentioning ``next_slot_label`` and any trailing
       question sentences are also stripped, so the appended ask is the one
@@ -189,11 +276,20 @@ def sanitize_generated(
     """
     sentences = [s for s in _SENTENCE_SPLIT_RE.split((text or "").strip()) if s.strip()]
     confirmed_terms = [_slot_match_terms(label) for label in confirmed_labels]
+    foreign_terms = _foreign_slot_terms(collecting_slot, exempt_slots) if collecting_slot else []
 
     kept: list[str] = []
     for sentence in sentences:
         if "?" in sentence and any(_mentions(sentence, terms) for terms in confirmed_terms):
             logger.info("sanitize_generated: stripped confirmed-slot re-ask [guard=%s]: %r", guard, sentence)
+            continue
+        if "?" in sentence and any(_mentions(sentence, terms) for terms in foreign_terms):
+            logger.warning(
+                "sanitize_generated: stripped foreign-slot ask [guard=%s collecting=%s]: %r",
+                guard,
+                collecting_slot,
+                sentence,
+            )
             continue
         # FOLLOWUP_DECLINE post-capture: also strip statement-form slot
         # back-references that don't use "?". Pattern: "... but I can get

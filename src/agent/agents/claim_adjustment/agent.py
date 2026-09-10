@@ -57,6 +57,7 @@ from agent.slots.normalizers import (
     normalize_date_of_service,
     normalize_reference_number,
 )
+from agent.slots.types import SlotType
 from agent.slots.validators import (
     validate_billed_amount,
     validate_claim_number,
@@ -325,6 +326,8 @@ class ClaimAdjustmentAgent(BaseAgent):
                         messages,
                         extracted_this_turn=normalized if normalized else extracted_raw,
                         guard="RETRY",
+                        decision=result,
+                        slot_type=SlotType.REFERENCE_NUMBER,
                     )
                     retry = self.ask_member(state, msg)
                     retry["awaiting_slot"] = "reference_number"
