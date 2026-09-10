@@ -112,6 +112,10 @@ class SsnIntent(str, Enum):
     YES = "yes"
     NO = "no"
     NO_SSN_AVAILABLE = "no_ssn_available"
+    # Caller changed their mind and wants to use their Member ID after all
+    # ("actually I found it", "I have the member id now, can you use that").
+    # Without this the flow has no way back and re-asks for the SSN forever.
+    HAS_MEMBER_ID = "has_member_id"
     AMBIGUOUS = "ambiguous"
 
 

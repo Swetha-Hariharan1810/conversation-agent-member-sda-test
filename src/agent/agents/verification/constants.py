@@ -175,26 +175,76 @@ MSG_SSN_ESCALATE = (
 
 MSG_SSN_SUCCESS = "Thank you, I found your account. Are you the subscriber or dependent?"
 
+# Caller pivoted back to the Member ID part-way through the SSN fallback.
+MSG_SSN_BACK_TO_MID = [
+    "Of course — go ahead with your Member ID whenever you're ready.",
+    "Even better — could I get that Member ID?",
+    "Perfect, let's use that instead. What's your Member ID?",
+]
+
+# The SSN yes/no gate could not be resolved after several tries.
+MSG_SSN_ASK_EXHAUSTED = (
+    "I'm having trouble confirming whether you have your SSN available. "
+    "Let me connect you with a representative who can help."
+)
+
 MAX_SSN_ATTEMPTS = 3
 
-# Member ID denial phrases (deterministic detection)
+# Member ID denial phrases (deterministic detection).
+# This list is a fast path only — the gate also runs detect_cannot_provide(),
+# which covers phrasings no substring list will ever finish enumerating.
 MEMBER_ID_DENIAL_PHRASES = (
     "don't have",
     "dont have",
+    "do not have",
+    "does not have",
+    "doesn't have",
     "i don't have it",
     "i dont have it",
     "don't know",
     "dont know",
+    "do not know",
     "i don't know",
     "cant find",
     "can't find",
+    "cannot find",
     "i can't find",
     "no member id",
     "don't have my member",
     "dont have my member",
+    "haven't got",
+    "havent got",
+    "never received",
+    "never got",
     "not sure",
     "have no idea",
+    "no idea",
     "lost it",
+    "lost my card",
+)
+
+# Caller pivots back to the Member ID mid-SSN-fallback ("actually I found it").
+# Deterministic backstop for SsnIntent.HAS_MEMBER_ID so the pivot is honoured
+# even when the extraction model misses it.
+MEMBER_ID_PIVOT_PHRASES = (
+    "i have the member id",
+    "i have my member id",
+    "i have the memberid",
+    "i have my memberid",
+    "have the member id now",
+    "have my member id now",
+    "got the member id",
+    "got my member id",
+    "found the member id",
+    "found my member id",
+    "found it",
+    "i found",
+    "use the member id",
+    "use my member id",
+    "use that instead",
+    "member id instead",
+    "here's my member id",
+    "heres my member id",
 )
 
 # Phrases indicating the user definitely has no SSN to provide (escalate)
