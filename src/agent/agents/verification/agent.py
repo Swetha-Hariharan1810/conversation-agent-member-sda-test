@@ -27,6 +27,10 @@ from agent.agents.verification.constants import (
     MEMBER_ID_DENIAL_PHRASES,
     MEMBER_ID_PIVOT_PHRASES,
     MSG_NAME_CONFIRM_EXHAUST,
+    MSG_REASK_DOB,
+    MSG_REASK_FIRST_NAME,
+    MSG_REASK_GENERIC,
+    MSG_REASK_LAST_NAME,
     MSG_SSN_ASK,
     MSG_SSN_ASK_EXHAUSTED,
     MSG_SSN_BACK_TO_MID,
@@ -238,6 +242,8 @@ class VerificationAgent(BaseAgent):
             return await self._ssn_dob_collecting_stage(state, last_user, messages)
         if stage == "ssn_or_mid_retry":
             return await self._ssn_or_mid_retry_stage(state, last_user, messages)
+        if stage == "ssn_recheck":
+            return await self._ssn_recheck_stage(state, last_user, messages)
 
         # Unknown stage — escalate defensively
         return self.signal_escalate(state, MSG_SSN_ESCALATE, reason="SSN fallback unknown stage")
@@ -535,6 +541,198 @@ class VerificationAgent(BaseAgent):
         result["ssn_fallback_stage"] = "ssn_dob_collecting"
         return result
 
+    @staticmethod
+    def _identity_fingerprint(state: State) -> str:
+        """The exact tuple the SSN-path lookup matches on."""
+        return "|".join(
+            str(state.get(k) or "").strip().lower() for k in ("first_name", "last_name", "dob", "ssn")
+        )
+
+    async def _handle_ssn_lookup_miss(self, state: State, messages: list) -> dict:
+        """Diagnose which field actually missed, then re-ask only that field.
+
+        Mirrors lookup_and_verify on the Member ID path. That one asks the store
+        whether the Member ID exists: if it does not, everything is re-asked; if
+        it does, compare_identity_fields names the fields that differ and only
+        those are re-collected. The SSN path now does the same with the SSN as
+        the key, instead of blaming a field it had not checked.
+
+          SSN not on file        → the SSN is wrong; name, SSN and DOB all go
+          SSN found, name differs → re-ask that name field only
+          SSN found, DOB differs  → re-ask the DOB only
+        """
+        from agent.storage.queries.members import compare_identity_fields, find_member_by_ssn
+
+        slot_attempts = dict(state.get("slot_attempts") or {})
+        entry = slot_attempts.get("ssn_lookup") or {}
+        rounds = (entry.get("attempt_count", 0) if isinstance(entry, dict) else 0) + 1
+        slot_attempts["ssn_lookup"] = {"attempt_count": rounds}
+
+        if rounds > MAX_SSN_ATTEMPTS:
+            logger.warning("VerificationAgent SSN fallback: lookup still missing after re-checks")
+            escalation = self.signal_escalate(
+                state,
+                "I wasn't able to match your details to an account. "
+                "Let me connect you with a representative who can assist.",
+                reason="SSN+DOB lookup failed after max attempts",
+            )
+            escalation["slot_attempts"] = slot_attempts
+            return escalation
+
+        ssn_record = None
+        try:
+            ssn_record = await find_member_by_ssn(ssn=state.get("ssn", ""))
+        except Exception:
+            logger.exception("VerificationAgent SSN fallback: SSN lookup raised — re-asking everything")
+
+        if not ssn_record:
+            # No account holds this SSN, so it is the SSN that is wrong. Nothing
+            # else can be trusted either — the name and DOB were only ever
+            # checked together with it.
+            logger.info("VerificationAgent SSN fallback: SSN not on file — re-asking name, SSN and DOB")
+            return self._ask_ssn_recheck(state, ["first_name", "last_name", "ssn", "dob"], slot_attempts)
+
+        field_matches = compare_identity_fields(
+            ssn_record,
+            first_name=state.get("first_name", ""),
+            last_name=state.get("last_name", ""),
+            dob=state.get("dob", ""),
+        )
+        mismatched = [f for f in ("first_name", "last_name", "dob") if field_matches.get(f) is False]
+
+        if not mismatched:
+            # The SSN is on file and every field agrees, yet the combined query
+            # missed. Nothing is safe to single out — re-ask the lot.
+            logger.warning("VerificationAgent SSN fallback: no field mismatch found — re-asking everything")
+            return self._ask_ssn_recheck(state, ["first_name", "last_name", "ssn", "dob"], slot_attempts)
+
+        logger.info(
+            "VerificationAgent SSN fallback: targeted re-ask of mismatched fields",
+            extra={"mismatched": mismatched},
+        )
+        return self._ask_ssn_recheck(state, mismatched, slot_attempts)
+
+    _SSN_RECHECK_PROMPTS = {
+        "first_name": MSG_REASK_FIRST_NAME,
+        "last_name": MSG_REASK_LAST_NAME,
+        "dob": MSG_REASK_DOB,
+        "ssn": MSG_SSN_COLLECT,
+    }
+
+    def _ask_ssn_recheck(self, state: State, fields: list[str], slot_attempts: dict) -> dict:
+        """Ask for the first field to re-check and queue the rest."""
+        field = fields[0]
+        # Multi-field re-asks open with the non-disclosing generic prompt: reading
+        # back several wrong details to a caller we have not verified is not
+        # something to do out loud.
+        message = pick(MSG_REASK_GENERIC) if len(fields) > 1 else pick(self._SSN_RECHECK_PROMPTS[field])
+        r = self.ask_member(state, message)
+        for stale in fields:
+            r[stale] = ""
+            self.get_slot(stale).reset()
+        if "first_name" in fields or "last_name" in fields:
+            r["name_confirmed"] = False
+            r["name_confirm_attempts"] = 0
+        r["ssn_recheck_fields"] = ",".join(fields)
+        r["ssn_fallback_stage"] = "ssn_recheck"
+        r["slot_attempts"] = slot_attempts
+        return r
+
+    async def _ssn_recheck_stage(self, state: State, last_user: str, messages: list) -> dict:
+        """Re-collect the fields the diagnosis flagged, then run the lookup again."""
+        from agent.responses.static import build_slot_exhausted_message
+
+        pending = [f for f in (state.get("ssn_recheck_fields") or "").split(",") if f]
+        call_intent = state.get("call_intent", "")
+        if not pending:
+            return await self._finish_after_ssn(dict(state), messages, call_intent)
+
+        field = pending[0]
+        value = await self._extract_recheck_value(field, state, last_user, messages)
+
+        if not value:
+            slot_attempts = dict(state.get("slot_attempts") or {})
+            entry = slot_attempts.get(f"recheck_{field}") or {}
+            count = (entry.get("attempt_count", 0) if isinstance(entry, dict) else 0) + 1
+            slot_attempts[f"recheck_{field}"] = {"attempt_count": count}
+            if count >= MAX_SSN_ATTEMPTS:
+                escalation = self.signal_escalate(
+                    state,
+                    build_slot_exhausted_message(field),
+                    reason=f"ssn_recheck_{field}_exhausted",
+                )
+                escalation["slot_attempts"] = slot_attempts
+                return escalation
+            retry = self.ask_member(state, pick(self._SSN_RECHECK_PROMPTS[field]))
+            retry["ssn_fallback_stage"] = "ssn_recheck"
+            retry["ssn_recheck_fields"] = ",".join(pending)
+            retry["slot_attempts"] = slot_attempts
+            return retry
+
+        updated = {**state, field: value}
+        self.slot_ok(field, value)
+        remaining = pending[1:]
+
+        if remaining:
+            nxt = self.ask_member(updated, pick(self._SSN_RECHECK_PROMPTS[remaining[0]]))
+            nxt[field] = value
+            nxt["ssn_recheck_fields"] = ",".join(remaining)
+            nxt["ssn_fallback_stage"] = "ssn_recheck"
+            return nxt
+
+        logger.info("VerificationAgent SSN fallback: re-checked fields collected — retrying lookup")
+        updated["ssn_recheck_fields"] = ""
+        updated["ssn_fallback_stage"] = "ssn_lookup"
+        return await self._finish_after_ssn(updated, messages, call_intent)
+
+    async def _extract_recheck_value(self, field: str, state: State, last_user: str, messages: list) -> str:
+        """Extract and validate one re-checked field. Returns "" when unusable."""
+        from agent.llm.config import get_extraction_llm
+        from agent.slots.normalizers import normalize_dob
+        from agent.slots.validators import validate_dob
+
+        if field == "ssn":
+            inline = self._extract_ssn_from_text(last_user)
+            if inline:
+                return inline
+            extraction = await extract_ssn_decision(
+                get_extraction_llm(),
+                stage="ssn_collecting",
+                last_agent_message=_last_assistant_msg(messages),
+                last_user_message=last_user,
+                recent_messages=messages[-4:],
+            )
+            raw = (getattr(extraction, "ssn", None) or "").strip()
+            normalized = normalize_ssn(raw) if raw else ""
+            return normalized if normalized and validate_ssn(normalized).valid else ""
+
+        call_intent = state.get("call_intent", "")
+        system_prompt = build_extraction_prompt(
+            "extraction/verification_claims.md"
+            if call_intent == "claim_services"
+            else "extraction/verification_provider.md"
+        )
+        extraction = await extract_verification_decision(
+            get_extraction_llm(),
+            system_prompt,
+            awaiting_slot=field,
+            last_agent_message=_last_assistant_msg(messages),
+            last_user_message=last_user,
+            confirmed_slots={},
+            pending_slots=[field],
+            attempt=0,
+            recent_messages=messages[-4:],
+        )
+        values = {**(extraction.extracted or {}), **(extraction.corrections or {})} if extraction else {}
+        raw = (values.get(field) or "").strip()
+        if not raw:
+            return ""
+        if field == "dob":
+            normalized = normalize_dob(raw)
+            return normalized if normalized and validate_dob(normalized).valid else ""
+        normalized = normalize_name(raw)
+        return normalized if normalized and validate_name(normalized).valid else ""
+
     async def _finish_after_ssn(self, state: State, messages: list, call_intent: str) -> dict:
         """Lookup by SSN + DOB + names — reuses find_member_by_identity, no new tool needed."""
         from agent.storage.queries.members import find_member_by_identity
@@ -553,28 +751,7 @@ class VerificationAgent(BaseAgent):
         )
 
         if not record:
-            slot_attempts = dict(state.get("slot_attempts") or {})
-            entry = slot_attempts.get("ssn_lookup") or {}
-            count = (entry.get("attempt_count", 0) if isinstance(entry, dict) else 0) + 1
-            slot_attempts["ssn_lookup"] = {"attempt_count": count}
-
-            if count >= 2:
-                return self.signal_escalate(
-                    state,
-                    "I wasn't able to match your details to an account. "
-                    "Let me connect you with a representative who can assist.",
-                    reason="SSN+DOB lookup failed after max attempts",
-                )
-
-            r = self.ask_member(
-                state,
-                "I wasn't able to find an account with those details. Could you double-check your SSN?",
-            )
-            r["ssn"] = ""
-            r["dob"] = ""
-            r["ssn_fallback_stage"] = "ssn_collecting"
-            r["slot_attempts"] = slot_attempts
-            return r
+            return await self._handle_ssn_lookup_miss(state, messages)
 
         # Success — populate state from SF record.
         # Prefer values already in state (normalizer-formatted) over the SF record's

@@ -66,6 +66,10 @@ class State(TypedDict):
     member_status_verify: bool
     reverify_bridge_pending: bool  # one-shot: deliver first-name bridge on next verification entry
     ssn_fallback_stage: str  # "" | "ssn_ask" | "ssn_collecting" | "ssn_or_mid_retry"
+    # | "ssn_dob_collecting" | "ssn_name_recheck" | "ssn_lookup"
+    # Fields the SSN-path lookup diagnosis flagged as mismatched, comma-joined,
+    # re-collected in order before the lookup is retried.
+    ssn_recheck_fields: str
 
     # ── Name confirmation (new) ──────────────────────────────────────────────────
     name_confirmed: bool
