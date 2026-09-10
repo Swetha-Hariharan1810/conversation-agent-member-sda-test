@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent.core.slot_ownership import SLOT_OWNERSHIP
+from agent.utils import detect_cannot_provide
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +253,35 @@ def _coerce_like(sample: Any, value: str) -> Any:
     return value
 
 
+def _reconcile_cannot_provide(result: Any, last_user: str | None) -> Any:
+    """Regex backstop for the LLM's cannot_provide flag.
+
+    The model is the primary source — it reads phrasings no pattern list will
+    ever cover. This only fills in a miss, and never clears a True the model
+    set, so an extraction failure (which returns an empty WorkerResult) still
+    routes a "I don't have it" to the fallback offer rather than an escalation.
+    A pivot outranks a denial: when the caller named the identifier they do
+    have, leave the flag alone so the pivot path runs.
+    """
+    if getattr(result, "cannot_provide", False):
+        return result
+    if (getattr(result, "fallback_pivot", None) or "").strip():
+        return result
+    if any(v for v in (getattr(result, "extracted", None) or {}).values()):
+        return result  # they answered — a denial clause is context, not a denial
+    if not detect_cannot_provide(last_user):
+        return result
+    try:
+        result.cannot_provide = True
+    except (AttributeError, ValueError):  # non-WorkerResult shim in tests
+        return result
+    logger.info(
+        "request_detection: regex_fallback set cannot_provide",
+        extra={"source": "regex_fallback", "field": "cannot_provide", "final_value": "True"},
+    )
+    return result
+
+
 def reconcile_worker_result(result: Any, last_user: str | None) -> Any:
     """Fallback + veto pass over an extraction result (WorkerResult-shaped).
 
@@ -267,8 +297,14 @@ def reconcile_worker_result(result: Any, last_user: str | None) -> Any:
       no extracted values, no corrections) → upgrade to CORRECTED: the
       extraction contract classifies bare cross-call requests as corrected,
       and only the CORRECTED path (C2) can honor a target with no value.
+    - detect_cannot_provide fires but the LLM left cannot_provide false →
+      set it. The flag is semantic and the model is the primary source; this
+      is the backstop for a missed call or an extraction that threw, so a
+      caller who cannot supply a slot still reaches the fallback offer.
     - Neither detects → result returned untouched.
     """
+    result = _reconcile_cannot_provide(result, last_user)
+
     detected = detect_request(last_user)
     if detected is None:
         return result

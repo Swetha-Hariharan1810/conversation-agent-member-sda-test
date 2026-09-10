@@ -304,6 +304,21 @@ class ClaimAdjustmentAgent(BaseAgent):
                 extracted_raw = (result.extracted or {}).get("reference_number", "") if result else ""
                 normalized = normalize_reference_number(extracted_raw) if extracted_raw else ""
 
+                # Semantic denial with no pivot and no value — offer the next
+                # identifier rather than re-asking a question the caller has
+                # already said they cannot answer. The pre-LLM check above is a
+                # keyword fast path; this one covers the phrasings it misses
+                # ("that's in my wallet at home", "my husband handles that").
+                if not extracted_raw and getattr(result, "cannot_provide", False):
+                    logger.info(
+                        "claim_adjustment_agent: reference_number unavailable (extraction) "
+                        "— starting claim_number fallback"
+                    )
+                    _r = self.ask_member(state, pick(MSG_REF_FALLBACK_CLAIM_NUMBER_ASK))
+                    _r["ref_no_fallback_stage"] = "claim_number_ask"
+                    _r["awaiting_slot"] = "fallback_claim_number"
+                    return _r
+
                 if normalized and validate_reference_number(normalized).valid:
                     reference_number = normalized
                     self.slot_ok("reference_number", reference_number)
@@ -592,7 +607,9 @@ class ClaimAdjustmentAgent(BaseAgent):
         # LLM found no pivot and no claim number. Now safe to apply cannot-provide:
         # multi-clause denials ("I don't have it") route to DOS/billed only after the
         # LLM confirmed there is no qualifying pivot hint in the same utterance.
-        if detect_cannot_provide(last_user):
+        # The flag is a superset of the regex — reconcile_worker_result fills it
+        # in from detect_cannot_provide when the model misses the denial.
+        if getattr(extraction, "cannot_provide", False):
             logger.info("claim_adjustment_agent: cannot-provide (post-LLM) → dos_billed fallback")
             result = self.ask_member(state, pick(MSG_REF_FALLBACK_DOS_BILLED_ASK))
             result["ref_no_fallback_stage"] = "dos_billed_ask"

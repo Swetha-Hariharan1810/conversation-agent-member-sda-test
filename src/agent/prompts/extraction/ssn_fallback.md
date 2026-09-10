@@ -48,6 +48,18 @@ Classify the caller's reply as ONE of:
       "I don't have either", "I don't have any of those"
     → ssn stays empty
 
+  ssn_intent = "has_member_id"
+    Caller changed their mind and now wants to use their Member ID instead.
+    They are NOT answering the SSN question — they are redirecting.
+    Examples:
+      "actually I found my member ID"
+      "I think I have the member id now"
+      "now I have the member id, can you use that"
+      "wait, I found it — can we use that instead?"
+      "hold on, my card was in my bag — here's the member ID"
+    → ssn stays empty. If they also said the Member ID digits, still use
+      has_member_id; the system re-collects the Member ID itself.
+
   ssn_intent = "ambiguous"
     Caller's intent is genuinely unclear (e.g. "um", "hold on", "maybe").
     → ssn stays empty
@@ -56,6 +68,9 @@ IMPORTANT DISTINCTIONS:
   "no" (bare) → ssn_intent = "no"          (soft; do NOT escalate)
   "I don't have it" → ssn_intent = "no_ssn_available"   (hard; escalate)
   "I don't have my SSN" → ssn_intent = "no_ssn_available"
+  "I have my member ID now" → ssn_intent = "has_member_id"  (pivot, NOT yes)
+  Anything mentioning the MEMBER ID as something they now have is a pivot —
+  never "yes" (which means they have their SSN) and never "ambiguous".
 
 ---
 
@@ -71,8 +86,15 @@ The agent just asked "Please provide your SSN."
     Examples: "I don't have it", "never mind", "I can't"
     → ssn stays empty
 
+  ssn_intent = "has_member_id"
+    Caller redirects to their Member ID instead of giving an SSN.
+    Examples: "actually I found my member ID", "can you just use my member id",
+              "wait, I have the member id now"
+    → ssn stays empty
+
   ssn_intent = "ambiguous"
-    Caller gave something that is not digits and not a clear refusal.
+    Caller gave something that is not digits, not a redirect, and not a
+    clear refusal.
 
 ---
 

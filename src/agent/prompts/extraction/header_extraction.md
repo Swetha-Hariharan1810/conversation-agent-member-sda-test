@@ -161,9 +161,50 @@ Keep it **false** for a plain non-answer with nothing to acknowledge:
 This field never changes what you extract or how you classify event_type —
 it only picks which response path runs. When unsure, use false.
 
+## CANNOT PROVIDE — caller does not have the value being asked for
+
+Set cannot_provide: true when the caller is telling you they cannot supply the
+slot currently being collected. Judge the MEANING, not the wording — there is
+no fixed list of phrasings:
+
+  "I don't have it"            "I do not have a member ID"
+  "I never received a card"    "that's in my wallet at home"
+  "I lost the letter"          "I've no idea what that is"
+  "can't find it anywhere"     "I don't think I ever got one"
+  "my husband handles that"    "it's not something I have on me"
+
+Keep cannot_provide: false when the caller:
+  - gives the value, even partially or hesitantly → extract it
+  - asks for time ("hold on, let me look") → event_type "wait"
+  - simply did not answer, or was unintelligible → event_type "ambiguous"
+  - does not have it but names another identifier they DO have
+    → that is a pivot: set fallback_pivot instead (see below)
+
+cannot_provide is about THIS slot only. "I don't have my card but my member ID
+is M451982" is an answer, not a denial — extract the value.
+
+## FALLBACK PIVOT — caller offers a different identifier instead
+
+Set fallback_pivot to the identifier the caller wants to switch to when they
+signal the switch WITHOUT yet giving the value. Only set the field — leave
+extracted empty. If they provide the value in the same utterance, extract it
+normally and leave fallback_pivot null.
+
+Values: "reference_number" | "claim_number" | "dos_billed" | "member_id" | "ssn"
+
+  "I don't have the member ID, can I use my social?"  → "ssn"
+  "actually I found my member ID"                     → "member_id"
+  "I think I have the member id now"                  → "member_id"
+  "can you just use my member id instead"             → "member_id"
+  "no member ID, but I have the reference number"     → "reference_number"
+  "I can't find the claim number, I have the date and amount"  → "dos_billed"
+
+A pivot outranks a denial: when the caller says what they DO have, set
+fallback_pivot and leave cannot_provide false.
+
 ## Return
 Return JSON only — no markdown, no explanation.
-{"extracted": {}, "event_type": "answered", "guard": null, "guard_confidence": 0.0, "followup_disposition": "none", "followup_query": null, "update_target": null, "request_kind": "none", "needs_freeform_response": false}
+{"extracted": {}, "event_type": "answered", "guard": null, "guard_confidence": 0.0, "followup_disposition": "none", "followup_query": null, "update_target": null, "request_kind": "none", "needs_freeform_response": false, "cannot_provide": false, "fallback_pivot": null}
 
 event_type: "answered" | "answered_with_followup" | "wait" | "ambiguous" | "none"
   answered  — caller directly provided a value for the slot
@@ -191,3 +232,5 @@ guard_confidence: 0.0 when no guard fires
   OFFTOPIC_GLOBAL → 0.85
 needs_freeform_response: true only when a canned re-ask would leave the
   caller unaddressed (see NEEDS FREEFORM RESPONSE); false by default
+`cannot_provide` — true when the caller cannot supply the slot being collected (see CANNOT PROVIDE); false by default
+`fallback_pivot` — the identifier the caller wants to switch to instead, or null (see FALLBACK PIVOT)

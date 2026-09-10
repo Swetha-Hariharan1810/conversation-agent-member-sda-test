@@ -25,8 +25,11 @@ from agent.agents.verification.constants import (
     MAX_NAME_CONFIRM_ATTEMPTS,
     MAX_SSN_ATTEMPTS,
     MEMBER_ID_DENIAL_PHRASES,
+    MEMBER_ID_PIVOT_PHRASES,
     MSG_NAME_CONFIRM_EXHAUST,
     MSG_SSN_ASK,
+    MSG_SSN_ASK_EXHAUSTED,
+    MSG_SSN_BACK_TO_MID,
     MSG_SSN_COLLECT,
     MSG_SSN_DOB,
     MSG_SSN_EITHER,
@@ -64,14 +67,15 @@ from agent.core.request_detection import reconcile_worker_result
 from agent.llm.config import get_extraction_llm
 from agent.logger import get_logger
 from agent.orchestration.orchestration import AgentNode
-from agent.slots.normalizers import normalize_name, normalize_ssn
-from agent.slots.validators import validate_name, validate_ssn
+from agent.slots.normalizers import normalize_member_id, normalize_name, normalize_ssn
+from agent.slots.validators import validate_member_id, validate_name, validate_ssn
 from agent.state import State
 from agent.utils import (
     _last_assistant_msg,
     _last_user_msg,
     build_extraction_prompt,
     build_extraction_prompt_extraction,
+    detect_cannot_provide,
     pick,
 )
 
@@ -154,6 +158,74 @@ class VerificationAgent(BaseAgent):
         t = text.lower()
         return any(phrase in t for phrase in MEMBER_ID_DENIAL_PHRASES)
 
+    @staticmethod
+    def _pivots_to_member_id(extraction: object | None, text: str) -> bool:
+        """Caller wants their Member ID instead of the SSN.
+
+        The extraction model decides (SsnIntent.HAS_MEMBER_ID, or the shared
+        fallback_pivot field); the phrase list is only the backstop for when it
+        misses or the extraction call failed outright.
+        """
+        intent = getattr(getattr(extraction, "ssn_intent", None), "value", None)
+        if intent == "has_member_id":
+            return True
+        if (getattr(extraction, "fallback_pivot", None) or "").strip() == "member_id":
+            return True
+        return VerificationAgent._wants_member_id(text)
+
+    @staticmethod
+    def _wants_member_id(text: str) -> bool:
+        """Caller is pivoting back to their Member ID mid-SSN-fallback.
+
+        Deterministic backstop for SsnIntent.HAS_MEMBER_ID: the SSN stages are
+        a narrow yes/no gate, and without this a "I have the member id now"
+        lands in ambiguous and re-asks the SSN question forever.
+        """
+        t = (text or "").lower()
+        if not any(phrase in t for phrase in MEMBER_ID_PIVOT_PHRASES):
+            return False
+        # "I don't have my member ID" contains "have my member id" — a denial
+        # is never a pivot, so let the denial phrasing win.
+        return not detect_cannot_provide(t)
+
+    @staticmethod
+    def _extract_member_id_from_text(text: str) -> str:
+        """Return a validated Member ID found inline in free text, else "".
+
+        Only the written form (M907503, m 907 503) — the spoken form is left to
+        the normal member_id collection path, which already handles digit words.
+        """
+        import re
+
+        m = re.search(r"\b[mn][\s.-]*(?:\d[\s.-]*){6}", text or "", re.IGNORECASE)
+        if not m:
+            return ""
+        candidate = normalize_member_id(m.group(0))
+        return candidate if candidate and validate_member_id(candidate).valid else ""
+
+    def _resume_member_id_collection(self, state: State, last_user: str) -> dict:
+        """Leave the SSN fallback and go back to collecting the Member ID.
+
+        Clearing ssn_fallback_stage drops the next turn back into the normal
+        verification flow. When the caller already said the ID, take it now
+        rather than making them repeat it.
+        """
+        inline = self._extract_member_id_from_text(last_user)
+        if inline:
+            logger.info("VerificationAgent SSN fallback: member_id given inline on pivot — resuming")
+            self.slot_ok("member_id", inline)
+            resumed = self.ask_member(state, "")
+            resumed["member_id"] = inline
+            resumed["ssn_fallback_stage"] = ""
+            resumed["is_interrupt"] = False
+            return resumed
+
+        logger.info("VerificationAgent SSN fallback: caller pivoted back to member_id — re-asking")
+        result = self.ask_member(state, pick(MSG_SSN_BACK_TO_MID))
+        result["ssn_fallback_stage"] = ""
+        result["awaiting_slot"] = "member_id"
+        return result
+
     async def _handle_ssn_fallback(self, state: State, last_user: str, messages: list) -> dict:
         """Route SSN fallback sub-stages. LLM-backed for ask/collecting/dob; deterministic for retry."""
         stage = state.get("ssn_fallback_stage") or ""
@@ -209,11 +281,31 @@ class VerificationAgent(BaseAgent):
             result["ssn_fallback_stage"] = "ssn_collecting"
             return result
 
-        # Ambiguous — re-ask with the same hardcoded question.
+        # Caller pivoted back to the Member ID — honour it instead of re-asking
+        # a question they have stopped answering.
+        if self._pivots_to_member_id(extraction, last_user):
+            return self._resume_member_id_collection(state, last_user)
+
+        # Ambiguous — re-ask with the same hardcoded question, but only so many
+        # times: an unresolvable gate used to repeat verbatim forever.
         # Do NOT call LLM 2 here: ssn_ask is a yes/no gate and LLM 2 hallucinates
         # irrelevant follow-up questions (e.g. date of birth) from pipeline context.
+        slot_attempts = dict(state.get("slot_attempts") or {})
+        ask_attempt = slot_attempts.get("ssn_ask")
+        if not isinstance(ask_attempt, dict):
+            ask_attempt = {}
+        count = ask_attempt.get("attempt_count", 0) + 1
+        slot_attempts["ssn_ask"] = {**ask_attempt, "attempt_count": count}
+
+        if count >= MAX_SSN_ATTEMPTS:
+            logger.warning("VerificationAgent SSN fallback: ssn_ask gate unresolved — escalating")
+            escalation = self.signal_escalate(state, MSG_SSN_ASK_EXHAUSTED, reason="ssn_ask_unresolved")
+            escalation["slot_attempts"] = slot_attempts
+            return escalation
+
         result = self.ask_member(state, MSG_SSN_ASK)
         result["ssn_fallback_stage"] = "ssn_ask"
+        result["slot_attempts"] = slot_attempts
         return result
 
     async def _ssn_collecting_stage(self, state: State, last_user: str, messages: list) -> dict:
@@ -241,6 +333,10 @@ class VerificationAgent(BaseAgent):
 
         if intent == "no_ssn_available":
             return self.signal_escalate(state, MSG_SSN_ESCALATE, reason="no identifier available")
+
+        # Caller found their Member ID after all — take it over the SSN.
+        if self._pivots_to_member_id(extraction, last_user):
+            return self._resume_member_id_collection(state, last_user)
 
         # Ambiguous or failed normalization — retry with LLM 2 re-ask
         slot_attempts = dict(state.get("slot_attempts") or {})
@@ -407,8 +503,28 @@ class VerificationAgent(BaseAgent):
         if self._is_no_ssn_available(last_user):
             return self.signal_escalate(state, MSG_SSN_ESCALATE, reason="no identifier available")
 
+        # Caller says they have the Member ID but the extraction found no digits
+        # — ask for it plainly rather than repeating the either/or prompt.
+        if self._pivots_to_member_id(llm_result, last_user):
+            return self._resume_member_id_collection(state, last_user)
+
+        # Bounded, like every other stage — this prompt used to repeat forever.
+        slot_attempts = dict(state.get("slot_attempts") or {})
+        retry_attempt = slot_attempts.get("ssn_or_mid")
+        if not isinstance(retry_attempt, dict):
+            retry_attempt = {}
+        count = retry_attempt.get("attempt_count", 0) + 1
+        slot_attempts["ssn_or_mid"] = {**retry_attempt, "attempt_count": count}
+
+        if count >= MAX_SSN_ATTEMPTS:
+            logger.warning("VerificationAgent SSN fallback: no identifier after retries — escalating")
+            escalation = self.signal_escalate(state, MSG_SSN_ESCALATE, reason="no identifier available")
+            escalation["slot_attempts"] = slot_attempts
+            return escalation
+
         r = self.ask_member(state, MSG_SSN_EITHER)
         r["ssn_fallback_stage"] = "ssn_or_mid_retry"
+        r["slot_attempts"] = slot_attempts
         return r
 
     def _accept_ssn(self, state: State, ssn: str) -> dict:
@@ -590,7 +706,11 @@ class VerificationAgent(BaseAgent):
             and not state.get("member_id")
             and not state.get("ssn")
             and last_user
-            and self._is_member_id_denial(last_user)
+            # The phrase list is a fast path; detect_cannot_provide covers the
+            # phrasings it does not ("I do not have a member ID", "I never
+            # received one"). Without it those escalated straight to a rep
+            # instead of ever offering the SSN alternative.
+            and (self._is_member_id_denial(last_user) or detect_cannot_provide(last_user))
         ):
             logger.info("VerificationAgent: member_id denial detected — starting SSN fallback")
             result = self.ask_member(state, MSG_SSN_ASK)
@@ -644,6 +764,31 @@ class VerificationAgent(BaseAgent):
         # guarantees a mid-verification update request ("also I need to update
         # my last name") reaches the pipeline as update_target.
         result = reconcile_worker_result(result, last_user)
+
+        # ── Member ID denial → SSN fallback (semantic) ───────────────────────
+        # The pre-extraction gate above is a keyword fast path. This is the one
+        # that actually generalises: the extraction model judges meaning, so
+        # phrasings no list anticipates ("that's in my wallet at home") still
+        # reach the SSN offer instead of the escalation in _collect_slot.
+        # fallback_pivot == "ssn" is the caller naming the alternative outright.
+        if (
+            awaiting_slot == "member_id"
+            and not state.get("member_id")
+            and not state.get("ssn")
+            and not (result.extracted or {}).get("member_id")
+            and (
+                getattr(result, "cannot_provide", False)
+                or (getattr(result, "fallback_pivot", None) or "").strip() == "ssn"
+            )
+        ):
+            logger.info(
+                "VerificationAgent: member_id unavailable (extraction) — starting SSN fallback",
+                extra={"fallback_pivot": getattr(result, "fallback_pivot", None)},
+            )
+            ssn_offer = self.ask_member(state, MSG_SSN_ASK)
+            ssn_offer["ssn_fallback_stage"] = "ssn_ask"
+            return ssn_offer
+        # ─────────────────────────────────────────────────────────────────────
 
         corrected_fields: list[str] = []
         _was_verified = bool(state.get("member_status_verify"))
