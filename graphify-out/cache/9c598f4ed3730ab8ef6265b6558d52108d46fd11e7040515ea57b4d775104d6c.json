@@ -1,0 +1,1 @@
+{"nodes": [{"id": "extraction_provider_search", "label": "Provider Search Extraction Rules", "file_type": "document", "source_file": "src/agent/prompts/extraction/provider_search.md", "source_location": "L1-83", "source_url": null, "captured_at": null, "author": null, "contributor": null}], "edges": [], "hyperedges": []}

@@ -1,0 +1,1 @@
+{"nodes": [{"id": "event_offtopic_agent", "label": "Event: OFFTOPIC_AGENT", "file_type": "document", "source_file": "src/agent/prompts/generation/events/offtopic_agent.md", "source_location": "L1-13", "source_url": null, "captured_at": null, "author": null, "contributor": null}], "edges": [], "hyperedges": []}
