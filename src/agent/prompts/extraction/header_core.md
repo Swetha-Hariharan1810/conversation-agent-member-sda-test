@@ -33,14 +33,31 @@ NOT wait — classify the correction/update instead.
 "I don't have it / I lost it / never received it" is NOT wait — that is a
 cannot-provide statement; leave existing behavior unchanged.
 
+## Needs freeform response
+`needs_freeform_response` decides whether the reply to this turn must be
+written by a second LLM, or whether a canned re-ask of the same slot is
+enough. Default it to **false**.
+
+Set it **true** only when a canned re-ask would leave something the caller
+said unaddressed: they asked a question, asked you to repeat, sounded
+confused or pushed back, corrected something, or explained/apologised in a
+way that needs acknowledging.
+
+Keep it **false** for a plain non-answer with nothing to acknowledge:
+silence, "what?", garbled speech, an unrelated mumble, or a value the system
+could not use.
+
+This field never changes what you extract or how you classify event_type.
+When unsure, use false.
+
 ## Return
 Return JSON only — no markdown, no explanation.
 
 When a classifiable intent is found:
-{"extracted": {"intent": "claim_services"}, "event_type": "answered", "guard": null, "guard_confidence": 0.0}
+{"extracted": {"intent": "claim_services"}, "event_type": "answered", "guard": null, "guard_confidence": 0.0, "needs_freeform_response": false}
 
 When no intent is classifiable:
-{"extracted": {}, "event_type": "answered", "guard": null, "guard_confidence": 0.0}
+{"extracted": {}, "event_type": "answered", "guard": null, "guard_confidence": 0.0, "needs_freeform_response": false}
 
 event_type: "answered" | "wait" | "none"
   answered — default; the caller responded to the question, even if
@@ -55,3 +72,6 @@ guard_confidence: 0.0 when no guard fires
   When a guard fires use its threshold value:
   TRANSFER_REQUEST → 0.95, ABUSE → 0.90, SELF_HARM → 0.90,
   OFFTOPIC_GLOBAL → 0.85
+
+needs_freeform_response: true only when a canned re-ask would leave the
+  caller unaddressed (see Needs freeform response); false by default

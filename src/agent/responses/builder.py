@@ -6,6 +6,7 @@ Single source of truth for all slot-prompt variation.
 Public API used by agents and slot infrastructure:
   build_initial_prompt(slot_type)               → str
   build_transition_prompt(slot_type, context)   → str
+  build_retry_prompt(slot_type, attempt, ...)   → str
 
 All selection is pure Python — no LLM calls, no I/O, zero latency.
 """
@@ -22,6 +23,7 @@ from agent.slots.types import SlotType
 __all__ = [
     "build_initial_prompt",
     "build_transition_prompt",
+    "build_retry_prompt",
 ]
 
 # ---------------------------------------------------------------------------
@@ -169,6 +171,133 @@ _INITIAL_TEMPLATES: dict[SlotType, list[str]] = {
 }
 
 # ---------------------------------------------------------------------------
+# Retry templates: the caller did not give a usable value — re-ask the SAME
+# slot. Two tiers by attempt: a gentle first retry, then a hinted retry that
+# spells out the expected shape. Deterministic Python — no LLM call, so a
+# plain retry can never drift onto a different slot.
+# ---------------------------------------------------------------------------
+
+_RETRY_TEMPLATES: dict[SlotType, list[str]] = {
+    SlotType.FIRST_NAME: [
+        "Sorry, I didn't catch that — could you say your first name again?",
+        "I want to make sure I get this right — what's your first name?",
+        "Could you repeat your first name for me?",
+    ],
+    SlotType.LAST_NAME: [
+        "Sorry, I didn't catch that — could you say your last name again?",
+        "I want to make sure I get this right — what's your last name?",
+        "Could you repeat your last name for me?",
+    ],
+    SlotType.FULL_NAME: [
+        "Sorry, I didn't catch that — could you say your full name again?",
+        "Could you repeat your full name for me?",
+    ],
+    SlotType.MEMBER_ID: [
+        "Sorry, I didn't catch that — could you repeat your Member ID?",
+        "Could you say your Member ID once more for me?",
+    ],
+    SlotType.DOB: [
+        "Sorry, I didn't catch that — could you repeat your date of birth?",
+        "Could you say your date of birth once more for me?",
+    ],
+    SlotType.ZIP_CODE: [
+        "Sorry, I didn't catch that — could you repeat your ZIP code?",
+        "Could you say your ZIP code once more?",
+    ],
+    SlotType.PHONE_NUMBER: [
+        "Sorry, I didn't catch that — could you repeat the phone number?",
+        "Could you say that phone number once more?",
+    ],
+    SlotType.EMAIL: [
+        "Sorry, I didn't catch that — could you repeat the email address?",
+        "Could you say that email address once more?",
+    ],
+    SlotType.FAX: [
+        "Sorry, I didn't catch that — could you repeat the fax number?",
+        "Could you say that fax number once more?",
+    ],
+    SlotType.RELATIONSHIP: [
+        "Sorry, I didn't catch that — are you the subscriber, or calling for a dependent?",
+        "Just to confirm — are you the subscriber or a dependent?",
+    ],
+    SlotType.PROVIDER_TYPE: [
+        "Sorry, I didn't catch that — what type of provider are you looking for?",
+        "Could you tell me again what type of provider you need?",
+    ],
+    SlotType.DELIVERY_METHOD: [
+        "Sorry, I didn't catch that — would you like that by fax or email?",
+        "Just to confirm — fax or email?",
+    ],
+    SlotType.NOTIFICATION_METHOD: [
+        "Sorry, I didn't catch that — would you prefer updates by SMS or email?",
+        "Just to confirm — SMS or email?",
+    ],
+    SlotType.REFERENCE_NUMBER: [
+        "Sorry, I didn't catch that — could you repeat the reference number?",
+        "Could you say that reference number once more?",
+    ],
+    SlotType.CLAIM_NUMBER: [
+        "Sorry, I didn't catch that — could you repeat the claim number?",
+        "Could you say that claim number once more?",
+    ],
+}
+
+# Second-tier retry: same slot, but now say what the value should look like.
+_RETRY_HINTED_TEMPLATES: dict[SlotType, list[str]] = {
+    SlotType.FIRST_NAME: [
+        "I still don't have your first name — could you say it slowly, or spell it out for me?",
+    ],
+    SlotType.LAST_NAME: [
+        "I still don't have your last name — could you say it slowly, or spell it out for me?",
+    ],
+    SlotType.FULL_NAME: [
+        "I still don't have your name — could you say it slowly, or spell it out for me?",
+    ],
+    SlotType.MEMBER_ID: [
+        "I still don't have your Member ID — it starts with an M followed by six digits. "
+        "Could you read it out one character at a time?",
+    ],
+    SlotType.DOB: [
+        "I still don't have your date of birth — could you give me the month, day, and year?",
+    ],
+    SlotType.ZIP_CODE: [
+        "I still don't have your ZIP code — could you read me the five digits?",
+    ],
+    SlotType.PHONE_NUMBER: [
+        "I still don't have the phone number — could you read me the ten digits?",
+    ],
+    SlotType.EMAIL: [
+        "I still don't have the email address — could you spell it out for me?",
+    ],
+    SlotType.FAX: [
+        "I still don't have the fax number — could you read me the ten digits?",
+    ],
+    SlotType.RELATIONSHIP: [
+        "I still need to know whether you're the subscriber on the plan, or calling for a dependent.",
+    ],
+    SlotType.DELIVERY_METHOD: [
+        "I still need to know how to send this — please say fax or email.",
+    ],
+    SlotType.NOTIFICATION_METHOD: [
+        "I still need to know how to reach you with updates — please say SMS or email.",
+    ],
+    SlotType.REFERENCE_NUMBER: [
+        "I still don't have the reference number — it's eight digits. "
+        "Could you read it out one digit at a time?",
+    ],
+}
+
+_DEFAULT_RETRY = [
+    "Sorry, I didn't catch that — could you repeat your {slot_label}?",
+    "Could you say your {slot_label} once more for me?",
+]
+
+_DEFAULT_RETRY_HINTED = [
+    "I still don't have your {slot_label} — could you say it slowly for me?",
+]
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -211,3 +340,33 @@ def build_transition_prompt(
         name_part=np,
         slot_label=_slot_label(slot_type),
     )
+
+
+def build_retry_prompt(
+    slot_type: SlotType | None,
+    *,
+    attempt: int = 1,
+    slot_label: str = "",
+) -> str:
+    """Re-ask for the SAME slot after a non-answer — static, no LLM call.
+
+    ``attempt`` is the slot's attempt count *after* the failure was recorded.
+    Attempt 1 gets a gentle "didn't catch that"; attempt 2 and beyond get the
+    hinted variant that names the expected shape of the value.
+
+    ``slot_label`` is the spoken label used when the slot has no SlotType (or
+    no template) — e.g. "your Member ID". It is only consulted for the generic
+    templates.
+    """
+    label = (slot_label or (slot_type.value.replace("_", " ") if slot_type else "that")).strip()
+    hinted = attempt >= 2
+    pool: list[str] | None = None
+    if slot_type is not None:
+        pool = (_RETRY_HINTED_TEMPLATES if hinted else _RETRY_TEMPLATES).get(slot_type)
+        if pool is None and hinted:
+            # No hinted variant for this slot — the gentle pool still re-asks
+            # the right slot, which matters more than the escalation in tone.
+            pool = _RETRY_TEMPLATES.get(slot_type)
+    if pool is None:
+        pool = _DEFAULT_RETRY_HINTED if hinted else _DEFAULT_RETRY
+    return random.choice(pool).format(slot_label=label)

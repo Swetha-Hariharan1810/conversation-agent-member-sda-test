@@ -65,6 +65,18 @@ class Config:
     GEMINI_THINKING_BUDGET: Final[int] = int(os.getenv("GEMINI_THINKING_BUDGET") or "0")
     GCP_SA_BASE64: Final[str] = os.getenv("GCP_SA_BASE64", "")
 
+    # Recovery generation — static fast path
+    # When on (default), a plain re-ask turn that the extraction LLM did not
+    # flag as needing freeform prose is answered from responses/builder.py
+    # templates instead of a generation-LLM call. Set STATIC_RETRY_FAST_PATH=0
+    # to route every recovery turn back through the generation LLM.
+    STATIC_RETRY_FAST_PATH: Final[bool] = os.getenv("STATIC_RETRY_FAST_PATH", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
     # Salesforce OAuth
     SF_CLIENT_ID: Final[str] = os.getenv("SF_CLIENT_ID", "")
     SF_CLIENT_SECRET: Final[str] = os.getenv("SF_CLIENT_SECRET", "")

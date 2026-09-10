@@ -1082,6 +1082,8 @@ class VerificationAgent(BaseAgent):
                 return self._deliver_name_readback(state)
 
         # Nothing extractable — retry the "what is the correct name?" question.
+        from agent.slots.types import SlotType
+
         self.slot_fail(_NAME_CORRECTION_SLOT)
         if self.get_slot(_NAME_CORRECTION_SLOT).is_exhausted():
             logger.warning(LOG_NAME_CONFIRM_EXHAUST)
@@ -1090,7 +1092,13 @@ class VerificationAgent(BaseAgent):
             )
         ctx = ConversationContext.from_state(state)
         retry_msg = await self._generate_slot_retry_response(
-            state, _NAME_CORRECTION_SLOT, ctx, messages, guard="RETRY"
+            state,
+            _NAME_CORRECTION_SLOT,
+            ctx,
+            messages,
+            guard="RETRY",
+            decision=result,
+            slot_type=SlotType.FULL_NAME,
         )
         retry = self.ask_member(state, retry_msg)
         retry["awaiting_slot"] = _NAME_CORRECTION_SLOT

@@ -206,9 +206,32 @@ Add caller_type to extracted{} only on direct statements.
   "I am a member"                                      → member
 If not explicitly stated → omit caller_type from extracted{}.
 
+## NEEDS FREEFORM RESPONSE
+`needs_freeform_response` decides whether the reply to this turn has to be
+written by a second LLM, or whether a canned re-ask of the same slot is
+enough. Default it to **false**.
+
+Set it **true** only when a canned re-ask would leave something the caller
+said unaddressed:
+  - the caller asked a question, or asked what you meant / to repeat
+  - the caller is confused, objects, or pushes back on being asked
+  - the caller corrected or wants to change something (corrections{} or
+    update_target set)
+  - the caller explained or apologised in a way that needs acknowledging
+    ("sorry, my dog was barking", "I'm driving right now")
+  - the caller gave a partial or half-right value that should be named back
+    ("I only have the last four digits")
+
+Keep it **false** for a plain non-answer with nothing to acknowledge:
+  silence, "what?", "huh", garbled speech, an unrelated mumble, a value the
+  system could not use, or a bare repeat of something already said.
+
+This field never changes what you extract or how you classify event_type —
+it only picks which response path runs. When unsure, use false.
+
 ## RETURN
 Return JSON only — no markdown, no explanation.
-{ "extracted": {}, "corrections": {}, "event_type": "answered", "guard": null, "guard_confidence": 0.0, "followup_disposition": "none", "followup_query": null, "update_target": null, "request_kind": "none" }
+{ "extracted": {}, "corrections": {}, "event_type": "answered", "guard": null, "guard_confidence": 0.0, "followup_disposition": "none", "followup_query": null, "update_target": null, "request_kind": "none", "needs_freeform_response": false }
 event_type: "answered" | "answered_with_followup" | "corrected" | "ambiguous" | "wait" | "none" — default "answered"
 `extracted` — newly provided slot values; `corrections` — replaces a previously accepted slot
 `guard` — triggered guard label or null; `guard_confidence` — 0.0 when no guard fires
@@ -216,3 +239,4 @@ event_type: "answered" | "answered_with_followup" | "corrected" | "ambiguous" | 
 `followup_query` — the caller's side question, condensed, verbatim-ish; null when no follow-up
 `update_target` — slot the caller wants to change when NO new value was given, or the redo/replay topic; null otherwise
 `request_kind` — "update" | "redo" | "replay" per CROSS-CALL REQUESTS; "none" when no such request
+`needs_freeform_response` — true only when a canned re-ask would leave the caller unaddressed (see NEEDS FREEFORM RESPONSE); false by default
