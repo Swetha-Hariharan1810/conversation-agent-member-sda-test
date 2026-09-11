@@ -43,6 +43,7 @@ from agent.agents.records_coordination.handlers import dispatch_personal_guide, 
 from agent.agents.records_coordination.llm import extract_records_decision
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
+from agent.core.confirmation import is_not_an_answer
 from agent.core.request_detection import reconcile_worker_result
 from agent.llm.config import get_extraction_llm
 from agent.llm.extractor import remaining_slots
@@ -249,13 +250,6 @@ class RecordsCoordinationAgent(BaseAgent):
             pending_email = (state.get("pending_email") or "").strip()
 
             contact_conf = normalize_yes_no(contact_conf_raw) if contact_conf_raw else ""
-            # Deterministic fallback (mirrors delivery_management): when the LLM
-            # returns extracted:{} for a turn that is clearly a yes/no (e.g. it used
-            # corrections:{email:"changed recently"} instead), normalize the raw
-            # utterance so a plain "no" / "No, I changed it" advances on the first
-            # attempt without burning a retry.
-            if not contact_conf and not new_email_raw:
-                contact_conf = normalize_yes_no(last_user) if last_user else ""
             # Extraction contract: a replacement email and email_confirmed are
             # mutually exclusive. If a "no" arrives alongside an email, the email is
             # an echo of the Confirmed: context line — discard it so the decline is
@@ -309,8 +303,17 @@ class RecordsCoordinationAgent(BaseAgent):
                 done["pending_email"] = ""
                 return done
 
-            # Explicit no → ask for new email
-            if contact_conf == "no":
+            # Never verbatim-repeat over an unhandled request (Phase 7).
+            if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
+                return handled
+
+            # Not an answer to the read-back — uncertain, holding, or raising
+            # something else. Re-read the email and ask again; do NOT read a
+            # decline into a turn that took no position.
+            if not is_not_an_answer(result, last_user, owned_slots=("email", "email_confirmed")):
+                # A decline: neither "yes" nor an address, so the one on file is
+                # not the one to use. Ask for the current one — no phrasing had
+                # to be recognised to get here.
                 if escalation := self.guard_loop_limit(
                     state,
                     "email_change_cycles",
@@ -319,15 +322,12 @@ class RecordsCoordinationAgent(BaseAgent):
                     escalate_reason="email_change_loop_exceeded_in_records",
                 ):
                     return escalation
+                logger.info("records_coordination: email on file declined — collecting the current one")
                 ask_result = self.ask_member(state, pick(MSG_EMAIL_UPDATE_PROMPT))
                 ask_result["awaiting_slot"] = "email"
                 ask_result["pending_email"] = ""
                 return ask_result
 
-            # Ambiguous / no extraction → re-read the email, ask again (do NOT ask for new email)
-            # Never verbatim-repeat over an unhandled request (Phase 7).
-            if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
-                return handled
             self.slot_fail("email_confirmed")
             if self.get_slot("email_confirmed").is_exhausted():
                 # FIX: escalate on exhaustion instead of silently pivoting to email collection.

@@ -35,8 +35,8 @@ from agent.agents.provider_search.pipelines import (
 )
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
+from agent.core.confirmation import is_not_an_answer
 from agent.llm.config import get_extraction_llm
-from agent.llm.schema import EventType, RequestKind
 from agent.logger import get_logger
 from agent.slots.normalizers import normalize_provider_type, normalize_yes_no, normalize_zip_code
 from agent.slots.validators import validate_zip_code
@@ -224,57 +224,33 @@ class ProviderSearchAgent(BaseAgent):
             if zip_conf == "yes":
                 logger.info(LOG_ZIP_CONFIRMED, extra={"zip_code": zip_on_file})
                 return self._signal_done(state, provider_type, zip_on_file)
-            if zip_conf == "no":
-                ask_result = self.ask_member(state, ZIP_UPDATE_PROMPT)
-                ask_result["awaiting_slot"] = "zip_code"
-                ask_result["provider_type"] = provider_type
-                ask_result["zip_code"] = zip_on_file
-                return ask_result
 
-            # Implicit "no": LLM signalled an update/correction intent targeting
-            # zip_confirmed or zip_code but didn't extract zip_confirmed="no" directly.
-            # Covers indirect denials like "No. I want to update." or "I'd like to
-            # change it" where the caller's intent is unambiguous even though the
-            # LLM emits a corrected+update signal instead of a yes/no extraction.
-            if (
-                result is not None
-                and result.event_type == EventType.CORRECTED
-                and result.request_kind == RequestKind.UPDATE
-                and (result.update_target or "").strip() in ("zip_confirmed", "zip_code", "")
-            ):
-                ask_result = self.ask_member(state, ZIP_UPDATE_PROMPT)
-                ask_result["awaiting_slot"] = "zip_code"
-                ask_result["provider_type"] = provider_type
-                ask_result["zip_code"] = zip_on_file
-                return ask_result
+            # Everything from here is NOT a confirmation. Which way it goes is
+            # decided by what the caller's turn IS, never by which words it
+            # used: the ways of saying "that ZIP is wrong" are endless — "I
+            # moved", "I'd like to change it", "that's my old one", "we
+            # relocated last spring" — and a list of them is never finished.
+            # The ways of saying yes are not endless, and a ZIP is a shape, so
+            # those two are recognised and everything else is a decline by
+            # default. Nothing here has to know the phrasing to act on it.
+            if is_not_an_answer(result, last_user, owned_slots=("zip_code", "zip_confirmed")):
+                # The caller is not answering this question at all — uncertain,
+                # asking to hold, or raising something else. Re-ask it.
+                return await self._retry_zip_confirmation(
+                    state, messages, last_user, zip_on_file, provider_type
+                )
 
-            # No clear yes/no — retry or exhaust
-            self.slot_fail("zip_confirmed")
-            slot = self.get_slot("zip_confirmed")
-            if slot.is_exhausted():
-                return self.signal_escalate(state, pick(MSG_ZIP_EXHAUST), reason="zip_confirmed_exhausted")
-            from agent.llm.response_generator import generate_recovery_message
-
-            spoken_zip = " ".join(zip_on_file)
-            ctx = ConversationContext.from_state(state)
-            retry_msg = await generate_recovery_message(
-                slot_name="zip_confirmed",
-                attempt=slot.attempt_count,
-                guard="RETRY",
-                last_messages=messages[-4:],
-                slot_label_override=(
-                    f"whether the ZIP code {spoken_zip} on file is correct (yes or no) — "
-                    f"if they say their address changed, ask for their current ZIP"
-                ),
-                caller_name=ctx.caller_first_name,
-                confirmed_slots=dict.fromkeys(ctx.confirmed_slots, "confirmed"),
-                user_utterance=last_user,
-            )
-            retry_result = self.ask_member(state, retry_msg)
-            retry_result["awaiting_slot"] = "zip_confirmed"
-            retry_result["provider_type"] = provider_type
-            retry_result["zip_code"] = zip_on_file
-            return retry_result
+            # A decline. The caller said something responsive that was neither
+            # "yes" nor a ZIP, so the ZIP on file is not the one to use. Ask
+            # for the current one — and record that a VALUE is now expected,
+            # which is what tells the next turn's extraction what it is
+            # filling.
+            logger.info("provider_search: ZIP on file declined — collecting the current one")
+            ask_result = self.ask_member(state, ZIP_UPDATE_PROMPT)
+            ask_result["awaiting_slot"] = "zip_code"
+            ask_result["provider_type"] = provider_type
+            ask_result["zip_code"] = zip_on_file
+            return ask_result
 
         # 7c. First time asking ZIP confirmation
         if zip_on_file:
@@ -289,6 +265,49 @@ class ProviderSearchAgent(BaseAgent):
         collect_result["awaiting_slot"] = "zip_code"
         collect_result["provider_type"] = provider_type
         return collect_result
+
+    async def _retry_zip_confirmation(
+        self,
+        state: State,
+        messages: list,
+        last_user: str,
+        zip_on_file: str,
+        provider_type: str,
+    ) -> dict:
+        """Re-ask the ZIP confirmation, or escalate once the retries are spent."""
+        self.slot_fail("zip_confirmed")
+        slot = self.get_slot("zip_confirmed")
+        if slot.is_exhausted():
+            return self.signal_escalate(state, pick(MSG_ZIP_EXHAUST), reason="zip_confirmed_exhausted")
+        from agent.llm.response_generator import generate_recovery_message
+
+        spoken_zip = " ".join(zip_on_file)
+        ctx = ConversationContext.from_state(state)
+        retry_msg = await generate_recovery_message(
+            slot_name="zip_confirmed",
+            attempt=slot.attempt_count,
+            guard="RETRY",
+            last_messages=messages[-4:],
+            # Ask ONLY the confirmation question this branch says it is asking.
+            # This override used to end "— if they say their address changed,
+            # ask for their current ZIP", and the generator obliged: the caller
+            # was asked to supply a ZIP while awaiting_slot stayed on
+            # zip_confirmed. The next turn's extraction is told which slot it is
+            # filling, so it answered THAT question — zip_confirmed, no
+            # zip_code — for an utterance that was nothing but a ZIP, and the
+            # value the caller had just given was asked for again. A caller
+            # whose address changed is declining, and the decline path asks for
+            # the new ZIP with awaiting_slot set to match.
+            slot_label_override=f"whether the ZIP code {spoken_zip} on file is correct (yes or no)",
+            caller_name=ctx.caller_first_name,
+            confirmed_slots=dict.fromkeys(ctx.confirmed_slots, "confirmed"),
+            user_utterance=last_user,
+        )
+        retry_result = self.ask_member(state, retry_msg)
+        retry_result["awaiting_slot"] = "zip_confirmed"
+        retry_result["provider_type"] = provider_type
+        retry_result["zip_code"] = zip_on_file
+        return retry_result
 
     def _signal_done(self, state: State, provider_type: str, zip_code_used: str) -> dict:
         """

@@ -39,6 +39,7 @@ from agent.agents.delivery_management.pipelines import (
     build_fax_pipeline,
 )
 from agent.core.agent import BaseAgent
+from agent.core.confirmation import is_not_an_answer
 from agent.core.request_detection import detect_request, reconcile_worker_result
 from agent.core.slot_ownership import canonical_capability_topic
 from agent.llm.config import get_extraction_llm
@@ -76,18 +77,6 @@ class DeliveryManagementAgent(BaseAgent):
         r"|\btell\s+me\s+now\b"
         r"|\bjust\s+(?:tell|call)\s+me\b"
         r"|\bprovider\s+(?:list|names?|information?)\s+by\s+phone\b",
-        re.IGNORECASE,
-    )
-    # Stale-value and update-intent signals for contact confirmation slots.
-    # When these appear in the utterance the caller is signaling the contact on
-    # file is wrong/outdated — treat as a decline even when the message starts
-    # with a leading affirmative like "yeah" or "yes".
-    _STALE_CONTACT_RE = re.compile(
-        r"\bold\s+(?:fax|email|number|address)\b"  # "old fax number", "old email"
-        r"|\boutdated\b"
-        r"|\bgive\s+you\s+a\s+new\b"  # "I'll give you a new number"
-        r"|\bhas\s+changed\b"
-        r"|\bno\s+longer\s+(?:work|active|current|valid|right|correct)",
         re.IGNORECASE,
     )
 
@@ -368,20 +357,11 @@ class DeliveryManagementAgent(BaseAgent):
             pending_fax = (state.get("pending_fax") or "").strip()
 
             contact_conf = normalize_yes_no(contact_conf_raw) if contact_conf_raw else ""
-            # Deterministic fallback: the LLM sometimes puts descriptive text in
-            # corrections (e.g. corrections:{fax:"changed recently"}) instead of
-            # extracted:{fax_confirmed:"no"}, leaving contact_conf empty. When
-            # extracted is empty AND no replacement fax was given this turn,
-            # normalize the raw utterance so a plain "no" / "No, I changed it"
-            # advances on the first attempt without burning a retry.
-            # Guard: utterances that start with a leading affirmative ("yeah")
-            # but also contain stale-value or new-number signals must be treated
-            # as a decline — the correction intent takes priority.
-            if not contact_conf and not new_fax_raw:
-                if last_user and self._STALE_CONTACT_RE.search(last_user):
-                    contact_conf = "no"
-                elif last_user:
-                    contact_conf = normalize_yes_no(last_user)
+            # No phrase layer here any more. The decline branch below is the
+            # default for every turn that is neither an affirmation nor a fax
+            # number, so a caller saying the number is stale is honoured
+            # whatever words they use — _STALE_CONTACT_RE used to carry a list
+            # of those wordings, and a list of them is never finished.
             # Extraction contract: a replacement fax and fax_confirmed are mutually
             # exclusive per the prompt. When the LLM sets both and the fax differs
             # from the on-file value it is a genuine replacement alongside the decline
@@ -449,38 +429,46 @@ class DeliveryManagementAgent(BaseAgent):
                 done = await self._proceed_to_dispatch(state, delivery_method, fax_on_file)
                 done["pending_fax"] = ""
                 return done
-            if contact_conf == "no":
-                if escalation := self.guard_loop_limit(
-                    state,
-                    "fax_change_cycles",
-                    MAX_CONTACT_CHANGE_CYCLES,
-                    escalate_message=pick(MSG_CONTACT_EXHAUST),
-                    escalate_reason="fax_change_loop_exceeded",
-                ):
-                    return escalation
-                ask_result = self.ask_member(state, pick(FAX_UPDATE_PROMPTS))
-                ask_result["awaiting_slot"] = "fax"
-                ask_result["pending_fax"] = ""
-                ask_result["fax"] = fax_on_file
-                return ask_result
-
-            # No clear yes/no — before burning a retry, make sure the turn is
-            # not an unhandled request (never verbatim-repeat over one).
+            # Before anything else, never verbatim-repeat over an unhandled
+            # request (Phase 7).
             if handled := self._reroute_unhandled_request(
                 state, result, current_awaiting, delivery_method, fax_on_file, email_on_file
             ):
                 return handled
-            self.slot_fail("fax_confirmed")
-            if self.get_slot("fax_confirmed").is_exhausted():
-                return self.signal_escalate(
-                    state, pick(MSG_CONTACT_EXHAUST), reason="fax_confirmed_exhausted"
-                )
-            live_fax = pending_fax or fax_on_file
-            retry_msg = random.choice(FAX_READBACK_TEMPLATES).format(fax=live_fax)
-            retry_result = self.ask_member(state, retry_msg)
-            retry_result["awaiting_slot"] = "fax_confirmed"
-            retry_result["fax"] = fax_on_file
-            return retry_result
+
+            # Not an answer to the read-back — uncertain, holding, or raising
+            # something else. Re-ask it; reading a decline into these would be
+            # wrong.
+            if is_not_an_answer(result, last_user, owned_slots=("fax", "fax_confirmed")):
+                self.slot_fail("fax_confirmed")
+                if self.get_slot("fax_confirmed").is_exhausted():
+                    return self.signal_escalate(
+                        state, pick(MSG_CONTACT_EXHAUST), reason="fax_confirmed_exhausted"
+                    )
+                live_fax = pending_fax or fax_on_file
+                retry_msg = random.choice(FAX_READBACK_TEMPLATES).format(fax=live_fax)
+                retry_result = self.ask_member(state, retry_msg)
+                retry_result["awaiting_slot"] = "fax_confirmed"
+                retry_result["fax"] = fax_on_file
+                return retry_result
+
+            # Anything else the caller says to "is this the right fax?" that is
+            # neither "yes" nor a fax number declines the number on file. Ask
+            # for the current one — no phrasing had to be recognised to get here.
+            if escalation := self.guard_loop_limit(
+                state,
+                "fax_change_cycles",
+                MAX_CONTACT_CHANGE_CYCLES,
+                escalate_message=pick(MSG_CONTACT_EXHAUST),
+                escalate_reason="fax_change_loop_exceeded",
+            ):
+                return escalation
+            logger.info("delivery_management: fax on file declined — collecting the current one")
+            ask_result = self.ask_member(state, pick(FAX_UPDATE_PROMPTS))
+            ask_result["awaiting_slot"] = "fax"
+            ask_result["pending_fax"] = ""
+            ask_result["fax"] = fax_on_file
+            return ask_result
 
         # ── FAX UPDATE ───────────────────────────────────────────────────────
         if current_awaiting == "fax":
@@ -535,11 +523,6 @@ class DeliveryManagementAgent(BaseAgent):
             # first attempt without burning a retry.
             # Guard: same stale-contact check as fax_confirmed — a leading
             # affirmative followed by stale-value content is still a decline.
-            if not contact_conf and not new_email_raw:
-                if last_user and self._STALE_CONTACT_RE.search(last_user):
-                    contact_conf = "no"
-                elif last_user:
-                    contact_conf = normalize_yes_no(last_user)
             # Extraction contract: a replacement email and email_confirmed are
             # mutually exclusive per the prompt. When the LLM sets both and the email
             # differs from the on-file value it is a genuine replacement alongside
@@ -607,40 +590,44 @@ class DeliveryManagementAgent(BaseAgent):
                 done = await self._proceed_to_dispatch(state, delivery_method, email_on_file)
                 done["pending_email"] = ""
                 return done
-            if contact_conf == "no":
-                if escalation := self.guard_loop_limit(
-                    state,
-                    "email_change_cycles",
-                    MAX_CONTACT_CHANGE_CYCLES,
-                    escalate_message=pick(MSG_CONTACT_EXHAUST),
-                    escalate_reason="email_change_loop_exceeded",
-                ):
-                    return escalation
-                ask_result = self.ask_member(state, pick(EMAIL_UPDATE_PROMPTS))
-                ask_result["awaiting_slot"] = "email"
-                ask_result["pending_email"] = ""
-                ask_result["email"] = email_on_file
-                return ask_result
-
-            # No clear yes/no — before burning a retry, make sure the turn is
-            # not an unhandled request (never verbatim-repeat over one).
+            # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_unhandled_request(
                 state, result, current_awaiting, delivery_method, fax_on_file, email_on_file
             ):
                 return handled
-            self.slot_fail("email_confirmed")
-            if self.get_slot("email_confirmed").is_exhausted():
-                return self.signal_escalate(
-                    state, pick(MSG_CONTACT_EXHAUST), reason="email_confirmed_exhausted"
-                )
-            # FIX: spell out email in words ("at"/"dot") before writing into message history
-            live_email = pending_email or email_on_file
-            display_email = speak_email(live_email)
-            retry_msg = random.choice(EMAIL_READBACK_TEMPLATES).format(email=display_email)
-            retry_result = self.ask_member(state, retry_msg)
-            retry_result["awaiting_slot"] = "email_confirmed"
-            retry_result["email"] = email_on_file
-            return retry_result
+
+            # Not an answer to the read-back — re-ask it.
+            if is_not_an_answer(result, last_user, owned_slots=("email", "email_confirmed")):
+                self.slot_fail("email_confirmed")
+                if self.get_slot("email_confirmed").is_exhausted():
+                    return self.signal_escalate(
+                        state, pick(MSG_CONTACT_EXHAUST), reason="email_confirmed_exhausted"
+                    )
+                # FIX: spell out email in words ("at"/"dot") before writing into message history
+                live_email = pending_email or email_on_file
+                display_email = speak_email(live_email)
+                retry_msg = random.choice(EMAIL_READBACK_TEMPLATES).format(email=display_email)
+                retry_result = self.ask_member(state, retry_msg)
+                retry_result["awaiting_slot"] = "email_confirmed"
+                retry_result["email"] = email_on_file
+                return retry_result
+
+            # Anything else declines the address on file. Ask for the current
+            # one — no phrasing had to be recognised to get here.
+            if escalation := self.guard_loop_limit(
+                state,
+                "email_change_cycles",
+                MAX_CONTACT_CHANGE_CYCLES,
+                escalate_message=pick(MSG_CONTACT_EXHAUST),
+                escalate_reason="email_change_loop_exceeded",
+            ):
+                return escalation
+            logger.info("delivery_management: email on file declined — collecting the current one")
+            ask_result = self.ask_member(state, pick(EMAIL_UPDATE_PROMPTS))
+            ask_result["awaiting_slot"] = "email"
+            ask_result["pending_email"] = ""
+            ask_result["email"] = email_on_file
+            return ask_result
 
         # ── EMAIL UPDATE ─────────────────────────────────────────────────────
         if current_awaiting == "email":
