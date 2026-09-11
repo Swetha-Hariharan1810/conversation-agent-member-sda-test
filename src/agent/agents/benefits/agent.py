@@ -198,18 +198,25 @@ class BenefitsAgent(BaseAgent):
                 state, kind=request_kind, target=request_target, return_awaiting=_CARE_COACH_SLOT
             ):
                 return hop
-            # Unknown topic — park as a question for follow_up (Phase 3
-            # degrade path), acknowledge, and re-ask the offer. Never a
-            # hard decline. Any delivery-phrased redo resolves via the
-            # registry (redo/provider_list → delivery) and routes above, so
-            # landing here with one means the tables have a gap — warn with
-            # the raw target for observability.
+            # Unknown topic — park as an ACTION so follow_up routes it via the
+            # ownership registry (an unknown target lands on the human-only
+            # branch and escalates), acknowledge, and re-ask the offer. Never a
+            # hard decline, and never a question: a parked question is dropped
+            # unanswered in follow_up, so the promise below would not be kept.
+            # Any delivery-phrased redo resolves via the registry
+            # (redo/provider_list → delivery) and routes above, so landing here
+            # with one means the tables have a gap — warn with the raw target
+            # for observability.
             parked = normalize_parked_followups(state.get("parked_followups"))
             parked.append(
-                {"query": last_user or f"{request_kind} {request_target}", "kind": "question", "target": ""}
+                {
+                    "query": last_user or f"{request_kind} {request_target}",
+                    "kind": "action",
+                    "target": request_target,
+                }
             )
             logger.warning(
-                "benefits_agent: unknown %s topic parked as question",
+                "benefits_agent: unknown %s topic parked as action",
                 request_kind,
                 extra={"kind": request_kind, "target": request_target, "utterance": last_user},
             )

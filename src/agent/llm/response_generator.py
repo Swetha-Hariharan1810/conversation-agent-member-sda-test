@@ -101,8 +101,9 @@ _SLOT_LABELS: dict[str, str] = {
 # "OFFTOPIC"       | guards.py (fallback)     | Legacy alias for OFFTOPIC_AGENT
 # "FOLLOWUP_ANSWER"| _collect_slot (Phase 4)  | Slot confirmed + side question that is
 #                  |                          | answerable from Confirmed values now
-# "FOLLOWUP_PARK"  | _collect_slot (Phase 4)  | Slot confirmed + side question parked
-#                  |                          | for later in the call — acknowledge only
+# "FOLLOWUP_PARK"  | _collect_slot (Phase 4)  | Slot confirmed + an update another flow
+#                  |                          | owns, carried to it — acknowledge only.
+#                  |                          | Side questions never park.
 # "FOLLOWUP_DECLINE"| _collect_slot (Phase 4) | Slot confirmed + side question we cannot
 #                  |                          | answer — acknowledge and move on
 # "CORRECTION_ACK" | _handle_answered_followup| Slot confirmed + correction applied,

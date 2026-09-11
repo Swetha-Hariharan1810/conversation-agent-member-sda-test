@@ -144,7 +144,8 @@ def _full_restart(agent, state) -> dict:
     restart["name_confirmed"] = False
     restart["name_confirm_attempts"] = 0
     # A restart abandons any in-flight update detour and wait streak.
-    # parked_followups deliberately survives — those get answered in follow_up.
+    # parked_followups deliberately survives — those are update actions, routed
+    # to their owner in follow_up.
     restart["correction_return_to"] = ""
     restart["wait_count"] = 0
 
@@ -203,7 +204,8 @@ def _partial_reask(agent, state, mismatched: list[str]) -> dict:
     result["awaiting_slot"] = next(s for s in IDENTITY_SLOT_ORDER if s in mismatched)
 
     # A targeted re-ask abandons any in-flight update detour and wait streak;
-    # parked_followups deliberately survives (answered later in follow_up).
+    # parked_followups deliberately survives (update actions, routed to their
+    # owner later in follow_up).
     result["correction_return_to"] = ""
     result["wait_count"] = 0
 

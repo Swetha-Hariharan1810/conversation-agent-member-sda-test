@@ -123,9 +123,9 @@ replay request — that stays an answer follow-up per the table below.
 
 If the caller asks to change or redo something not in Confirmed:, not a
 known slot, and not a known redo/replay topic → still set update_target to
-their words and the best-fit request_kind; the system parks unknown topics
-as questions. Only treat it as a plain follow-up question (disposition per
-the table below) when no change/redo/replay is being requested at all.
+their words and the best-fit request_kind; the system carries unknown topics
+to a representative. Only treat it as a plain follow-up question (disposition
+per the table below) when no change/redo/replay is being requested at all.
 
 ## FOLLOWUP DISPOSITION
 Applies only when event_type = answered_with_followup.
@@ -134,20 +134,19 @@ followup_query MUST be derived from the caller's current utterance ("Caller
 just said:" line) only. NEVER synthesize a followup_query from topics the
 AI raised in prior turns — if the caller did not ask it, it is not a follow-up.
 Set followup_disposition:
-  answer    — the question is answerable from values in Confirmed: (or is a
-               repeat/read-back request, or an update request per CROSS-CALL
-               REQUESTS above). Also answer when the CURRENT stage itself
-               already answers the question — e.g. a notification-timing
-               question asked while delivery is being arranged. Never park
-               what the current flow can answer or the very next step handles.
-               Use answer even when the question is unrelated to this call —
-               the system will respond gracefully.
-  park      — the question maps to a slot in Pending: or a later stage of
-               this same call (e.g. asks about notifications while identity
-               is still being verified)
+  answer    — every side question. It covers the question answerable from
+               Confirmed:, the repeat/read-back request, the update request
+               per CROSS-CALL REQUESTS above, and the question the CURRENT
+               stage already answers — e.g. a notification-timing question
+               asked while delivery is being arranged. It also covers a
+               question about a step still ahead ("will I get this by
+               email?"): the system passes the remaining steps to the
+               responder, which answers from them. And it covers a question
+               unrelated to this call — the system declines gracefully.
 
-If the question concerns delivery, notifications, timelines, or anything
-this call will reach later, choose park.
+Use answer for delivery, notifications, timelines, and anything else this
+call will reach later. A side question is handled in the turn it is asked;
+nothing is deferred to the end of the call.
 
 A question about the timing or status of something the agent just PROMISED
 ("when?", "when will you update my zip?", "did you change it yet?") is NOT a
@@ -158,9 +157,9 @@ followup_query = "timing of <promised item>".
 ### Disposition quick examples
 | Side question                                                | Disposition |
 |--------------------------------------------------------------|-------------|
-| "will I get a text/notification when it's sent?"             | park        |
-| "how long will delivery take?"                               | park        |
-| "when will I hear back about this?"                          | park        |
+| "will I get a text/notification when it's sent?"             | answer      |
+| "how long will delivery take?"                               | answer      |
+| "when will I hear back about this?"                          | answer      |
 | "what's your favorite color?"                                | answer      |
 | "do you sell car insurance?"                                 | answer      |
 | "can you repeat my ZIP?" (zip_code in Confirmed:)            | answer      |
@@ -181,7 +180,7 @@ When event_type != answered_with_followup, omit or set "none".
 | "hold on, let me grab my card"     | wait       | Asking for time, no value           |
 | "hold on... okay it's M451982"     | answered   | Value present — the value wins over wait |
 | "it's 90210 — what was my member ID again?" (member_id in Confirmed:) | answered_with_followup | disposition "answer" — answerable from Confirmed: |
-| "it's 90210 — will I get a text about this?" (notifications in Pending:) | answered_with_followup | disposition "park" — maps to a pending slot / later stage |
+| "it's 90210 — will I get a text about this?" (notifications in Pending:) | answered_with_followup | disposition "answer" — answered from the steps still ahead |
 | "it's 90210 — do you sell car insurance?" | answered_with_followup | disposition "answer" — system responds gracefully |
 | "it's 90210 — sorry, say that again?" | answered_with_followup | disposition "answer" — repeat request |
 | "actually my last name is Smith"   | corrected  | Update shape 1: new value, no answer to awaiting slot |
@@ -276,7 +275,7 @@ Return JSON only — no markdown, no explanation.
 event_type: "answered" | "answered_with_followup" | "corrected" | "ambiguous" | "wait" | "none" — default "answered"
 `extracted` — newly provided slot values; `corrections` — replaces a previously accepted slot
 `guard` — triggered guard label or null; `guard_confidence` — 0.0 when no guard fires
-`followup_disposition` — "answer" | "park" | "none"; "none" unless event_type is "answered_with_followup"
+`followup_disposition` — "answer" | "none"; "none" unless event_type is "answered_with_followup"
 `followup_query` — the caller's side question, condensed, verbatim-ish; null when no follow-up
 `update_target` — slot the caller wants to change when NO new value was given, or the redo/replay topic; null otherwise
 `request_kind` — "update" | "redo" | "replay" per CROSS-CALL REQUESTS; "none" when no such request

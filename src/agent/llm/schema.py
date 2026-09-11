@@ -15,7 +15,7 @@ class EventType(str, Enum):
 
 class FollowupDisposition(str, Enum):
     ANSWER = "answer"  # answer from Confirmed: if possible; gracefully decline if not
-    PARK = "park"  # answerable later in this call (maps to a pending slot or later stage)
+    PARK = "park"  # an update another flow owns, carried to it; never a question
     NONE = "none"  # default when event_type != answered_with_followup
     # Legacy aliases kept for backward compat with cached extraction results
     ANSWER_NOW = "answer_now"

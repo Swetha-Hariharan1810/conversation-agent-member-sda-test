@@ -62,7 +62,15 @@ def _mk_session_ctx(
 
 # WorkerResult.followup_disposition → generation-LLM guard label.
 # Missing/none defaults to FOLLOWUP_RESPOND — the generation LLM self-triages
-# (answers from Confirmed: if it can, gracefully declines if it cannot).
+# (answers from Confirmed: or Coming up: if it can, gracefully declines if it
+# cannot).
+#
+# "park" is no longer a disposition the extraction prompts teach: a side
+# QUESTION is handled in the turn it is asked. The mapping stays because
+# _handle_answered_followup sets the value itself for an update aimed at a
+# slot another flow owns in_flow — the one thing parking is still for — and
+# because old cached extraction results still carry it. A "park" with no such
+# update_target is downgraded to FOLLOWUP_RESPOND where the guard is chosen.
 _DISPOSITION_GUARDS: dict[str, str] = {
     "answer": "FOLLOWUP_RESPOND",
     "park": "FOLLOWUP_PARK",
@@ -632,6 +640,31 @@ class SlotManagerMixin:
             )
         return parked
 
+    @staticmethod
+    def resolve_park_guard(guard: str, *, parks_as_action: bool) -> str:
+        """Parking is for ACTIONS only — an update aimed at a slot this agent
+        cannot honour here, which is work to carry to its owner.
+
+        A side QUESTION never parks. It used to — a question about a step the
+        call had not reached ("will I get this by email?" during ZIP
+        collection) was promised for later, because the generation LLM saw only
+        Confirmed: and had no answer to give. "Coming up:" removed that reason:
+        the answer is available in the sentence the caller is already getting.
+        What the promise never had was anyone to keep it — follow_up drops
+        parked questions unanswered (answering them there produced stale,
+        misleading responses), so a parked question was a promise the call
+        could not keep, and a caller who asked about it was told a second time
+        that it was queued.
+
+        So a question the payload cannot answer is declined, gracefully, in the
+        turn it is asked: FOLLOWUP_RESPOND self-triages against Confirmed:,
+        Coming up:, and call scope. An honest "I can't help with that" beats a
+        promise nothing honours.
+        """
+        if guard == "FOLLOWUP_PARK" and not parks_as_action:
+            return "FOLLOWUP_RESPOND"
+        return guard
+
     def _match_promised_item(self, state: State, followup_query: str) -> str:
         """Promise text when ``followup_query`` asks about a parked/pending item.
 
@@ -659,7 +692,10 @@ class SlotManagerMixin:
             ):
                 if item.get("kind") == "action":
                     return f"the {item['target'].replace('_', ' ')} update is queued and will be handled"
-                return "that question is queued and will be answered"
+                # Legacy question item (pre-removal checkpoint): follow_up drops
+                # these, so do not tell the caller it is coming — say nothing
+                # and let FOLLOWUP_RESPOND answer or decline on its own terms.
+                continue
         return ""
 
     def _confirmed_slot_values(
@@ -1057,31 +1093,14 @@ class SlotManagerMixin:
         if promise and guard == "FOLLOWUP_PARK":
             guard = "FOLLOWUP_RESPOND"
 
-        # A plain question about a step this call has not reached yet — "will I
-        # get this by email?" while the ZIP is being collected — used to be
-        # deferred to the end of the call for no better reason than that the
-        # generation LLM was never told what was coming. It only ever saw
-        # Confirmed:, so a question whose answer lies ahead had no answer it
-        # could give, and promising to return to it was the honest move.
-        #
-        # With the remaining steps in the payload the answer is available now
-        # ("you'll choose fax or email in a moment"), and the caller hears it in
-        # the sentence they are already getting rather than several turns later.
-        #
-        # Two things still park, and they are the ones parking is for:
-        #   - an ACTION: an update aimed at a slot this agent cannot honour here.
-        #     That is work to carry to its owner, not a question to answer.
-        #   - anything with no coming_up to answer from. Parking stays the
-        #     fallback: promising to return to a question beats telling the
-        #     caller it cannot be answered.
         coming_up = [s.replace("_", " ") for s in (ctx.coming_up or remaining) if s != slot_name]
         parks_as_action = bool(update_target and update_target not in applied)
-        if guard == "FOLLOWUP_PARK" and followup_query and not parks_as_action and coming_up:
+        if (resolved := self.resolve_park_guard(guard, parks_as_action=parks_as_action)) != guard:
             self.logger.info(
-                "followup answered inline instead of parked",
+                "followup handled inline instead of parked",
                 extra={"slot": slot_name, "coming_up": coming_up},
             )
-            guard = "FOLLOWUP_RESPOND"
+            guard = resolved
 
         # Always pass real confirmed values — the generation LLM uses them to
         # decide whether it can answer; FOLLOWUP_ANSWER (detour) uses same path.
@@ -1124,18 +1143,11 @@ class SlotManagerMixin:
         if clear_verify:
             interrupt["member_status_verify"] = False
         if guard == "FOLLOWUP_PARK" and followup_query:
-            # Structured parked item: an unhonored update_target parks as an
-            # actionable item follow_up routes via the ownership registry;
-            # plain side questions park as kind="question".
+            # Only an unhonored update_target reaches here (the downgrade above
+            # sends everything else to FOLLOWUP_RESPOND), so the item is always
+            # an action follow_up routes via the ownership registry.
             parked = normalize_parked_followups(state.get("parked_followups"))
-            is_action = bool(update_target and update_target not in applied)
-            parked.append(
-                {
-                    "query": followup_query,
-                    "kind": "action" if is_action else "question",
-                    "target": update_target if is_action else "",
-                }
-            )
+            parked.append({"query": followup_query, "kind": "action", "target": update_target})
             interrupt["parked_followups"] = parked
         # Foreign corrections this pipeline could not apply (Case A) park as
         # actions so the owning flow honors them — never silently dropped.

@@ -12,7 +12,7 @@ build_generation_prompt(guard) in src/agent/utils.py:
   events/offtopic_agent.md  — OFFTOPIC_AGENT redirect
   events/interruption.md    — INTERRUPTION steer-back
   events/followup_answer.md — FOLLOWUP_ANSWER (answer from Confirmed values)
-  events/followup_park.md   — FOLLOWUP_PARK (promise to answer later)
+  events/followup_park.md   — FOLLOWUP_PARK (promise to carry out an update later)
   events/followup_decline.md— FOLLOWUP_DECLINE (warm decline)
 
 Edit those files instead. This placeholder is kept for one release so stale

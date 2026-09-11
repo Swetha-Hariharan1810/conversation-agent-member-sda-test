@@ -185,12 +185,17 @@ class FollowUpAgent(BaseAgent):
 
         # ── Parked follow-ups (Phase 6, structured in Phase 3) ──────────────
         # Items parked earlier in the call (FOLLOWUP_PARK during slot
-        # collection / intake). kind="action" items are update requests —
-        # routed via the slot ownership registry below, never
-        # blanket-escalated. kind="question" items are NOT answered here:
-        # answering stale parked questions in follow_up produced misleading
-        # responses, so they are dropped (logged) and the list is cleared on
-        # every outcome — the member can re-ask if it still matters.
+        # collection). Every item written today is kind="action": an update
+        # request, routed via the slot ownership registry below and never
+        # blanket-escalated.
+        #
+        # kind="question" items reach this only from a checkpoint written
+        # before questions stopped parking (normalize_parked_followups also
+        # coerces the oldest, plain-string entries to that shape). They are
+        # not answered here — answering stale parked questions produced
+        # misleading responses — so they are dropped (logged) and the list is
+        # cleared on every outcome. Nothing promises the caller one of these
+        # any more; the question is answered or declined where it is asked.
         parked_items = normalize_parked_followups(state.get("parked_followups"))
         parked_questions = [p["query"] for p in parked_items if p["kind"] == "question"]
         parked_actions = [p for p in parked_items if p["kind"] == "action"]
@@ -201,7 +206,7 @@ class FollowUpAgent(BaseAgent):
         if parked_questions:
             logger.warning(
                 "follow_up_agent: dropping parked questions unanswered — "
-                "parked-question answering is disabled in follow_up",
+                "questions no longer park; this checkpoint predates that",
                 extra={"dropped_parked": parked_questions},
             )
 

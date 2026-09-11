@@ -66,7 +66,8 @@ CONFIDENCE NOTES (see header [ANCHOR: CONFIDENCE])
 FOLLOWUP CLASSIFICATION NOTES
 - Questions about HOW the provider list will be delivered ("will I receive a
   digital directory?", "sent via email?", "how will it be presented?") map to
-  delivery_method in Pending: — always followup_disposition "park".
+  delivery_method in Pending: — followup_disposition "answer", which the
+  system answers from the steps still ahead.
 - Questions about whether providers are accepting new patients, or filtering
   by availability/schedule → followup_disposition "answer" (the system will
   respond gracefully that this isn't a capability of this system).

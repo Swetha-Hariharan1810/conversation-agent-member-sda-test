@@ -181,10 +181,11 @@ class IntakeAgent(BaseAgent):
         # Intent is classified — check if caller also said something extra
         # that needs acknowledging before we route to verification.
         # Phase 6: routed through the same disposition mapping as _collect_slot
-        # (Phase 4). Intake has no confirmed slots yet, so the extraction prompt
-        # emits park/decline (answer_now only for repeat/confirmation of the
-        # just-stated intent); missing/none defaults to decline. PARK queues the
-        # side question in parked_followups for follow_up_agent to answer.
+        # (Phase 4). Intake has no confirmed slots yet, so a side question here
+        # is answered from call scope or declined — in the sentence it is asked.
+        # Nothing parks: intake carries no update_target, and a parked question
+        # is a promise follow_up does not keep. Missing/none defaults to
+        # FOLLOWUP_RESPOND, which self-triages.
         # Option A applies here too: Gemini only acknowledges — Python appends
         # the first-name bridge ask and routes straight to verification, exactly
         # like the clean answered path below.
@@ -194,7 +195,12 @@ class IntakeAgent(BaseAgent):
 
             disposition = getattr(result, "followup_disposition", None)
             disposition_value = str(getattr(disposition, "value", disposition) or "none")
-            guard = _DISPOSITION_GUARDS.get(disposition_value, "FOLLOWUP_RESPOND")
+            # Intake carries no update_target, so nothing here is ever an
+            # action — a side question is answered or declined where it is asked.
+            guard = self.resolve_park_guard(
+                _DISPOSITION_GUARDS.get(disposition_value, "FOLLOWUP_RESPOND"),
+                parks_as_action=False,
+            )
             followup_query = (getattr(result, "followup_query", None) or "").strip()
             logger.info(
                 "IntakeAgent: answered_with_followup — disposition routing",
@@ -217,12 +223,6 @@ class IntakeAgent(BaseAgent):
             bridge["resolved_intents"] = ["intake"]
             bridge["next_node"] = AgentNode.VERIFICATION.value
             bridge["metadata_events"] = []
-            if guard == "FOLLOWUP_PARK" and followup_query:
-                from agent.state import normalize_parked_followups
-
-                parked = normalize_parked_followups(state.get("parked_followups"))
-                parked.append({"query": followup_query, "kind": "question", "target": ""})
-                bridge["parked_followups"] = parked
             if provider_type:
                 bridge["provider_type"] = provider_type
             return bridge
