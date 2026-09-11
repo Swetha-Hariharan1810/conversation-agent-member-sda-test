@@ -35,8 +35,8 @@ from agent.agents.provider_search.pipelines import (
 )
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
+from agent.core.confirmation import is_not_an_answer
 from agent.llm.config import get_extraction_llm
-from agent.llm.schema import EventType, FollowupDisposition
 from agent.logger import get_logger
 from agent.slots.normalizers import normalize_provider_type, normalize_yes_no, normalize_zip_code
 from agent.slots.validators import validate_zip_code
@@ -233,7 +233,7 @@ class ProviderSearchAgent(BaseAgent):
             # The ways of saying yes are not endless, and a ZIP is a shape, so
             # those two are recognised and everything else is a decline by
             # default. Nothing here has to know the phrasing to act on it.
-            if self._is_not_an_answer(result, last_user):
+            if is_not_an_answer(result, last_user, owned_slots=("zip_code", "zip_confirmed")):
                 # The caller is not answering this question at all — uncertain,
                 # asking to hold, or raising something else. Re-ask it.
                 return await self._retry_zip_confirmation(
@@ -265,36 +265,6 @@ class ProviderSearchAgent(BaseAgent):
         collect_result["awaiting_slot"] = "zip_code"
         collect_result["provider_type"] = provider_type
         return collect_result
-
-    @staticmethod
-    def _is_not_an_answer(result, last_user: str) -> bool:
-        """Is this turn about something other than the ZIP we read back?
-
-        Read off the model's own classification of the turn, never off the
-        words in it. Each of these says "the caller did not take a position on
-        the ZIP on file", so re-asking the confirmation is right and reading a
-        decline into it would be wrong:
-
-          - nothing came back at all (the extraction call threw), or the
-            caller said nothing we can see
-          - AMBIGUOUS: "I'm not sure", "I think so?" — they do not know
-          - WAIT: "hold on a second" — they are not answering yet
-          - a side question rides the turn: it gets answered or parked
-          - they want to change a DIFFERENT slot — that routes elsewhere
-
-        Anything else the caller says in answer to "is this ZIP right?" that is
-        not "yes" and is not a ZIP is a decline, whatever words it arrives in.
-        """
-        if result is None or not (last_user or "").strip():
-            return True
-        if result.event_type in (EventType.AMBIGUOUS, EventType.WAIT):
-            return True
-        if result.followup_disposition in (FollowupDisposition.ANSWER, FollowupDisposition.PARK):
-            return True
-        if (result.followup_query or "").strip():
-            return True
-        target = (result.update_target or "").strip().lower()
-        return bool(target) and target not in ("zip_confirmed", "zip_code")
 
     async def _retry_zip_confirmation(
         self,

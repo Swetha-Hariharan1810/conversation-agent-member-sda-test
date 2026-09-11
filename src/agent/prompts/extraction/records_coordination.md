@@ -48,6 +48,14 @@ FIELDS
     Whether the member confirms the email address just read aloud by the agent.
     Only extract when the agent just read back an email address to the member.
 
+    Governing rule: anything other than a clear affirmation is a decline →
+    "no", not "ambiguous". The affirmations are a closed set and are listed
+    below; the ways of declining are not, so do not look for a wording among
+    them — if the member is not affirming the address and is not giving you a
+    different one, they are declining it. Reserve "ambiguous" for a member who
+    genuinely does not know ("I'm not sure", "I think so?"), which is the one
+    case the agent re-asks rather than collecting a new address.
+
     Clear affirmations → "yes":
       "yes", "correct", "that's right", "yep", "absolutely",
       "yes that's correct", "yes that's my email",

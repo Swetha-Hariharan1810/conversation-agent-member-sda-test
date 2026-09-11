@@ -46,6 +46,7 @@ from agent.agents.notification_setup.handlers import (
 from agent.agents.notification_setup.llm import extract_notification_decision
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
+from agent.core.confirmation import is_not_an_answer
 from agent.core.request_detection import reconcile_worker_result
 from agent.llm.config import get_extraction_llm
 from agent.llm.extractor import remaining_slots
@@ -290,8 +291,6 @@ class NotificationSetupAgent(BaseAgent):
             # directly so a clear yes/no advances on the first turn. Gated on the
             # absence of a replacement phone so an inline correction
             # ("no, use 555-1234") still routes through the replacement branch.
-            if not contact_conf and not new_phone_raw:
-                contact_conf = normalize_yes_no(last_user) if last_user else ""
             # Extraction contract: a replacement phone and contact_confirmed are
             # mutually exclusive. If a "no" arrives alongside a phone, the phone is
             # an echo of the Confirmed: context line — discard it so the decline is
@@ -336,36 +335,43 @@ class NotificationSetupAgent(BaseAgent):
                 done = await self._save_and_complete(state, "sms", pending_phone or phone_on_file)
                 done["pending_phone"] = ""
                 return done
-            if contact_conf == "no":
-                if escalation := self.guard_loop_limit(
-                    state,
-                    "phone_change_cycles",
-                    MAX_CONTACT_CHANGE_CYCLES,
-                    escalate_message=pick(MSG_CONTACT_EXHAUST),
-                    escalate_reason="phone_change_loop_exceeded_in_notification",
-                ):
-                    return escalation
-                ask_result = self.ask_member(state, pick(PHONE_UPDATE_PROMPTS))
-                ask_result["awaiting_slot"] = "phone"
-                ask_result["pending_phone"] = ""
-                return ask_result
-
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
-            self.slot_fail("phone_confirmed")
-            if self.get_slot("phone_confirmed").is_exhausted():
-                return self.signal_escalate(
-                    state, pick(MSG_CONTACT_EXHAUST), reason="phone_confirmed_exhausted_in_notification"
+
+            # Not an answer to the read-back — uncertain, holding, or raising
+            # something else. Re-ask it.
+            if is_not_an_answer(result, last_user, owned_slots=("phone", "phone_confirmed")):
+                self.slot_fail("phone_confirmed")
+                if self.get_slot("phone_confirmed").is_exhausted():
+                    return self.signal_escalate(
+                        state, pick(MSG_CONTACT_EXHAUST), reason="phone_confirmed_exhausted_in_notification"
+                    )
+                ctx = ConversationContext.from_state(state)
+                retry_msg = await self._generate_slot_retry_response(
+                    state, "phone_confirmed", ctx, messages, decision=result
                 )
-            ctx = ConversationContext.from_state(state)
-            retry_msg = await self._generate_slot_retry_response(
-                state, "phone_confirmed", ctx, messages, decision=result
-            )
-            retry_result = self.ask_member(state, retry_msg)
-            retry_result["awaiting_slot"] = "phone_confirmed"
-            retry_result["notification_channel"] = "sms"
-            return retry_result
+                retry_result = self.ask_member(state, retry_msg)
+                retry_result["awaiting_slot"] = "phone_confirmed"
+                retry_result["notification_channel"] = "sms"
+                return retry_result
+
+            # Anything else the caller says to "is this the right number?" that
+            # is neither "yes" nor a phone number declines the one on file. Ask
+            # for the current one — no phrasing had to be recognised to get here.
+            if escalation := self.guard_loop_limit(
+                state,
+                "phone_change_cycles",
+                MAX_CONTACT_CHANGE_CYCLES,
+                escalate_message=pick(MSG_CONTACT_EXHAUST),
+                escalate_reason="phone_change_loop_exceeded_in_notification",
+            ):
+                return escalation
+            logger.info("notification_setup: phone on file declined — collecting the current one")
+            ask_result = self.ask_member(state, pick(PHONE_UPDATE_PROMPTS))
+            ask_result["awaiting_slot"] = "phone"
+            ask_result["pending_phone"] = ""
+            return ask_result
 
         # ── PHASE 2: Phone update ──────────────────────────────────────────────
         if current_awaiting == "phone":
@@ -419,8 +425,6 @@ class NotificationSetupAgent(BaseAgent):
             # ("yes thats correct", "yes", "yes please" → "yes") directly so a clear
             # yes/no advances on the first turn. Gated on the absence of a
             # replacement email so an inline correction does not get swallowed.
-            if not contact_conf and not new_email_raw:
-                contact_conf = normalize_yes_no(last_user) if last_user else ""
             # Extraction contract: a replacement email and contact_confirmed are
             # mutually exclusive. If a "no" arrives alongside an email, the email is
             # an echo of the Confirmed: context line — discard it so the decline is
@@ -467,49 +471,55 @@ class NotificationSetupAgent(BaseAgent):
                 done = await self._save_and_complete(state, "email", pending_email or email_on_file)
                 done["pending_email"] = ""
                 return done
-            if contact_conf == "no":
-                if escalation := self.guard_loop_limit(
-                    state,
-                    "email_change_cycles",
-                    MAX_CONTACT_CHANGE_CYCLES,
-                    escalate_message=pick(MSG_CONTACT_EXHAUST),
-                    escalate_reason="email_change_loop_exceeded_in_notification",
-                ):
-                    return escalation
-                ask_result = self.ask_member(state, pick(EMAIL_UPDATE_PROMPTS))
-                ask_result["awaiting_slot"] = "email"
-                ask_result["pending_email"] = ""
-                return ask_result
-
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
-            self.slot_fail("email_confirmed")
-            if self.get_slot("email_confirmed").is_exhausted():
-                return self.signal_escalate(
-                    state, pick(MSG_CONTACT_EXHAUST), reason="email_confirmed_exhausted_in_notification"
-                )
-            from agent.llm.response_generator import generate_recovery_message
 
-            display_email = speak_email(pending_email or email_on_file)
-            ctx = ConversationContext.from_state(state)
-            retry_msg = await generate_recovery_message(
-                slot_name="email_confirmed",
-                attempt=self.get_slot("email_confirmed").attempt_count,
-                guard="RETRY",
-                last_messages=messages[-4:],
-                slot_label_override=f"email confirmation — ASK the member to confirm whether the "
-                f"email address {display_email} is correct for notifications (yes or no). Do NOT "
-                f"claim the email is already confirmed and do NOT say 'I've confirmed' — you are "
-                f"still waiting on their yes/no.",
-                caller_name=ctx.caller_first_name,
-                confirmed_slots=dict.fromkeys(ctx.confirmed_slots, "confirmed"),
-                user_utterance=_last_user_msg(messages),
-            )
-            retry_result = self.ask_member(state, retry_msg)
-            retry_result["awaiting_slot"] = "email_confirmed"
-            retry_result["notification_channel"] = "email"
-            return retry_result
+            # Not an answer to the read-back — uncertain, holding, or raising
+            # something else. Re-ask it.
+            if is_not_an_answer(result, last_user, owned_slots=("email", "email_confirmed")):
+                self.slot_fail("email_confirmed")
+                if self.get_slot("email_confirmed").is_exhausted():
+                    return self.signal_escalate(
+                        state, pick(MSG_CONTACT_EXHAUST), reason="email_confirmed_exhausted_in_notification"
+                    )
+                from agent.llm.response_generator import generate_recovery_message
+
+                display_email = speak_email(pending_email or email_on_file)
+                ctx = ConversationContext.from_state(state)
+                retry_msg = await generate_recovery_message(
+                    slot_name="email_confirmed",
+                    attempt=self.get_slot("email_confirmed").attempt_count,
+                    guard="RETRY",
+                    last_messages=messages[-4:],
+                    slot_label_override=f"email confirmation — ASK the member to confirm whether the "
+                    f"email address {display_email} is correct for notifications (yes or no). Do NOT "
+                    f"claim the email is already confirmed and do NOT say 'I've confirmed' — you are "
+                    f"still waiting on their yes/no.",
+                    caller_name=ctx.caller_first_name,
+                    confirmed_slots=dict.fromkeys(ctx.confirmed_slots, "confirmed"),
+                    user_utterance=_last_user_msg(messages),
+                )
+                retry_result = self.ask_member(state, retry_msg)
+                retry_result["awaiting_slot"] = "email_confirmed"
+                retry_result["notification_channel"] = "email"
+                return retry_result
+
+            # Anything else declines the address on file. Ask for the current
+            # one — no phrasing had to be recognised to get here.
+            if escalation := self.guard_loop_limit(
+                state,
+                "email_change_cycles",
+                MAX_CONTACT_CHANGE_CYCLES,
+                escalate_message=pick(MSG_CONTACT_EXHAUST),
+                escalate_reason="email_change_loop_exceeded_in_notification",
+            ):
+                return escalation
+            logger.info("notification_setup: email on file declined — collecting the current one")
+            ask_result = self.ask_member(state, pick(EMAIL_UPDATE_PROMPTS))
+            ask_result["awaiting_slot"] = "email"
+            ask_result["pending_email"] = ""
+            return ask_result
 
         # ── PHASE 2: Email update ─────────────────────────────────────────────
         if current_awaiting == "email":
