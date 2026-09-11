@@ -21,6 +21,20 @@ def normalize_name(value: str) -> str:
 async def find_member_by_identity(
     *, member_id: str, first_name: str, last_name: str, dob: str, ssn: Optional[str] = None
 ) -> Optional[Dict]:
+    """Match a member on the full identity tuple. Returns None if any part is missing.
+
+    The empty-value guard matters for correctness, not just for tidiness: the
+    query layer drops empty filters, so calling this without a DOB would match
+    on name alone and hand back an account the caller never proved they own.
+    A missing field means "no match", never "match on less".
+    """
+    if not (first_name and first_name.strip()):
+        return None
+    if not (last_name and last_name.strip()):
+        return None
+    if not (dob and dob.strip()):
+        return None
+
     where = {
         "first_name": normalize_name(first_name),
         "last_name": normalize_name(last_name),
