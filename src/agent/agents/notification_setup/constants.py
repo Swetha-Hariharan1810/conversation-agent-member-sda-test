@@ -89,6 +89,12 @@ N2_EMAIL_CONFIRM = [
     "Perfect, I'll send progress updates to {email}.",
 ]
 
+# Said when the caller gave the contact themselves this turn — the "same
+# number on record" phrasing below would be untrue of a number they just
+# changed, and the caller needs to hear the one actually being used.
+N2_PHONE_CONFIRM_GIVEN = "Got it, I'll send progress updates by SMS to {phone}."
+N2_EMAIL_CONFIRM_GIVEN = "Got it, I'll send progress updates to {email}."
+
 N2_PHONE_CONFIRM = [
     "Sure, I will send SMS notifications to {phone}.",
     "Got it, I'll send progress updates by SMS to {phone}.",

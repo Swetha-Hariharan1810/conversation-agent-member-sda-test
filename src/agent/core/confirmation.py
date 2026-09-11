@@ -73,3 +73,51 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
 
     target = str(getattr(result, "update_target", "") or "").strip().lower()
     return bool(target) and target not in {s.strip().lower() for s in owned_slots}
+
+
+# Extraction field and validation for each delivery channel a caller can name.
+# "sms" and "phone" are the same contact under two names — the channel is how
+# it will be used, the field is where the extraction puts it.
+_CHANNEL_CONTACT: dict[str, str] = {
+    "fax": "fax",
+    "email": "email",
+    "sms": "phone",
+    "phone": "phone",
+}
+
+
+def carried_contact(result: Any, channel: str) -> str:
+    """A valid contact for ``channel`` the caller gave in this same utterance.
+
+    "Send it by fax, use 415-555-3211" names the channel and the number in one
+    breath; "text me at 415-555-3211" and "email it to jim at example dot com"
+    do the same. The contact is the caller's answer just as much as the channel
+    is, and an agent that takes only the channel then reads the value on file
+    back invites a "yes" to a destination the caller never gave — which is how
+    a provider list, or a claim notification, reaches the wrong number carrying
+    the caller's own apparent agreement to it.
+
+    Returns "" when nothing usable was given: a half-heard number that does not
+    validate is not a value the caller can be held to, and the contact on file
+    is confirmed instead, as before.
+    """
+    from agent.slots.normalizers import normalize_email, normalize_fax_number, normalize_phone_number
+    from agent.slots.validators import validate_email, validate_fax_number, validate_phone_number
+
+    field = _CHANNEL_CONTACT.get((channel or "").strip().lower())
+    if not field:
+        return ""
+
+    extracted = (getattr(result, "extracted", None) or {}) if result else {}
+    raw = str(extracted.get(field) or "")
+    if not raw:
+        return ""
+
+    normalize, validate = {
+        "fax": (normalize_fax_number, validate_fax_number),
+        "email": (normalize_email, validate_email),
+        "phone": (normalize_phone_number, validate_phone_number),
+    }[field]
+
+    candidate = normalize(raw)
+    return candidate if candidate and validate(candidate).valid else ""

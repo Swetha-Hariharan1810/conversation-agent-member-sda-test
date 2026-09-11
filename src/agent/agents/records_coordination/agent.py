@@ -43,7 +43,7 @@ from agent.agents.records_coordination.handlers import dispatch_personal_guide, 
 from agent.agents.records_coordination.llm import extract_records_decision
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import is_not_an_answer
+from agent.core.confirmation import carried_contact, is_not_an_answer
 from agent.core.request_detection import reconcile_worker_result
 from agent.llm.config import get_extraction_llm
 from agent.llm.extractor import remaining_slots
@@ -202,7 +202,19 @@ class RecordsCoordinationAgent(BaseAgent):
             upload_consent = normalize_yes_no(extracted.get("upload_consent", ""))
 
             if upload_consent == "yes":
-                # Confirm email before sending
+                # Confirm email before sending. A caller who answers with the
+                # address ("yes, send it to jim at example dot com") has given
+                # it; reading the one on file back instead would take their
+                # "yes" as agreement to an address they replaced.
+                if carried := carried_contact(result, "email"):
+                    confirm_result = self.ask_member(
+                        state,
+                        f"Just to be sure I have it right — the email address is "
+                        f"{speak_email(carried)}, correct?",
+                    )
+                    confirm_result["awaiting_slot"] = "email_confirmed"
+                    confirm_result["pending_email"] = carried
+                    return confirm_result
                 email_on_file = (state.get("email") or "").strip()
                 if email_on_file:
                     # Spell out the email in words ("at"/"dot") for the spoken message

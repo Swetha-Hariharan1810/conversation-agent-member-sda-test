@@ -39,7 +39,7 @@ from agent.agents.delivery_management.pipelines import (
     build_fax_pipeline,
 )
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import is_not_an_answer
+from agent.core.confirmation import carried_contact, is_not_an_answer
 from agent.core.request_detection import detect_request, reconcile_worker_result
 from agent.core.slot_ownership import canonical_capability_topic
 from agent.llm.config import get_extraction_llm
@@ -350,7 +350,7 @@ class DeliveryManagementAgent(BaseAgent):
             # back, not the one on file — confirming a number the caller never
             # said, on the strength of their "yes", sends the list to the wrong
             # place with their apparent agreement.
-            if carried := self._carried_contact(result, delivery_method):
+            if carried := carried_contact(result, delivery_method):
                 logger.info(
                     LOG_CONTACT_UPDATED,
                     extra={"method": delivery_method, "source": "given with the channel"},
@@ -688,23 +688,6 @@ class DeliveryManagementAgent(BaseAgent):
     # Private helpers
     # -------------------------------------------------------------------------
 
-    @staticmethod
-    def _carried_contact(result, method: str) -> str:
-        """A valid contact for ``method`` the caller gave in this same utterance.
-
-        "Send it by fax, use 415-555-3211" names the channel and the number in
-        one breath. The number is the caller's answer just as much as the
-        channel is, and reading the one on file back to them instead invites a
-        "yes" to a destination they never gave — which is how a provider list
-        goes to the wrong fax with the caller's own confirmation on it.
-        """
-        extracted = (getattr(result, "extracted", None) or {}) if result else {}
-        if method == "email":
-            candidate = normalize_email(str(extracted.get("email") or ""))
-            return candidate if candidate and validate_email(candidate).valid else ""
-        candidate = normalize_fax_number(str(extracted.get("fax") or ""))
-        return candidate if candidate and validate_fax_number(candidate).valid else ""
-
     def _confirm_carried_contact(
         self, state: State, method: str, value: str, fax_on_file: str, email_on_file: str
     ) -> dict:
@@ -843,7 +826,7 @@ class DeliveryManagementAgent(BaseAgent):
         self.slot_ok("delivery_method", new_method)
 
         # New contact value in the same utterance → straight to its read-back.
-        carried_value = self._carried_contact(result, new_method)
+        carried_value = carried_contact(result, new_method)
         if carried_value:
             confirm = self._confirm_carried_contact(
                 state, new_method, carried_value, fax_on_file, email_on_file

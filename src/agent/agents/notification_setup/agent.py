@@ -30,8 +30,10 @@ from agent.agents.notification_setup.constants import (
     MSG_METHOD_EXHAUST,
     MSG_TIMELINE_ANSWER,
     N2_EMAIL_CONFIRM,
+    N2_EMAIL_CONFIRM_GIVEN,
     N2_METHOD_ASK,
     N2_PHONE_CONFIRM,
+    N2_PHONE_CONFIRM_GIVEN,
     NOTIFICATION_METHOD_ASK,
     NOTIFICATION_SLOT_ORDER,
     PHONE_READBACK_TEMPLATES,
@@ -46,7 +48,7 @@ from agent.agents.notification_setup.handlers import (
 from agent.agents.notification_setup.llm import extract_notification_decision
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import is_not_an_answer
+from agent.core.confirmation import carried_contact, is_not_an_answer
 from agent.core.request_detection import reconcile_worker_result
 from agent.llm.config import get_extraction_llm
 from agent.llm.extractor import remaining_slots
@@ -244,12 +246,16 @@ class NotificationSetupAgent(BaseAgent):
             raw_method = extracted.get("notification_method", "")
             method = normalize_notification_method(raw_method) if raw_method else ""
 
-            if method == "sms":
-                logger.info(LOG_METHOD_COLLECTED, extra={"method": "sms"})
-                return self._ask_contact_confirmation(state, "sms")
-            if method == "email":
-                logger.info(LOG_METHOD_COLLECTED, extra={"method": "email"})
-                return self._ask_contact_confirmation(state, "email")
+            if method in ("sms", "email"):
+                logger.info(LOG_METHOD_COLLECTED, extra={"method": method})
+                # A contact given in the same breath as the channel ("text me
+                # at 415-555-3211") is the caller's answer too. Read THAT back,
+                # not the one on file — a "yes" to a number the caller never
+                # said points their claim notifications somewhere else, with
+                # their apparent agreement on it.
+                if carried := carried_contact(result, method):
+                    return self._confirm_carried_contact(state, method, carried)
+                return self._ask_contact_confirmation(state, method)
 
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
@@ -561,22 +567,39 @@ class NotificationSetupAgent(BaseAgent):
             method = normalize_notification_method(raw_method) if raw_method else ""
 
             if method == "sms":
-                phone_on_file = (state.get("phone_number") or "").strip()
-                if phone_on_file:
-                    digits = "".join(c for c in phone_on_file if c.isdigit())
+                # A number given with the channel is the one to use. This path
+                # saves and completes in a single turn with no read-back, so
+                # taking the value on file here would commit the wrong number
+                # with nothing in the sentence for the caller to catch. The
+                # template says the destination aloud, so saying the right one
+                # is what gives them the chance.
+                carried_phone = carried_contact(result, "sms")
+                phone_to_use = carried_phone or (state.get("phone_number") or "").strip()
+                if phone_to_use:
+                    digits = "".join(c for c in phone_to_use if c.isdigit())
                     formatted = (
-                        f"{digits[:3]}-{digits[3:6]}-{digits[6:]}" if len(digits) == 10 else phone_on_file
+                        f"{digits[:3]}-{digits[3:6]}-{digits[6:]}" if len(digits) == 10 else phone_to_use
                     )
-                    confirm_msg = random.choice(N2_PHONE_CONFIRM).format(phone=formatted)
-                    return await self._n2_save_and_complete(state, "sms", phone_on_file, confirm_msg)
+                    # "the same number on record" is only true of the one on file.
+                    confirm_msg = (
+                        N2_PHONE_CONFIRM_GIVEN.format(phone=formatted)
+                        if carried_phone
+                        else random.choice(N2_PHONE_CONFIRM).format(phone=formatted)
+                    )
+                    return await self._n2_save_and_complete(state, "sms", phone_to_use, confirm_msg)
                 # No phone on file — fall through to exhaust/escalate
             elif method == "email":
-                email_on_file = (state.get("email") or "").strip()
+                carried_email = carried_contact(result, "email")
+                email_on_file = carried_email or (state.get("email") or "").strip()
                 if email_on_file:
                     # Spoken-form requirement: spell the email out in words
                     # ("at"/"dot") in the AI message. The raw email is still
                     # saved as the contact value.
-                    confirm_msg = random.choice(N2_EMAIL_CONFIRM).format(email=speak_email(email_on_file))
+                    confirm_msg = (
+                        N2_EMAIL_CONFIRM_GIVEN.format(email=speak_email(email_on_file))
+                        if carried_email
+                        else random.choice(N2_EMAIL_CONFIRM).format(email=speak_email(email_on_file))
+                    )
                     return await self._n2_save_and_complete(state, "email", email_on_file, confirm_msg)
                 # No email on file — fall through to exhaust/escalate
 
@@ -737,6 +760,32 @@ class NotificationSetupAgent(BaseAgent):
             result["awaiting_slot"] = "notification_method"
         if prefix:
             result["messages"]["content"] = prefix + result["messages"]["content"]
+        return result
+
+    def _confirm_carried_contact(self, state: State, method: str, value: str) -> dict:
+        """Read back the contact the caller just gave, held pending until confirmed.
+
+        Nothing is written until they confirm it: the value on file stays put,
+        and a mis-heard digit is caught here rather than in a notification that
+        never arrives.
+        """
+        if method == "sms":
+            digits = "".join(c for c in value if c.isdigit())
+            formatted = f"{digits[:3]}-{digits[3:6]}-{digits[6:]}" if len(digits) == 10 else value
+            result = self.ask_member(
+                state,
+                f"Just to be sure I have it right — the number is {formatted}, correct?",
+            )
+            result["awaiting_slot"] = "phone_confirmed"
+            result["pending_phone"] = value
+        else:
+            result = self.ask_member(
+                state,
+                f"Just to be sure I have it right — the email address is {speak_email(value)}, correct?",
+            )
+            result["awaiting_slot"] = "email_confirmed"
+            result["pending_email"] = value
+        result["notification_channel"] = method
         return result
 
     def _ask_contact_confirmation(self, state: State, method: str) -> dict:
