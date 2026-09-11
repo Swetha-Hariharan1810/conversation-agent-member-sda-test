@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional, Tuple
 
 from agent.conversation.context import ConversationContext
+from agent.core.call_stages import remaining_call_stages
 from agent.core.constants import MAX_WAIT_TURNS
 from agent.core.models import SlotAttempt
 from agent.llm.config import Config
@@ -640,6 +641,34 @@ class SlotManagerMixin:
             )
         return parked
 
+    def build_coming_up(
+        self,
+        state: State,
+        *,
+        ctx: "ConversationContext",
+        remaining: list,
+        slot_name: str,
+    ) -> list[str]:
+        """What the call still has to cover, for the generation LLM.
+
+        Two parts, nearest first: the slots this pipeline has left, then the
+        stages of the call that come after this agent.
+
+        The second part is what makes the line usable. With only the first, it
+        ran out at the tail of every pipeline — and it was empty for the whole
+        of verification and intake, which is where a caller is most likely to
+        ask about something further on ("will I get a text about my claim?"
+        while giving their date of birth). A question the line cannot answer is
+        declined, so the narrower line meant declining questions this call was
+        always going to reach.
+        """
+        slots = [s.replace("_", " ") for s in (ctx.coming_up or remaining) if s != slot_name]
+        return slots + remaining_call_stages(
+            intent=str(state.get("call_intent") or ""),
+            current_agent=self.AGENT_NAME,
+            state=state,
+        )
+
     @staticmethod
     def resolve_park_guard(guard: str, *, parks_as_action: bool) -> str:
         """Parking is for ACTIONS only — an update aimed at a slot this agent
@@ -1093,7 +1122,7 @@ class SlotManagerMixin:
         if promise and guard == "FOLLOWUP_PARK":
             guard = "FOLLOWUP_RESPOND"
 
-        coming_up = [s.replace("_", " ") for s in (ctx.coming_up or remaining) if s != slot_name]
+        coming_up = self.build_coming_up(state, ctx=ctx, remaining=remaining, slot_name=slot_name)
         parks_as_action = bool(update_target and update_target not in applied)
         if (resolved := self.resolve_park_guard(guard, parks_as_action=parks_as_action)) != guard:
             self.logger.info(

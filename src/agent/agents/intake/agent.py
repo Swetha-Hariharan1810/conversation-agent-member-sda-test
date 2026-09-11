@@ -191,6 +191,7 @@ class IntakeAgent(BaseAgent):
         # like the clean answered path below.
         if result.event_type == EventType.ANSWERED_WITH_FOLLOWUP:
             from agent.conversation.context import ConversationContext
+            from agent.core.call_stages import remaining_call_stages
             from agent.core.slot_manager import _DISPOSITION_GUARDS, _mk_session_ctx
 
             disposition = getattr(result, "followup_disposition", None)
@@ -207,6 +208,10 @@ class IntakeAgent(BaseAgent):
                 extra={"intent": intent_value, "guard": guard, "app_run_id": app_run_id},
             )
 
+            # The whole flow is ahead of intake, so a side question about any
+            # of it ("will I get a text about this?") is answerable now. The
+            # intent comes from this turn's extraction — state.call_intent is
+            # only set on the bridge result below.
             ctx = ConversationContext.from_state(state)
             msg = await self._generate_slot_retry_response(
                 state,
@@ -214,7 +219,12 @@ class IntakeAgent(BaseAgent):
                 ctx=ctx,
                 messages=messages,
                 guard=guard,
-                session_context=_mk_session_ctx(followup_query=followup_query),
+                session_context=_mk_session_ctx(
+                    followup_query=followup_query,
+                    coming_up=remaining_call_stages(
+                        intent=intent_value, current_agent=self.AGENT_NAME, state=state
+                    ),
+                ),
                 extracted_this_turn=intent_value,
             )
             bridge = self.ask_member(state, msg.rstrip() + " " + random.choice(INTENT_BRIDGE_MSGS))
