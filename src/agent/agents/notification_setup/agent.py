@@ -611,6 +611,7 @@ class NotificationSetupAgent(BaseAgent):
                 handoff = pick(MSG_FOLLOW_UP_ASK)
                 result = self.ask_member(state, handoff)
                 result["next_node"] = "follow_up_agent"
+                result["awaiting_slot"] = ""
                 result.update(self._n2_completion_context(state, "not_set", ""))
                 result["last_agent_signal"] = {
                     "status": "complete",
@@ -898,6 +899,11 @@ class NotificationSetupAgent(BaseAgent):
         # is the true follow-up response — not the N2 method answer.
         result = self.ask_member(state, handoff)
         result["next_node"] = "follow_up_agent"
+        # The preference is saved and the open question is now "anything else?".
+        # A stale awaiting_slot here is read by the next turn's guards as a
+        # collection step still in progress, and an off-topic question gets
+        # answered with a redirect back to a slot the caller already gave.
+        result["awaiting_slot"] = ""
         result.update(self._n2_completion_context(state, method, contact))
         # Signal notification_setup is done so orchestrator fast-path doesn't re-enter it
         result["last_agent_signal"] = {
