@@ -44,11 +44,23 @@ class SignalsMixin:
                 existing[s] = 0
             result["ambiguous_counts"] = existing
             self._pending_ambiguous_resets = set()
-        # Phase 2 fix: persist confirmed slot values to LangGraph state mid-pipeline
+        # Phase 2 fix: persist confirmed slot values to LangGraph state mid-pipeline.
+        # A slot record restored from an EARLIER turn (or from another agent —
+        # slot_attempts is shared state) may disagree with the live value: the
+        # flow can deliberately change a slot after it was confirmed, e.g. a
+        # fax→email switch rewrites delivery_method while the delivery_method
+        # slot record still holds "fax". Re-persisting that stale record would
+        # silently resurrect the abandoned value on the next interrupt, so only
+        # a slot confirmed on THIS turn may override a differing live value.
         for slot_name, slot in self._slots.items():
-            if slot.confirmed and slot.last_value is not None and slot.last_value != "":
-                if slot_name not in result:
-                    result[slot_name] = slot.last_value
+            if not (slot.confirmed and slot.last_value is not None and slot.last_value != ""):
+                continue
+            if slot_name in result:
+                continue
+            live = str(state.get(slot_name) or "").strip()
+            if slot_name not in self._newly_confirmed and live and live != str(slot.last_value).strip():
+                continue
+            result[slot_name] = slot.last_value
         return result
 
     def signal_complete(
