@@ -38,12 +38,7 @@ from agent.core.agent import BaseAgent
 from agent.llm.config import get_extraction_llm
 from agent.llm.schema import EventType, RequestKind
 from agent.logger import get_logger
-from agent.slots.normalizers import (
-    find_zip_in_utterance,
-    normalize_provider_type,
-    normalize_yes_no,
-    normalize_zip_code,
-)
+from agent.slots.normalizers import normalize_provider_type, normalize_yes_no, normalize_zip_code
 from agent.slots.validators import validate_zip_code
 from agent.state import State
 from agent.utils import _last_assistant_msg, _last_user_msg, build_extraction_prompt_extraction, pick
@@ -203,37 +198,6 @@ class ProviderSearchAgent(BaseAgent):
             if zip_conf in ("yes", "no"):
                 new_zip_raw = ""
 
-            # A caller who answers with an actual ZIP has settled the question,
-            # whatever the extraction labelled the turn. The contract says a
-            # replacement arrives as zip_code with zip_confirmed left empty, but
-            # it holds only while the last question really was the read-back:
-            # once a re-ask has drifted to "what is your current ZIP code?" the
-            # LLM still sees "Currently asking for: zip_confirmed" and answers
-            # the question it was told about, returning zip_confirmed="no" for
-            # an utterance that is plainly a ZIP. The caller then gets asked for
-            # a ZIP they have already given. Reading the utterance settles it.
-            if not new_zip_raw:
-                zip_from_utterance = find_zip_in_utterance(last_user)
-                if zip_from_utterance:
-                    logger.info(
-                        "provider_search: ZIP read from the utterance over extraction",
-                        extra={"zip_confirmed": zip_conf or "", "zip_code": zip_from_utterance},
-                    )
-                    new_zip_raw = zip_from_utterance
-                    zip_conf = ""
-
-            # Deterministic decline, mirroring delivery_management's contact
-            # confirmation: a plain "No. I would like to change." must not cost
-            # a retry, because the retry is where the re-ask drifts off the
-            # confirmation question in the first place. Declines only — a
-            # misread "yes" would ship the provider list to a stale address,
-            # while a misread "no" costs one more question. This runs after the
-            # ZIP scan above, which is what keeps "Yeah. My current five digit
-            # ZIP code is seven eight seven zero one." from reading as a bare
-            # "yes" and confirming the ZIP the caller is replacing.
-            if not zip_conf and not new_zip_raw and normalize_yes_no(last_user) == "no":
-                zip_conf = "no"
-
             if new_zip_raw:
                 normalized = normalize_zip_code(str(new_zip_raw))
                 if normalized and validate_zip_code(normalized).valid:
@@ -298,14 +262,17 @@ class ProviderSearchAgent(BaseAgent):
                 attempt=slot.attempt_count,
                 guard="RETRY",
                 last_messages=messages[-4:],
-                # Ask ONLY the confirmation question. Inviting the generator to
-                # pivot to "what is your current ZIP?" here left awaiting_slot on
-                # zip_confirmed while the caller was being asked for a value —
-                # the next turn's extraction is told it is still collecting a
-                # yes/no and duly returns one for a spoken ZIP. Callers who say
-                # their address changed are declines, handled deterministically
-                # above without reaching this retry.
-                slot_label_override=(f"whether the ZIP code {spoken_zip} on file is correct (yes or no)"),
+                # Ask ONLY the confirmation question this branch says it is
+                # asking. This override used to end "— if they say their address
+                # changed, ask for their current ZIP", and the generator obliged:
+                # the caller was asked to supply a ZIP while awaiting_slot stayed
+                # on zip_confirmed. The next turn's extraction is told which slot
+                # it is filling, so it answered THAT question — zip_confirmed,
+                # no zip_code — for an utterance that was nothing but a ZIP, and
+                # the value the caller had just given was asked for again.
+                # A caller whose address changed is declining: the decline path
+                # asks for the new ZIP and sets awaiting_slot to match.
+                slot_label_override=f"whether the ZIP code {spoken_zip} on file is correct (yes or no)",
                 caller_name=ctx.caller_first_name,
                 confirmed_slots=dict.fromkeys(ctx.confirmed_slots, "confirmed"),
                 user_utterance=last_user,

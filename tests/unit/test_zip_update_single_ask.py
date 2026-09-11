@@ -1,24 +1,23 @@
-"""A ZIP given once must be collected once.
+"""The ZIP question and awaiting_slot must describe the same thing.
 
-Transcript bug — the caller was asked for the same ZIP three times:
+Transcript bug — the caller was asked for the same ZIP twice:
 
     ai    I have your ZIP code as 58797. Is that right?
     human No. I would like to change.
     ai    Of course — could you provide your current ZIP code for me?
     human Seven eight seven zero one.
     ai    No problem — what is your current 5-digit ZIP code?     ← asked again
-    human Yeah. My current five digit ZIP code is seven eight seven zero one.
 
-Two failures compound:
+That third line is generated, not a constant, and it came from the retry
+branch: its slot_label_override told the generator "...— if they say their
+address changed, ask for their current ZIP", so the message asked for a value
+while the branch left awaiting_slot on "zip_confirmed".
 
-  1. "No. I would like to change." produced no zip_confirmed extraction, so it
-     fell through to the RETRY branch. The recovery message it generated asked
-     for the current ZIP — but the branch leaves awaiting_slot on zip_confirmed,
-     so the message and the state disagreed about what was being collected.
-  2. On the next turn the extraction LLM is told "Currently asking for:
-     zip_confirmed", so it answered THAT question: zip_confirmed="no", no
-     zip_code, for an utterance that was nothing but a ZIP. The agent read a
-     second decline and asked for the ZIP again.
+The next turn's extraction is told what it is collecting. Asked for
+zip_confirmed, it answered THAT question — zip_confirmed="no", no zip_code —
+for an utterance that was nothing but a ZIP, and the agent read a second
+decline. The caller had already given the value the agent was still asking
+for, because the agent's own record of what it asked was wrong.
 """
 
 from __future__ import annotations
@@ -27,11 +26,16 @@ import pytest
 
 from agent.agents.provider_search import agent as provider_search
 from agent.agents.provider_search.agent import ProviderSearchAgent
+from agent.agents.provider_search.constants import ZIP_UPDATE_PROMPT
 from agent.llm.schema import WorkerResult
-from agent.slots.normalizers import find_zip_in_utterance, normalize_yes_no
 
 ZIP_ON_FILE = "58797"
 NEW_ZIP = "78701"
+
+# Instructions that send the generator off to collect a value instead of a
+# yes/no. The original override ended "— if they say their address changed,
+# ask for their current ZIP", and the generator did exactly that.
+_ASKS_FOR_A_VALUE = ("ask for", "provide", "what is your", "give me")
 
 
 def _text(result: dict) -> str:
@@ -62,8 +66,13 @@ def _state(last_user: str, **overrides) -> dict:
 
 @pytest.fixture
 def agent(monkeypatch):
-    """A ProviderSearchAgent with the LLM and Salesforce edges stubbed out."""
+    """A ProviderSearchAgent with the LLM and Salesforce edges stubbed out.
+
+    The recovery generator echoes the instruction it is handed, so a test can
+    see what the retry branch actually asks for.
+    """
     saved: dict = {}
+    asked: dict = {}
 
     async def _no_guards(*_args, **_kwargs):
         return None
@@ -72,12 +81,18 @@ def agent(monkeypatch):
         saved["zip_code"] = zip_code
         return None
 
+    async def _echo_recovery(**kwargs):
+        asked["slot_label_override"] = kwargs.get("slot_label_override", "")
+        return f"[generated] {asked['slot_label_override']}"
+
     monkeypatch.setattr(ProviderSearchAgent, "run_conversation_guards", _no_guards, raising=False)
     monkeypatch.setattr(provider_search, "update_zip_in_salesforce", _save_zip)
     monkeypatch.setattr(provider_search, "get_extraction_llm", lambda: object())
+    monkeypatch.setattr("agent.llm.response_generator.generate_recovery_message", _echo_recovery)
 
     instance = ProviderSearchAgent()
     instance.saved = saved
+    instance.asked = asked
     return instance
 
 
@@ -88,51 +103,50 @@ def _with_extraction(monkeypatch, result: WorkerResult):
     monkeypatch.setattr(provider_search, "extract_provider_search_decision", _fake_extract)
 
 
-# ── the transcript, turn by turn ─────────────────────────────────────────────
+# ── the invariant ────────────────────────────────────────────────────────────
 
 
-async def test_an_indirect_decline_asks_for_the_zip_and_says_so_in_state(agent, monkeypatch):
-    """Turn 1: "No. I would like to change." — one ask, awaiting_slot follows it."""
-    # What the extractor actually returned: nothing usable.
+async def test_a_retry_asks_the_confirmation_question_it_says_it_is_asking(agent, monkeypatch):
+    """The retry branch keeps awaiting_slot on zip_confirmed, so it must ask a yes/no.
+
+    This is the turn that broke the transcript: the extraction came back with
+    nothing usable, and the branch asked for the ZIP anyway.
+    """
     _with_extraction(monkeypatch, WorkerResult())
 
     result = await agent.run(_state("No. I would like to change."))
 
-    assert "ZIP" in _text(result)
-    # The message asks for a value, so the state must say a value is expected —
-    # this is what tells the next turn's extraction what it is collecting.
+    assert result["awaiting_slot"] == "zip_confirmed"
+    # Whatever else it says, it must not send the caller off to supply a value
+    # while the state still says a yes/no is expected.
+    override = agent.asked["slot_label_override"].lower()
+    assert "yes or no" in override  # it is still the confirmation question
+    assert not any(phrase in override for phrase in _ASKS_FOR_A_VALUE)
+
+
+async def test_asking_for_the_zip_always_says_so_in_state(agent, monkeypatch):
+    """A clean decline asks for the value — and records that a value is expected."""
+    _with_extraction(monkeypatch, WorkerResult(extracted={"zip_confirmed": "no"}))
+
+    result = await agent.run(_state("No, I moved."))
+
+    assert _text(result) == ZIP_UPDATE_PROMPT
     assert result["awaiting_slot"] == "zip_code"
 
 
-async def test_a_spoken_zip_is_accepted_even_when_extraction_calls_it_a_decline(agent, monkeypatch):
-    """Turn 2: the exact extraction from the transcript, on a bare spoken ZIP."""
-    _with_extraction(
-        monkeypatch,
-        WorkerResult(extracted={"zip_confirmed": "no"}),  # verbatim from the report
-    )
+async def test_a_zip_given_on_the_confirmation_turn_is_taken_not_re_asked(agent, monkeypatch):
+    """With a coherent question the extraction returns the ZIP — and it is used."""
+    _with_extraction(monkeypatch, WorkerResult(extracted={"zip_code": "78701"}))
 
     result = await agent.run(_state("Seven eight seven zero one."))
 
     assert agent.saved.get("zip_code") == NEW_ZIP
     assert result["zip_code"] == NEW_ZIP
     assert result["zip_code_updated"] is True
-    assert "5-digit ZIP" not in _text(result)
+    assert ZIP_UPDATE_PROMPT not in _text(result)
 
 
-async def test_the_zip_is_never_asked_for_a_third_time(agent, monkeypatch):
-    """Turn 3: the caller repeating themselves must not read as a bare "yes"."""
-    _with_extraction(monkeypatch, WorkerResult(extracted={"zip_confirmed": "no"}))
-
-    result = await agent.run(_state("Yeah. My current five digit ZIP code is seven eight seven zero one."))
-
-    # normalize_yes_no sees the leading "Yeah." and says yes — taking that would
-    # confirm 58797, the very ZIP the caller is replacing.
-    assert normalize_yes_no("Yeah. My current five digit ZIP code is seven eight seven zero one.") == "yes"
-    assert agent.saved.get("zip_code") == NEW_ZIP
-    assert result["zip_code"] == NEW_ZIP
-
-
-# ── the pieces, guarded individually ─────────────────────────────────────────
+# ── unchanged behaviour, guarded ─────────────────────────────────────────────
 
 
 async def test_a_plain_yes_still_confirms_the_zip_on_file(agent, monkeypatch):
@@ -140,20 +154,12 @@ async def test_a_plain_yes_still_confirms_the_zip_on_file(agent, monkeypatch):
 
     result = await agent.run(_state("Yes."))
 
-    assert agent.saved == {}  # nothing written
+    assert agent.saved == {}  # nothing written to Salesforce
     assert result.get("zip_code_updated") is not True
 
 
 async def test_genuine_uncertainty_still_re_asks_the_confirmation(agent, monkeypatch):
-    """ "I'm not sure" is ambiguous — it must not become a decline."""
     _with_extraction(monkeypatch, WorkerResult())
-
-    recovery = "Sorry — is the ZIP code 5 8 7 9 7 still correct?"
-
-    async def _fake_recovery(**_kwargs):
-        return recovery
-
-    monkeypatch.setattr("agent.llm.response_generator.generate_recovery_message", _fake_recovery)
 
     result = await agent.run(_state("I'm not sure."))
 
@@ -161,33 +167,10 @@ async def test_genuine_uncertainty_still_re_asks_the_confirmation(agent, monkeyp
     assert agent.saved == {}
 
 
-@pytest.mark.parametrize(
-    "utterance, expected",
-    [
-        ("Seven eight seven zero one.", NEW_ZIP),
-        ("Yeah. My current five digit ZIP code is seven eight seven zero one.", NEW_ZIP),
-        ("my zip is 78701", NEW_ZIP),
-        ("no, it's 10001", "10001"),
-        ("No. I would like to change.", ""),
-        ("Yes", ""),
-        ("I'm not sure", ""),
-        # A phone or fax number is not a ZIP.
-        ("you can fax it to 2155553299", ""),
-        # Two different candidates — ambiguous, leave it to the extraction LLM.
-        ("I think it is 78701 or maybe 78702", ""),
-        # The same ZIP said twice is still one ZIP.
-        ("seven eight seven zero one, that is seven eight seven zero one", NEW_ZIP),
-        # A spoken date must not read as a ZIP.
-        ("July thirty nineteen seventy seven", ""),
-    ],
-)
-def test_find_zip_in_utterance(utterance, expected):
-    assert find_zip_in_utterance(utterance) == expected
+async def test_a_repeated_zip_on_file_is_a_confirmation(agent, monkeypatch):
+    _with_extraction(monkeypatch, WorkerResult(extracted={"zip_code": ZIP_ON_FILE}))
 
+    result = await agent.run(_state("Five eight seven nine seven."))
 
-def test_find_zip_in_utterance_keeps_the_final_digit():
-    """normalize_zip_code drops "one." — trailing punctuation hides the token."""
-    from agent.slots.normalizers import normalize_zip_code
-
-    assert normalize_zip_code("Seven eight seven zero one.") != NEW_ZIP
-    assert find_zip_in_utterance("Seven eight seven zero one.") == NEW_ZIP
+    assert agent.saved == {}  # already on file — no write
+    assert result.get("zip_code_updated") is not True
