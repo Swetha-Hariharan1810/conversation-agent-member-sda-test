@@ -29,14 +29,13 @@ from agent.slots.normalizers import (
     normalize_dob,
     normalize_member_id,
     normalize_name,
-    normalize_yes_no,
 )
 from agent.slots.validators import (
     validate_dob,
     validate_member_id,
     validate_name,
 )
-from agent.utils import _last_user_msg, pick
+from agent.utils import pick
 
 # Escalation messages — delivered at the moment of verification failure handoff
 MSG_ESCALATE = [
@@ -326,19 +325,20 @@ async def collect_post_lookup(
         )
         claims_pipeline.configs["phone_confirmed"].prompt = prompt
         pipeline = claims_pipeline
-        # Deterministic fallback: same fix as notification_setup_agent. The LLM
-        # often returns empty for phone_confirmed when the user gives a plain
-        # "yes correct" — map the raw utterance directly to avoid a retry.
-        # Guard: only inject canonical "yes"/"no" — normalize_yes_no returns the
-        # cleaned input as-is for non-yes/no strings (e.g. a DOB answer on the
-        # turn verification completes), which would fail validate_yes_no and
-        # produce a spurious RETRY message.
-        if decision is not None:
-            pc = (decision.extracted or {}).get("phone_confirmed", "")
-            if not pc:
-                fallback = normalize_yes_no(_last_user_msg(messages))
-                if fallback in ("yes", "no"):
-                    decision.extracted = {**(decision.extracted or {}), "phone_confirmed": fallback}
+        # No keyword fallback here. This used to run normalize_yes_no over the
+        # caller's raw words when the model returned no phone_confirmed, which
+        # classified the turn from a fixed list of affirmations — "yes", "yep",
+        # "correct" — and silently missed anything outside it. By the turn the
+        # caller answers, awaiting_slot is "phone_confirmed" and the field is
+        # specified in verification_claims.md, so the model has both the
+        # context and the contract to classify on meaning; the list was
+        # covering for variance, not for a missing signal.
+        #
+        # A turn the model cannot place re-asks, and deliberately does not fall
+        # either way. Unlike a fax or email read-back there is no new value to
+        # collect — the phone on file is human_only — so "anything that is not
+        # a yes is a decline" buys nothing here, while a decline read into a
+        # caller who did say yes would stand as a confirmation they never gave.
     else:
         # relationship_str = (member_record or {}).get("relationship") or ""
         relationship_str = "planholder or dependent"

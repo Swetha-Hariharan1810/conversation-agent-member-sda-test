@@ -5,6 +5,12 @@ shows "(nothing — …)" because no slot is being asked for this turn. The call
 also asked a side question ("Followup:") that WILL be handled later in this
 same call — do not attempt to answer it now.
 
+You get this event only when the request genuinely cannot be answered in this
+sentence: it is work for another part of the call to carry out, or there is no
+"Coming up:" line to answer it from. A question about a step this call is
+about to reach is answered where it is asked, not deferred — that arrives as
+FOLLOWUP_RESPOND instead, so if you are reading this, deferring is right.
+
 Acknowledge the captured value, then add one clause promising the question
 will be covered later in this same call — for example "I'll get to that in
 just a moment once we finish verifying you". Never attempt an answer, never

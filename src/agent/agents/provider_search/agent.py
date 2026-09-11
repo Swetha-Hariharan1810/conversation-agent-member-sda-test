@@ -123,6 +123,10 @@ class ProviderSearchAgent(BaseAgent):
         current_attempt = attempts_dict.get(current_awaiting, {})
         attempt_count = current_attempt.get("attempt_count", 0) if isinstance(current_attempt, dict) else 0
 
+        # Same list the extractor gets as Pending: — a side question about
+        # a step still ahead is answered from it instead of parked.
+        pending = [s for s in PROVIDER_SEARCH_SLOT_ORDER if s not in confirmed_slots]
+        state = self.with_coming_up(state, pending)
         result = await extract_provider_search_decision(
             get_extraction_llm(),
             build_extraction_prompt_extraction("extraction/provider_search.md"),
@@ -130,7 +134,7 @@ class ProviderSearchAgent(BaseAgent):
             last_agent_message=last_agent,
             last_user_message=last_user,
             confirmed_slots=confirmed_slots,
-            pending_slots=[s for s in PROVIDER_SEARCH_SLOT_ORDER if s not in confirmed_slots],
+            pending_slots=pending,
             attempt=attempt_count,
             recent_messages=messages[-6:],
         )

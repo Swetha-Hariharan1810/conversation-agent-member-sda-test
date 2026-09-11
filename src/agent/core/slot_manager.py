@@ -45,6 +45,7 @@ def _mk_session_ctx(
     extracted_val: str | None = None,
     followup_query: str | None = None,
     confirmed_values: dict | None = None,
+    coming_up: list | None = None,
 ) -> dict:
     """Build a lightweight session-context dict for _generate_slot_retry_response."""
     ctx: dict = {}
@@ -54,6 +55,8 @@ def _mk_session_ctx(
         ctx["followup_query"] = followup_query
     if confirmed_values is not None:
         ctx["confirmed_values"] = confirmed_values
+    if coming_up:
+        ctx["coming_up"] = list(coming_up)
     return ctx
 
 
@@ -92,6 +95,23 @@ class SlotManagerMixin:
     # -------------------------------------------------------------------------
     # Slot CRUD
     # -------------------------------------------------------------------------
+
+    @staticmethod
+    def with_coming_up(state: State, slots: list) -> State:
+        """Record what this call still has to cover, for the generation LLM.
+
+        A caller's side question about a step that is still ahead ("will I get
+        this by email?") is answerable the moment the generator knows the step
+        is coming. Without this it sees only Confirmed:, so such a question has
+        no answer available and gets promised for later instead — which is a
+        whole extra turn, several turns away, for something that fits in the
+        clause the caller is already being given.
+
+        Agents pass the same list they hand the extractor as Pending:.
+        """
+        raw = dict(state.get("conversation_context") or {})
+        raw["coming_up"] = [s for s in (slots or []) if s]
+        return {**state, "conversation_context": raw}
 
     def get_slot(self, name: str) -> SlotAttempt:
         if name not in self._slots:
@@ -277,6 +297,7 @@ class SlotManagerMixin:
             if extracted_this_turn is not None
             else sc.get("extracted_val"),
             followup_query=sc.get("followup_query"),
+            coming_up=sc.get("coming_up"),
         )
         # Single-ask invariant: strip re-asks of confirmed slots always; when a
         # static ask is appended after this text, also strip any competing
@@ -1036,6 +1057,32 @@ class SlotManagerMixin:
         if promise and guard == "FOLLOWUP_PARK":
             guard = "FOLLOWUP_RESPOND"
 
+        # A plain question about a step this call has not reached yet — "will I
+        # get this by email?" while the ZIP is being collected — used to be
+        # deferred to the end of the call for no better reason than that the
+        # generation LLM was never told what was coming. It only ever saw
+        # Confirmed:, so a question whose answer lies ahead had no answer it
+        # could give, and promising to return to it was the honest move.
+        #
+        # With the remaining steps in the payload the answer is available now
+        # ("you'll choose fax or email in a moment"), and the caller hears it in
+        # the sentence they are already getting rather than several turns later.
+        #
+        # Two things still park, and they are the ones parking is for:
+        #   - an ACTION: an update aimed at a slot this agent cannot honour here.
+        #     That is work to carry to its owner, not a question to answer.
+        #   - anything with no coming_up to answer from. Parking stays the
+        #     fallback: promising to return to a question beats telling the
+        #     caller it cannot be answered.
+        coming_up = [s.replace("_", " ") for s in (ctx.coming_up or remaining) if s != slot_name]
+        parks_as_action = bool(update_target and update_target not in applied)
+        if guard == "FOLLOWUP_PARK" and followup_query and not parks_as_action and coming_up:
+            self.logger.info(
+                "followup answered inline instead of parked",
+                extra={"slot": slot_name, "coming_up": coming_up},
+            )
+            guard = "FOLLOWUP_RESPOND"
+
         # Always pass real confirmed values — the generation LLM uses them to
         # decide whether it can answer; FOLLOWUP_ANSWER (detour) uses same path.
         confirmed_values = (
@@ -1050,6 +1097,7 @@ class SlotManagerMixin:
             extracted_val=normalized,
             followup_query=followup_query,
             confirmed_values=confirmed_values,
+            coming_up=coming_up if guard == "FOLLOWUP_RESPOND" else None,
         )
         msg = await self._generate_slot_retry_response(
             state,

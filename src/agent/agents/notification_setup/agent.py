@@ -141,6 +141,9 @@ class NotificationSetupAgent(BaseAgent):
         if notification_method and current_awaiting not in ("n2_notification_method",):
             confirmed_slots["notification_method"] = notification_method
 
+        # Same list the extractor gets as Pending: — a side question about
+        # a step still ahead is answered from it instead of parked.
+        state = self.with_coming_up(state, remaining_slots(NOTIFICATION_SLOT_ORDER, current_awaiting))
         result = await extract_notification_decision(
             get_extraction_llm(),
             build_extraction_prompt_extraction("extraction/notification_setup.md"),

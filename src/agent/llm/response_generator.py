@@ -358,6 +358,7 @@ def _render_payload(
     followup_query: str | None = None,
     ask_for_new_value: bool = False,
     allow_followup_event: bool = False,
+    coming_up: list[str] | None = None,
 ) -> str:
     """Render the LLM-2 user payload. Pure function — unit-testable without an LLM."""
     history_text = "\n".join(build_history(last_messages, n=4))
@@ -396,6 +397,11 @@ def _render_payload(
         content_lines.append(f"Extracted this turn: {extracted_value}")
     if followup_query:
         content_lines.append(f"Followup: {followup_query}")
+    if coming_up:
+        # What the call still has to cover. A side question about one of these
+        # is answerable now — "you'll choose fax or email in a moment" — which
+        # is why such a question no longer has to be deferred to the end.
+        content_lines.append(f"Coming up: {', '.join(coming_up)}")
     if ask_for_new_value:
         content_lines.append("Ask for new value: yes")
     _event_guards = (
@@ -429,6 +435,7 @@ async def generate_recovery_message(
     followup_query: str | None = None,
     ask_for_new_value: bool = False,
     allow_followup_event: bool = False,
+    coming_up: list[str] | None = None,
 ) -> str:
     """
     Generate a natural recovery response via LLM 2 (Gemini).
@@ -461,6 +468,7 @@ async def generate_recovery_message(
         followup_query=followup_query,
         ask_for_new_value=ask_for_new_value,
         allow_followup_event=allow_followup_event,
+        coming_up=coming_up,
     )
 
     try:

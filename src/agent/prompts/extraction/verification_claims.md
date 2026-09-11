@@ -68,10 +68,20 @@ FIELDS
 
   phone_confirmed  "yes" | "no" ONLY
                 NEVER extract a phone number into this field.
-                When the agent reads a number aloud and the caller confirms it:
-                  "yes", "yes correct", "that's right", "yep" → "yes"
-                  "no", "that's wrong", "nope" → "no"
-                  "that's not right", "that's not my number" → "no"
+
+                Whether the caller confirms the number the agent just read
+                aloud. Decide by what the answer DOES, not by which words
+                carry it:
+
+                  "yes" — the caller affirms the number on file is right.
+                  "no"  — the caller indicates it is not: wrong, out of date,
+                          not theirs, or theirs to change. Any phrasing.
+
+                There is no list to match against, and nothing downstream
+                supplies one. If the caller genuinely does not know, leave
+                this empty and classify the turn ambiguous — the agent asks
+                again rather than recording a confirmation the caller did not
+                give, or a refusal they did not make.
 
 NAME PLAUSIBILITY CHECK
 When extracting first_name or last_name, verify the value is a plausible

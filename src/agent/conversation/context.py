@@ -42,6 +42,11 @@ class ConversationContext:
     # Slot state awareness
     confirmed_slots: List[str] = field(default_factory=list)  # names of confirmed slots
     total_slots_in_pipeline: int = 0  # how many slots to collect total (for "almost there" cues)
+    # What this call still has to cover, in order — the agent's own remaining
+    # slots, not just the running pipeline's. A caller who asks about a step
+    # that is coming ("will I get this by email?") can be answered from it
+    # instead of being told the question will be handled later.
+    coming_up: List[str] = field(default_factory=list)
 
     # Personalization
     caller_first_name: str = ""  # set once first_name slot confirmed
@@ -119,6 +124,7 @@ class ConversationContext:
             "agent_turn_count": self.agent_turn_count,
             "confirmed_slots": self.confirmed_slots,
             "total_slots_in_pipeline": self.total_slots_in_pipeline,
+            "coming_up": self.coming_up,
             "caller_first_name": self.caller_first_name,
             "active_agent_name": self.active_agent_name,
             "llm_recovery_message": self.llm_recovery_message,
@@ -133,6 +139,7 @@ class ConversationContext:
             agent_turn_count=data.get("agent_turn_count", 0),
             confirmed_slots=data.get("confirmed_slots", []),
             total_slots_in_pipeline=data.get("total_slots_in_pipeline", 0),
+            coming_up=data.get("coming_up", []),
             caller_first_name=data.get("caller_first_name", ""),
             active_agent_name=data.get("active_agent_name", ""),
             llm_recovery_message=data.get("llm_recovery_message", ""),
