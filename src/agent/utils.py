@@ -61,6 +61,26 @@ def _last_user_msg(messages: list) -> str:
     return ""
 
 
+def _last_agent_question(messages: list) -> str:
+    """The question the last agent turn left on the table, if it asked one.
+
+    A guard that declines an off-topic request has to hand the caller back to
+    something. The question already asked is that something — and it is the
+    only source that is right for every step, including the yes/no offers
+    ("would you also like the office-visit benefits?") that have no field to
+    ask for and that a generated re-ask has been seen to invent an ask for.
+    """
+    for m in reversed(messages):
+        role = m.get("role") if isinstance(m, dict) else getattr(m, "type", "")
+        content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+        if str(role).lower() not in ("assistant", "ai"):
+            continue
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", (content or "").strip()) if s.strip()]
+        questions = [s for s in sentences if s.endswith("?")]
+        return questions[-1] if questions else ""
+    return ""
+
+
 def build_history(messages: list, n: int = None) -> list[str]:
     """Build a compact turn-by-turn history for LLM context."""
     if n is None:

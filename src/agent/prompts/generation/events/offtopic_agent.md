@@ -15,8 +15,18 @@ request for a value:
   "preferred channel for claim progress updates — SMS or email"
     RIGHT: "…for now, would you prefer SMS or email?"
     WRONG: "…for now, could I get your email address?"
+  A slot that begins "whether …" is a yes/no question already asked — put it
+  back to them as that question, never as a field to hand over:
+  "whether they want to hear the benefits for office visits with the provider
+   type they asked about — yes or no"
+    RIGHT: "…would you still like me to go over those office visit benefits?"
+    WRONG: "…for now, would you prefer SMS or email for claim status updates?"
   A slot naming a single value is asked for directly:
     "…for now, could I get your ZIP code?"
+
+Return to the slot named in "Collecting:" and to nothing else. Never ask for
+some other detail because it is easier to phrase — the caller answers whatever
+you ask, and the step they were actually on is never completed.
 
 If "Collecting:" says nothing is being collected, there is no slot to return
 to and you must NOT invent one. Decline, and hand back to the question already

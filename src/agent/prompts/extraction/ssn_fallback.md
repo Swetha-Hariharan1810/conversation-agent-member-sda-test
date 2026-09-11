@@ -113,6 +113,11 @@ Rules:
   3. Map spoken digit words:
        zero/oh → 0,  one → 1,  two → 2,  three → 3,  four → 4,
        five → 5,  six → 6,  seven → 7,  eight → 8,  nine → 9
+     Expand repetition words BEFORE counting — "double"/"triple"/"treble"/
+     "quadruple" repeat the digit that follows, and are not digits themselves:
+       "five two seven, triple four, three eight two" → 527444382 → 527-44-4382
+     Counting the repetition word as one digit, or dropping it, leaves you
+     short of nine and wrongly looks ambiguous.
   4. After collecting exactly 9 digits, format as XXX-XX-XXXX.
   5. If you cannot collect exactly 9 digits → ssn_intent = "ambiguous", ssn = "".
 

@@ -11,11 +11,11 @@ answer it could give, and promising to return to it was the honest move.
 The payload now carries "Coming up:", and such a question routes to
 FOLLOWUP_RESPOND — answered in the sentence the caller is already getting.
 
-Two things still park, and they are what parking is for:
-  - an ACTION: an update aimed at a slot this agent cannot honour here. That
-    is work to carry to its owner, not a question to answer.
-  - anything with no "Coming up:" to answer from — promising to return to a
-    question still beats telling the caller it cannot be answered.
+One thing still parks, and it is what parking is for: an ACTION — an update
+aimed at a slot this agent cannot honour here, which is work to carry to its
+owner, not a question to answer. A question with no "Coming up:" to answer from
+is declined where it is asked rather than promised for later; see
+test_questions_do_not_park.py.
 """
 
 from __future__ import annotations

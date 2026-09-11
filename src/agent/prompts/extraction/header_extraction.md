@@ -122,11 +122,12 @@ caller's current utterance ("Caller just said:" line) only — NEVER
 synthesize it from topics the AI raised in prior turns. If the caller did
 not ask or say it this turn, it is not a follow-up.
 Set followup_disposition:
-  answer    — answerable from values in Confirmed: (or a repeat/read-back
-               request, or an update request per above). Also answer when the
-               question is unrelated to this call — the system responds
-               gracefully without inventing data.
-  park      — maps to a slot in Pending: or a later stage of this call
+  answer    — every side question: answerable from values in Confirmed: (or a
+               repeat/read-back request, or an update request per above), or
+               about a step still ahead — the system passes the remaining
+               steps to the responder, which answers from them. Also answer
+               when the question is unrelated to this call — the system
+               responds gracefully without inventing data.
 When event_type != answered_with_followup, omit or set "none".
 
 ## Caller type detection
@@ -214,7 +215,7 @@ event_type: "answered" | "answered_with_followup" | "wait" | "ambiguous" | "none
   ambiguous — genuinely nothing extractable, garbled, or uncertain — do not guess
   none      — a guard fired; set extracted: {} and populate guard fields
 
-followup_disposition: "answer" | "park" | "none" — "none"
+followup_disposition: "answer" | "none" — "none"
   unless event_type is "answered_with_followup"
 followup_query: the side question, condensed, verbatim-ish; null when none
 update_target: slot the caller wants to change when NO new value was given,

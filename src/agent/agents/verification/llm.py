@@ -43,8 +43,8 @@ async def extract_verification_decision(
 
     confirmed_slots: already-confirmed slot values to include as context so
         the LLM can classify corrections for slots it has seen before.
-    pending_slots: slots still to be collected later this call, so the LLM
-        can classify parkable follow-up questions.
+    pending_slots: slots still to be collected later this call, so a follow-up
+        question about a step still ahead can be answered from them.
     attempt: how many collection attempts have been made for awaiting_slot.
     recent_messages: recent conversation turns (dicts with "role"/"content")
         passed through to build_worker_input for history context.

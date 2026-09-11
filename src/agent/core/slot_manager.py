@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional, Tuple
 
 from agent.conversation.context import ConversationContext
+from agent.core.call_stages import remaining_call_stages
 from agent.core.constants import MAX_WAIT_TURNS
 from agent.core.models import SlotAttempt
 from agent.llm.config import Config
@@ -62,7 +63,15 @@ def _mk_session_ctx(
 
 # WorkerResult.followup_disposition → generation-LLM guard label.
 # Missing/none defaults to FOLLOWUP_RESPOND — the generation LLM self-triages
-# (answers from Confirmed: if it can, gracefully declines if it cannot).
+# (answers from Confirmed: or Coming up: if it can, gracefully declines if it
+# cannot).
+#
+# "park" is no longer a disposition the extraction prompts teach: a side
+# QUESTION is handled in the turn it is asked. The mapping stays because
+# _handle_answered_followup sets the value itself for an update aimed at a
+# slot another flow owns in_flow — the one thing parking is still for — and
+# because old cached extraction results still carry it. A "park" with no such
+# update_target is downgraded to FOLLOWUP_RESPOND where the guard is chosen.
 _DISPOSITION_GUARDS: dict[str, str] = {
     "answer": "FOLLOWUP_RESPOND",
     "park": "FOLLOWUP_PARK",
@@ -237,6 +246,12 @@ class SlotManagerMixin:
 
         slot_state = self.get_slot(slot_name)
         sc = session_context or {}
+        if sc.get("followup_query"):
+            # This turn is addressing the side question, so the safety net in
+            # BaseAgent.execute must not address it again. Every path that
+            # answers one — the slot pipeline, intake, the name read-back, the
+            # records re-asks, answer_side_question — passes through here.
+            self.consume_side_question()
 
         # ── Static fast path ────────────────────────────────────────────────
         # A plain non-answer with nothing to acknowledge does not need the
@@ -632,6 +647,198 @@ class SlotManagerMixin:
             )
         return parked
 
+    def note_side_question(self, result: Any) -> None:
+        """Record a question the caller asked alongside this turn's answer.
+
+        Called once per turn from the guard layer, which every slot-collecting
+        agent already runs with the extraction result. Recording is not
+        answering: what the turn does with it is decided later, and most turns
+        carry nothing.
+        """
+        query = (getattr(result, "followup_query", None) or "").strip() if result else ""
+        extracted = (getattr(result, "extracted", None) or {}) if result else {}
+        self._side_question = (
+            {
+                "query": query,
+                "value": ", ".join(str(v) for v in extracted.values() if v),
+            }
+            if query
+            else {}
+        )
+
+    def consume_side_question(self) -> dict:
+        """Take the recorded question, marking it answered.
+
+        A handler that addresses the question itself calls this so the safety
+        net in BaseAgent.execute does not answer it a second time. Every path
+        that already addressed one goes through _generate_slot_retry_response
+        with a followup_query, which consumes there — no handler has to
+        remember to.
+        """
+        pending = getattr(self, "_side_question", {}) or {}
+        self._side_question = {}
+        return pending
+
+    def discard_side_question(self) -> None:
+        """Drop the recorded question — this turn's response is owned elsewhere."""
+        self._side_question = {}
+
+    async def answer_side_question(
+        self,
+        state: State,
+        messages: list,
+        *,
+        followup_query: str,
+        slot_name: str,
+        extracted_value: str,
+    ) -> str:
+        """The sentence that answers a side question asked alongside a slot answer.
+
+        Returns "" when the caller asked nothing, so a handler that calls this
+        unconditionally behaves exactly as it did before on ordinary turns.
+
+        _collect_slot has always done this — FOLLOWUP_RESPOND, via
+        _handle_answered_followup. Every slot collected by a hand-written
+        handler instead of the slot pipeline reimplemented only the "answer"
+        half of answer-plus-question: it read extracted[slot], branched on the
+        value and returned, so event_type and followup_query were dropped on
+        the floor.
+
+            AI      …would you like the benefits for office visits?
+            Caller  No. But I lost my ID card. Can you help me with a new one?
+            AI      By the way, you are eligible for a free health and wellness
+                    coach…
+
+        The "no" was taken and the question was never heard — on that turn and
+        on every repeat of it, because nothing escalates a question that
+        arrives as answered_with_followup: the guard layer needs
+        guard_confidence >= 0.7 to act at all, and the repeated-ignored-request
+        escalation only hangs off the OFFTOPIC_AGENT branch.
+
+        The answer never ends in a question: the caller is mid-flow, and the
+        handler's own next message — or the next agent's opener — is the one
+        question of the turn.
+        """
+        followup_query = (followup_query or "").strip()
+        if not followup_query:
+            return ""
+        ctx = ConversationContext.from_state(state)
+        self.logger.info(
+            "answer_side_question: answering a question asked with a slot answer",
+            extra={"agent": self.AGENT_NAME, "slot": slot_name, "query": followup_query},
+        )
+        return await self._generate_slot_retry_response(
+            state,
+            slot_name,
+            ctx,
+            messages,
+            guard="FOLLOWUP_RESPOND",
+            session_context=_mk_session_ctx(
+                followup_query=followup_query,
+                extracted_val=extracted_value,
+                coming_up=remaining_call_stages(
+                    intent=str(state.get("call_intent") or ""),
+                    current_agent=self.AGENT_NAME,
+                    state=state,
+                ),
+            ),
+            extracted_this_turn=extracted_value,
+            # The handler speaks next, or hands off to an agent that does.
+            will_append_ask=True,
+        )
+
+    @staticmethod
+    def join_side_answer(answer: str, message: str) -> str:
+        """Put the side answer in front of the message the handler was sending."""
+        answer = (answer or "").strip()
+        message = (message or "").strip()
+        if not answer:
+            return message
+        return f"{answer} {message}".strip() if message else answer
+
+    @staticmethod
+    def speaks(result: dict) -> bool:
+        """Does this turn say something to the member?
+
+        A hand-off says nothing: signal_complete(message="") writes no
+        "messages", and the next agent opens. An escalation says nothing here
+        either — it speaks through escalation_pre_message.
+        """
+        message = (result or {}).get("messages")
+        return isinstance(message, dict) and str(message.get("role")) == "assistant"
+
+    @classmethod
+    def prefix_side_answer(cls, result: dict, answer: str) -> dict:
+        """Put the side answer in front of what ``result`` already speaks.
+
+        Only ever prefixes — a result that speaks nothing is left alone, and
+        the answer is carried in state instead (see BaseAgent.execute).
+        Inventing a message here is what put the answer in the transcript as
+        its own AI turn ahead of the next agent's opener.
+        """
+        answer = (answer or "").strip()
+        if not answer or not cls.speaks(result):
+            return result
+        message = result["messages"]
+        result["messages"] = {
+            **message,
+            "content": cls.join_side_answer(answer, str(message.get("content") or "")),
+        }
+        return result
+
+    def build_coming_up(
+        self,
+        state: State,
+        *,
+        ctx: "ConversationContext",
+        remaining: list,
+        slot_name: str,
+    ) -> list[str]:
+        """What the call still has to cover, for the generation LLM.
+
+        Two parts, nearest first: the slots this pipeline has left, then the
+        stages of the call that come after this agent.
+
+        The second part is what makes the line usable. With only the first, it
+        ran out at the tail of every pipeline — and it was empty for the whole
+        of verification and intake, which is where a caller is most likely to
+        ask about something further on ("will I get a text about my claim?"
+        while giving their date of birth). A question the line cannot answer is
+        declined, so the narrower line meant declining questions this call was
+        always going to reach.
+        """
+        slots = [s.replace("_", " ") for s in (ctx.coming_up or remaining) if s != slot_name]
+        return slots + remaining_call_stages(
+            intent=str(state.get("call_intent") or ""),
+            current_agent=self.AGENT_NAME,
+            state=state,
+        )
+
+    @staticmethod
+    def resolve_park_guard(guard: str, *, parks_as_action: bool) -> str:
+        """Parking is for ACTIONS only — an update aimed at a slot this agent
+        cannot honour here, which is work to carry to its owner.
+
+        A side QUESTION never parks. It used to — a question about a step the
+        call had not reached ("will I get this by email?" during ZIP
+        collection) was promised for later, because the generation LLM saw only
+        Confirmed: and had no answer to give. "Coming up:" removed that reason:
+        the answer is available in the sentence the caller is already getting.
+        What the promise never had was anyone to keep it — follow_up drops
+        parked questions unanswered (answering them there produced stale,
+        misleading responses), so a parked question was a promise the call
+        could not keep, and a caller who asked about it was told a second time
+        that it was queued.
+
+        So a question the payload cannot answer is declined, gracefully, in the
+        turn it is asked: FOLLOWUP_RESPOND self-triages against Confirmed:,
+        Coming up:, and call scope. An honest "I can't help with that" beats a
+        promise nothing honours.
+        """
+        if guard == "FOLLOWUP_PARK" and not parks_as_action:
+            return "FOLLOWUP_RESPOND"
+        return guard
+
     def _match_promised_item(self, state: State, followup_query: str) -> str:
         """Promise text when ``followup_query`` asks about a parked/pending item.
 
@@ -659,7 +866,10 @@ class SlotManagerMixin:
             ):
                 if item.get("kind") == "action":
                     return f"the {item['target'].replace('_', ' ')} update is queued and will be handled"
-                return "that question is queued and will be answered"
+                # Legacy question item (pre-removal checkpoint): follow_up drops
+                # these, so do not tell the caller it is coming — say nothing
+                # and let FOLLOWUP_RESPOND answer or decline on its own terms.
+                continue
         return ""
 
     def _confirmed_slot_values(
@@ -1057,31 +1267,14 @@ class SlotManagerMixin:
         if promise and guard == "FOLLOWUP_PARK":
             guard = "FOLLOWUP_RESPOND"
 
-        # A plain question about a step this call has not reached yet — "will I
-        # get this by email?" while the ZIP is being collected — used to be
-        # deferred to the end of the call for no better reason than that the
-        # generation LLM was never told what was coming. It only ever saw
-        # Confirmed:, so a question whose answer lies ahead had no answer it
-        # could give, and promising to return to it was the honest move.
-        #
-        # With the remaining steps in the payload the answer is available now
-        # ("you'll choose fax or email in a moment"), and the caller hears it in
-        # the sentence they are already getting rather than several turns later.
-        #
-        # Two things still park, and they are the ones parking is for:
-        #   - an ACTION: an update aimed at a slot this agent cannot honour here.
-        #     That is work to carry to its owner, not a question to answer.
-        #   - anything with no coming_up to answer from. Parking stays the
-        #     fallback: promising to return to a question beats telling the
-        #     caller it cannot be answered.
-        coming_up = [s.replace("_", " ") for s in (ctx.coming_up or remaining) if s != slot_name]
+        coming_up = self.build_coming_up(state, ctx=ctx, remaining=remaining, slot_name=slot_name)
         parks_as_action = bool(update_target and update_target not in applied)
-        if guard == "FOLLOWUP_PARK" and followup_query and not parks_as_action and coming_up:
+        if (resolved := self.resolve_park_guard(guard, parks_as_action=parks_as_action)) != guard:
             self.logger.info(
-                "followup answered inline instead of parked",
+                "followup handled inline instead of parked",
                 extra={"slot": slot_name, "coming_up": coming_up},
             )
-            guard = "FOLLOWUP_RESPOND"
+            guard = resolved
 
         # Always pass real confirmed values — the generation LLM uses them to
         # decide whether it can answer; FOLLOWUP_ANSWER (detour) uses same path.
@@ -1124,18 +1317,11 @@ class SlotManagerMixin:
         if clear_verify:
             interrupt["member_status_verify"] = False
         if guard == "FOLLOWUP_PARK" and followup_query:
-            # Structured parked item: an unhonored update_target parks as an
-            # actionable item follow_up routes via the ownership registry;
-            # plain side questions park as kind="question".
+            # Only an unhonored update_target reaches here (the downgrade above
+            # sends everything else to FOLLOWUP_RESPOND), so the item is always
+            # an action follow_up routes via the ownership registry.
             parked = normalize_parked_followups(state.get("parked_followups"))
-            is_action = bool(update_target and update_target not in applied)
-            parked.append(
-                {
-                    "query": followup_query,
-                    "kind": "action" if is_action else "question",
-                    "target": update_target if is_action else "",
-                }
-            )
+            parked.append({"query": followup_query, "kind": "action", "target": update_target})
             interrupt["parked_followups"] = parked
         # Foreign corrections this pipeline could not apply (Case A) park as
         # actions so the owning flow honors them — never silently dropped.

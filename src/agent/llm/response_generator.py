@@ -56,6 +56,28 @@ _SLOT_LABELS: dict[str, str] = {
         "whether they have questions about the timeline — "
         "say yes to hear it, no to skip, or ask their question directly"
     ),
+    # ── Offers and confirmations ─────────────────────────────────────────────
+    # The caller was asked a question here, not asked for a value. The label is
+    # the only thing the generation LLM has to return to, so it has to read as
+    # that question: "benefits response" is not something anyone can be asked
+    # for, and a model told to redirect to it reaches for the nearest askable
+    # thing it knows about instead (the notification channel, off the system
+    # prompt's list of what this line does).
+    "benefits_response": (
+        "whether they want to hear the benefits for office visits with the "
+        "provider type they asked about — yes or no"
+    ),
+    "care_coach_response": (
+        "whether they want us to send details about the free Care Coach Guides — yes or no"
+    ),
+    "name_confirmed": "whether the name just read back to them is correct — yes or no",
+    "name_correction": "the correct name on the account",
+    "zip_confirmed": "whether the ZIP code on file is still the right one — yes or no",
+    "fax_confirmed": "whether the fax number on file is the right one — yes or no",
+    "email_confirmed": "whether the email address on file is the right one — yes or no",
+    "fax": "correct fax number",
+    "fallback_claim_number": "claim number for the claim they are calling about",
+    "fallback_dos_billed": ("date of service and billed amount for the claim — both are needed to locate it"),
     # SSN fallback slots
     "ssn_ask": "whether they have their SSN available — yes or no",
     "ssn": (
@@ -79,8 +101,9 @@ _SLOT_LABELS: dict[str, str] = {
 # "OFFTOPIC"       | guards.py (fallback)     | Legacy alias for OFFTOPIC_AGENT
 # "FOLLOWUP_ANSWER"| _collect_slot (Phase 4)  | Slot confirmed + side question that is
 #                  |                          | answerable from Confirmed values now
-# "FOLLOWUP_PARK"  | _collect_slot (Phase 4)  | Slot confirmed + side question parked
-#                  |                          | for later in the call — acknowledge only
+# "FOLLOWUP_PARK"  | _collect_slot (Phase 4)  | Slot confirmed + an update another flow
+#                  |                          | owns, carried to it — acknowledge only.
+#                  |                          | Side questions never park.
 # "FOLLOWUP_DECLINE"| _collect_slot (Phase 4) | Slot confirmed + side question we cannot
 #                  |                          | answer — acknowledge and move on
 # "CORRECTION_ACK" | _handle_answered_followup| Slot confirmed + correction applied,
@@ -202,8 +225,23 @@ SLOT_ASK_SYNONYMS: dict[str, tuple[str, ...]] = {
     "phone_confirmation": ("phone number",),
     "email": ("email address",),
     "reference_number": ("reference number",),
-    "notification_method": ("notification channel", "notification method"),
+    "notification_method": (
+        "notification channel",
+        "notification method",
+        "sms or email",
+        "status updates",
+        "claim status",
+    ),
+    "n2_notification_method": (
+        "notification channel",
+        "notification method",
+        "sms or email",
+        "status updates",
+        "claim status",
+    ),
     "delivery_method": ("delivery method", "fax or email"),
+    "benefits_response": ("office visit benefits", "benefits for office visits"),
+    "care_coach_response": ("care coach", "health and wellness coach"),
 }
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
@@ -234,17 +272,26 @@ def _foreign_slot_terms(
     the fields a correction acknowledgement reads back, for instance.
 
     A foreign term that overlaps an allowed slot's wording is dropped (either
-    direction of containment): ``phone`` / ``phone_confirmed`` /
-    ``phone_confirmation`` all say "phone number", and stripping the
+    direction of containment, or a shared leading word): ``phone`` /
+    ``phone_confirmed`` / ``phone_confirmation`` all say "phone number", and
+    ``email_confirmed`` asks about an "email address" — stripping the
     legitimate ask would be worse than the hallucination we guard against.
+
+    ``collecting_slot`` of "" means nothing is being collected, so every known
+    slot is foreign: on that turn there is no ask the model is entitled to make.
     """
     allowed = {collecting_slot, *exempt_slots}
     own = tuple(t for name in allowed for t in _slot_match_terms(name) if t)
+    own_heads = {t.split()[0] for t in own if t.split()}
     terms: list[tuple[str, ...]] = []
     for name in set(_SLOT_LABELS) | set(SLOT_ASK_SYNONYMS):
         if name in allowed:
             continue
-        candidate = tuple(t for t in _slot_match_terms(name) if t and not any(t in o or o in t for o in own))
+        candidate = tuple(
+            t
+            for t in _slot_match_terms(name)
+            if t and not any(t in o or o in t for o in own) and t.split()[0] not in own_heads
+        )
         if candidate:
             terms.append(candidate)
     return terms
@@ -260,6 +307,7 @@ def sanitize_generated(
     fallback_slot_label: str = "",
     collecting_slot: str | None = None,
     exempt_slots: Sequence[str] = (),
+    fallback_text: str = "",
 ) -> str:
     """Enforce the single-ask invariant on LLM-2 output (Bug A).
 
@@ -273,19 +321,23 @@ def sanitize_generated(
       one instead ("...and your Member ID?" while last_name is still missing),
       which silently skips a required field. ``exempt_slots`` widens what the
       turn may name — the fields a correction acknowledgement reads back.
+      ``collecting_slot=""`` says nothing is being collected at all, and every
+      known slot is foreign; ``None`` turns the check off.
     - When ``will_append_ask`` is True (Python appends _next_slot_ask after
       this text), sentences mentioning ``next_slot_label`` and any trailing
       question sentences are also stripped, so the appended ask is the one
       and only ask in the combined utterance.
-    - If sanitization empties the text, the guard's _FALLBACKS entry is
-      substituted (formatted with ``fallback_slot_label``).
+    - If sanitization empties the text, ``fallback_text`` is substituted when
+      given, otherwise the guard's _FALLBACKS entry (formatted with
+      ``fallback_slot_label``). A caller with no askable slot passes its own
+      text — the _FALLBACKS templates all end in an ask.
 
     Every strip is logged at INFO with the guard and dropped sentence for
     eval visibility.
     """
     sentences = [s for s in _SENTENCE_SPLIT_RE.split((text or "").strip()) if s.strip()]
     confirmed_terms = [_slot_match_terms(label) for label in confirmed_labels]
-    foreign_terms = _foreign_slot_terms(collecting_slot, exempt_slots) if collecting_slot else []
+    foreign_terms = _foreign_slot_terms(collecting_slot, exempt_slots) if collecting_slot is not None else []
 
     kept: list[str] = []
     for sentence in sentences:
@@ -348,8 +400,11 @@ def sanitize_generated(
 
     result = " ".join(s.strip() for s in kept).strip()
     if not result:
-        template = _FALLBACKS.get(guard, "Got it.")
-        result = template.format(slot_label=fallback_slot_label or "that")
+        if fallback_text:
+            result = fallback_text
+        else:
+            template = _FALLBACKS.get(guard, "Got it.")
+            result = template.format(slot_label=fallback_slot_label or "that")
         logger.info("sanitize_generated: text emptied — substituting %s fallback", guard)
     return result
 

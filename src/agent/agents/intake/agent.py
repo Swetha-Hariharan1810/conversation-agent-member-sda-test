@@ -181,26 +181,37 @@ class IntakeAgent(BaseAgent):
         # Intent is classified — check if caller also said something extra
         # that needs acknowledging before we route to verification.
         # Phase 6: routed through the same disposition mapping as _collect_slot
-        # (Phase 4). Intake has no confirmed slots yet, so the extraction prompt
-        # emits park/decline (answer_now only for repeat/confirmation of the
-        # just-stated intent); missing/none defaults to decline. PARK queues the
-        # side question in parked_followups for follow_up_agent to answer.
+        # (Phase 4). Intake has no confirmed slots yet, so a side question here
+        # is answered from call scope or declined — in the sentence it is asked.
+        # Nothing parks: intake carries no update_target, and a parked question
+        # is a promise follow_up does not keep. Missing/none defaults to
+        # FOLLOWUP_RESPOND, which self-triages.
         # Option A applies here too: Gemini only acknowledges — Python appends
         # the first-name bridge ask and routes straight to verification, exactly
         # like the clean answered path below.
         if result.event_type == EventType.ANSWERED_WITH_FOLLOWUP:
             from agent.conversation.context import ConversationContext
+            from agent.core.call_stages import remaining_call_stages
             from agent.core.slot_manager import _DISPOSITION_GUARDS, _mk_session_ctx
 
             disposition = getattr(result, "followup_disposition", None)
             disposition_value = str(getattr(disposition, "value", disposition) or "none")
-            guard = _DISPOSITION_GUARDS.get(disposition_value, "FOLLOWUP_RESPOND")
+            # Intake carries no update_target, so nothing here is ever an
+            # action — a side question is answered or declined where it is asked.
+            guard = self.resolve_park_guard(
+                _DISPOSITION_GUARDS.get(disposition_value, "FOLLOWUP_RESPOND"),
+                parks_as_action=False,
+            )
             followup_query = (getattr(result, "followup_query", None) or "").strip()
             logger.info(
                 "IntakeAgent: answered_with_followup — disposition routing",
                 extra={"intent": intent_value, "guard": guard, "app_run_id": app_run_id},
             )
 
+            # The whole flow is ahead of intake, so a side question about any
+            # of it ("will I get a text about this?") is answerable now. The
+            # intent comes from this turn's extraction — state.call_intent is
+            # only set on the bridge result below.
             ctx = ConversationContext.from_state(state)
             msg = await self._generate_slot_retry_response(
                 state,
@@ -208,7 +219,12 @@ class IntakeAgent(BaseAgent):
                 ctx=ctx,
                 messages=messages,
                 guard=guard,
-                session_context=_mk_session_ctx(followup_query=followup_query),
+                session_context=_mk_session_ctx(
+                    followup_query=followup_query,
+                    coming_up=remaining_call_stages(
+                        intent=intent_value, current_agent=self.AGENT_NAME, state=state
+                    ),
+                ),
                 extracted_this_turn=intent_value,
             )
             bridge = self.ask_member(state, msg.rstrip() + " " + random.choice(INTENT_BRIDGE_MSGS))
@@ -217,12 +233,6 @@ class IntakeAgent(BaseAgent):
             bridge["resolved_intents"] = ["intake"]
             bridge["next_node"] = AgentNode.VERIFICATION.value
             bridge["metadata_events"] = []
-            if guard == "FOLLOWUP_PARK" and followup_query:
-                from agent.state import normalize_parked_followups
-
-                parked = normalize_parked_followups(state.get("parked_followups"))
-                parked.append({"query": followup_query, "kind": "question", "target": ""})
-                bridge["parked_followups"] = parked
             if provider_type:
                 bridge["provider_type"] = provider_type
             return bridge

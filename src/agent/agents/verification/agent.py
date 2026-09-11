@@ -986,7 +986,7 @@ class VerificationAgent(BaseAgent):
 
         # Phase 4 (follow-up disposition routing): ANSWERED_WITH_FOLLOWUP is no
         # longer flattened to ANSWERED here. _collect_slot now routes the
-        # follow-up disposition itself (answer_now/park/decline → FOLLOWUP_*
+        # follow-up disposition itself (answer/decline → FOLLOWUP_*
         # guards) and appends the next static ask, so the event must reach the
         # pipeline intact.
 

@@ -24,7 +24,8 @@ request_kind and leave care_coach_response out unless clearly answered too:
            "I need to change my email"
            → update_target:"email", request_kind:"update"
 Unknown topics: still set update_target to the member's words and the
-best-fit request_kind — the system parks unknown topics as questions.
+best-fit request_kind — the system carries unknown topics to a
+representative.
 When no such request is present, update_target:null, request_kind:"none".
 
 CONFIDENCE NOTES (see header [ANCHOR: CONFIDENCE])

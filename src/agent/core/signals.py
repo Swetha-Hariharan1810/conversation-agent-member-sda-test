@@ -28,9 +28,19 @@ class SignalsMixin:
     """Mixin that adds agent→LangGraph signal methods to BaseAgent."""
 
     def ask_member(self, state: State, message: str) -> dict:
-        """Interrupt graph and wait for member input."""
+        """Interrupt graph and wait for member input.
+
+        Drains any answer waiting in ``pending_side_answer`` into this message.
+        The agent that answered a side question may have had nothing of its own
+        to say — it handed off — and speaking the answer there would put it in
+        the transcript as its own AI turn, ahead of the next agent's opener.
+        The caller should hear one turn, so the answer rides along until
+        something is actually said to them and goes out in front of it.
+        """
+        message = self.join_side_answer(str(state.get("pending_side_answer") or ""), message)
         result = {
             "messages": {"role": "assistant", "content": message},
+            "pending_side_answer": "",
             "next_node": self.AGENT_NAME,
             "is_interrupt": True,
             "active_agent": self.AGENT_NAME,
@@ -129,7 +139,14 @@ class SignalsMixin:
             "awaiting_slot": "",
         }
         if isinstance(message, str) and message.strip():
-            result["messages"] = {"role": "assistant", "content": message}
+            # Same rule as ask_member: whatever is actually said to the member
+            # takes the waiting answer with it. Only reached by the completions
+            # that speak — closure's goodbye — since an escalation passes "".
+            result["messages"] = {
+                "role": "assistant",
+                "content": self.join_side_answer(str(state.get("pending_side_answer") or ""), message),
+            }
+            result["pending_side_answer"] = ""
         for k, v in (sig.context_updates or {}).items():
             result[k] = v
         if self._pending_ambiguous_resets:
