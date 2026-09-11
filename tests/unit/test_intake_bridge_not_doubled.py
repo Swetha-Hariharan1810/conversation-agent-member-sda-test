@@ -157,3 +157,110 @@ def test_no_other_agent_appends_to_a_generated_message_unguarded(path):
     for marker in ("msg.rstrip() + ", "retry_msg.rstrip() + ", "followup_msg.rstrip() + "):
         if marker in body:
             assert "will_append_ask=True" in body, f"{path} appends after generating without declaring it"
+
+
+# ── an "answered_with_followup" that follows nothing up ──────────────────────
+#
+#     {"extracted":{"intent":"claim_services"},
+#      "event_type":"answered_with_followup",
+#      "followup_disposition":"answer",
+#      "followup_query":null,
+#      "needs_freeform_response":true}
+#
+# The courtesy question — "Can you help me with that today?" — is part of the
+# request, not a side question, so the extractor named no followup_query. The
+# turn still routed to FOLLOWUP_RESPOND, whose whole job is to answer the
+# "Followup:" line, and the rendered payload had no such line. So the model
+# padded, and the padding is what the bridge then doubled.
+#
+# (needs_freeform_response being true is a red herring: that flag is only ever
+# read for RETRY and CLARIFY, and this turn is neither.)
+
+
+@pytest.fixture
+def intake_empty_followup(monkeypatch):
+    from agent.agents.intake import agent as ik
+
+    calls: list[dict] = []
+
+    async def _generate(**kwargs):
+        calls.append(kwargs)
+        return "GENERATED"
+
+    async def _extract(*_args, **_kwargs):
+        return WorkerResult(
+            event_type=EventType.ANSWERED_WITH_FOLLOWUP,
+            followup_disposition=FollowupDisposition.ANSWER,
+            followup_query=None,
+            extracted={"intent": "claim_services"},
+            needs_freeform_response=True,
+        )
+
+    monkeypatch.setattr("agent.llm.response_generator.generate_recovery_message", _generate)
+    monkeypatch.setattr(ik, "extract_intake_intent", _extract)
+    monkeypatch.setattr(ik, "get_extraction_llm", lambda: object())
+    return ik, calls
+
+
+async def test_an_empty_follow_up_takes_the_clean_bridge(intake_empty_followup):
+    ik, calls = intake_empty_followup
+    random.seed(1)
+    state = _state()
+    result = await ik.IntakeAgent.from_state(state).execute(state)
+
+    assert result["messages"]["content"] in INTENT_BRIDGE_MSGS
+    assert calls == [], "nothing to answer, so nothing to generate"
+
+
+async def test_a_real_follow_up_still_generates(intake):
+    """The guard is the empty query, not the event type — a turn that does
+    carry a question must still be answered."""
+    assert "I can certainly help you check your claim status." in await _turn(intake)
+
+
+async def test_the_slot_pipeline_has_the_same_guard(monkeypatch):
+    """_collect_slot routes on the event type too, so the same empty follow-up
+    would hand FOLLOWUP_RESPOND a payload with no Followup: line. Driven here
+    through delivery_management taking "Fax please. Can you do that for me
+    today?" — the courtesy question is part of the answer."""
+    from agent.agents.delivery_management import agent as dm
+
+    calls: list[dict] = []
+
+    async def _generate(**kwargs):
+        calls.append(kwargs)
+        return "GENERATED"
+
+    async def _extract(*_args, **_kwargs):
+        return WorkerResult(
+            event_type=EventType.ANSWERED_WITH_FOLLOWUP,
+            followup_disposition=FollowupDisposition.ANSWER,
+            followup_query=None,
+            extracted={"delivery_method": "fax"},
+            needs_freeform_response=True,
+        )
+
+    monkeypatch.setattr("agent.llm.response_generator.generate_recovery_message", _generate)
+    monkeypatch.setattr(dm, "extract_delivery_management_decision", _extract)
+    monkeypatch.setattr(dm, "get_extraction_llm", lambda: object())
+
+    state = {
+        "messages": [
+            {"role": "assistant", "content": "Fax or email?"},
+            {"role": "user", "content": "Fax please. Can you do that for me today?"},
+        ],
+        "slot_attempts": {},
+        "app_run_id": "test-run",
+        "awaiting_slot": "delivery_method",
+        "fax": "2315553211",
+        "provider_type": "Pediatrician",
+        "zip_code": "16783",
+        "zip_code_used": "16783",
+        "call_intent": "provider_services",
+    }
+    result = await dm.DeliveryManagementAgent.from_state(state).execute(state)
+
+    # Straight on to the fax read-back, with nothing generated to pad it.
+    assert result["awaiting_slot"] == "fax_confirmed"
+    assert "2315553211" in result["messages"]["content"]
+    assert calls == []

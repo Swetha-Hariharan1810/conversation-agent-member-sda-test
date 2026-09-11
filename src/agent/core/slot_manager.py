@@ -1479,9 +1479,34 @@ class SlotManagerMixin:
                                 extra={"slot": slot_name},
                             )
 
+                    # answered_with_followup with nothing to follow up on: no
+                    # query, no corrections, no update target. The extractor
+                    # sometimes labels a request that carries its own courtesy
+                    # question this way — "I want to check my claim status. Can
+                    # you help me with that today?" — and then leaves
+                    # followup_query null, because there is no side question to
+                    # name. Entering the handler would route a clean answer
+                    # through FOLLOWUP_RESPOND, whose whole job is to answer the
+                    # "Followup:" line that this payload does not have; the
+                    # model pads instead.
+                    empty_followup = (
+                        event_type == EventType.ANSWERED_WITH_FOLLOWUP
+                        and not (getattr(decision, "followup_query", None) or "").strip()
+                        and not corrections_hint
+                        and not update_hint
+                    )
+                    if empty_followup:
+                        self.logger.info(
+                            "_collect_slot: answered_with_followup carries no follow-up "
+                            "— taking the clean answered path",
+                            extra={"slot": slot_name},
+                        )
+
                     if (
-                        event_type == EventType.ANSWERED_WITH_FOLLOWUP or answered_with_request
-                    ) and not self_fulfilled_update:
+                        (event_type == EventType.ANSWERED_WITH_FOLLOWUP or answered_with_request)
+                        and not self_fulfilled_update
+                        and not empty_followup
+                    ):
                         # Slot will be confirmed inside the handler — corrections
                         # (Case A) must apply BEFORE slot_ok of the awaiting slot.
                         # Attempt counter is never incremented on this path.
