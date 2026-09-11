@@ -25,6 +25,7 @@ __all__ = [
     "normalize_ssn",
     "normalize_dob",
     "normalize_zip_code",
+    "find_zip_in_utterance",
     "normalize_phone_number",
     "normalize_fax_number",
     "normalize_email",
@@ -691,6 +692,43 @@ def normalize_zip_code(value: str | None) -> str:
     """Normalize to 5-digit ZIP string. Handles spoken digits: 'one six seven eight three' → '16783'."""
     converted = _convert_spoken_digits(_clean(value))
     return re.sub(r"\D", "", converted)[:5]
+
+
+_WORD_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def find_zip_in_utterance(value: str | None) -> str:
+    """The single 5-digit ZIP a caller spoke in a whole sentence, or "".
+
+    normalize_zip_code expects a value the extraction LLM has already isolated,
+    so it happily sweeps up every digit in its input and truncates to five:
+    "my current five digit ZIP code is seven eight seven zero one" reduces to
+    "57870" — the "five" of "five digit" leading, the real ZIP cut short.
+
+    This reads the raw utterance instead, so it keeps the digits in the runs
+    the caller actually spoke and accepts only a lone 5-digit run. No run,
+    several different ones, a 9-digit ZIP+4 or a phone number: return "" and
+    leave the turn to the extraction LLM rather than guess.
+
+    Tokenizing on word characters (not whitespace, as _convert_spoken_digits
+    does) is what makes trailing punctuation harmless — "one." is a digit word
+    here, and dropping it is how the last digit of a spoken ZIP goes missing.
+    """
+    runs: list[str] = []
+    current = ""
+    for token in _WORD_TOKEN_RE.findall(_clean(value).lower()):
+        digits = _DIGIT_WORDS.get(token) or (token if token.isdigit() else "")
+        if digits:
+            current += digits
+            continue
+        if current:
+            runs.append(current)
+        current = ""
+    if current:
+        runs.append(current)
+
+    candidates = {run for run in runs if len(run) == 5}
+    return candidates.pop() if len(candidates) == 1 else ""
 
 
 # ---------------------------------------------------------------------------
