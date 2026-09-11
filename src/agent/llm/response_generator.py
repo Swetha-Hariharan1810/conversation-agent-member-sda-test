@@ -248,20 +248,17 @@ SLOT_ASK_SYNONYMS: dict[str, tuple[str, ...]] = {
     "phone_confirmation": ("phone number",),
     "email": ("email address",),
     "reference_number": ("reference number",),
-    "notification_method": (
-        "notification channel",
-        "notification method",
-        "sms or email",
-        "status updates",
-        "claim status",
-    ),
-    "n2_notification_method": (
-        "notification channel",
-        "notification method",
-        "sms or email",
-        "status updates",
-        "claim status",
-    ),
+    # Only ask-shaped phrases belong here. "claim status" and "status updates"
+    # were listed too, and they are the caller's TOPIC, not a way of asking for
+    # the notification channel — so on a claim-services call any question that
+    # mentioned the reason for the call was stripped as a foreign-slot ask:
+    #
+    #   "I'm doing well, thanks — shall we carry on with your claim status?"
+    #
+    # went out as a decline instead. "sms or email" is the ask, and it is what
+    # actually caught the hallucination these entries were added for.
+    "notification_method": ("notification channel", "notification method", "sms or email"),
+    "n2_notification_method": ("notification channel", "notification method", "sms or email"),
     "delivery_method": ("delivery method", "fax or email"),
     "benefits_response": ("office visit benefits", "benefits for office visits"),
     "care_coach_response": ("care coach", "health and wellness coach"),

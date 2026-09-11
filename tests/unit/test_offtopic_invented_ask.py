@@ -170,3 +170,99 @@ def test_the_prompt_puts_a_yes_no_slot_back_as_a_question():
     body = " ".join(open("src/agent/prompts/generation/events/offtopic_agent.md").read().lower().split())
     assert 'a slot that begins "whether' in body
     assert "would you prefer sms or email for claim status updates?" in body  # named as WRONG
+
+
+# ── …without silencing the call's own subject ────────────────────────────────
+#
+#     AI    I understand you'd like to check your claim status, and I can help
+#           with that, but I do need your first name to get started.
+#     User  How are you doing today?
+#     AI    That's not something I can help with on this call. Is there
+#           anything else I can help you with today?
+#
+# A pleasantry, mid-verification, answered with a decline and an offer to end
+# the call. The generation was fine; three things above it were not, and all
+# three arrived with the fix at the top of this file.
+
+
+def test_the_callers_own_topic_is_not_a_foreign_slot_ask():
+    """ "claim status" and "status updates" were listed as ways of asking for the
+    notification channel. They are the caller's TOPIC. On a claim-services call
+    every question that named the reason for calling was stripped."""
+    kept = "I'm doing well, thanks — shall we carry on with your claim status?"
+    assert sanitize_generated(kept, guard="OFFTOPIC_AGENT", collecting_slot="first_name") == kept
+
+
+def test_the_ask_that_needed_catching_is_still_caught():
+    """Narrowing the terms must not give back the hallucination they were added
+    for — "sms or email" is the ask, and it is the half that matched."""
+    out = sanitize_generated(
+        INVENTED, guard="OFFTOPIC_AGENT", collecting_slot="benefits_response", fallback_text="FALLBACK"
+    )
+    assert out == "FALLBACK"
+
+
+async def test_with_nothing_collected_an_invented_ask_is_still_stripped(monkeypatch):
+    """The strict rule stays: the reported decline was caused by the term list,
+    not by this, and loosening it here gives back the original hallucination."""
+    from agent.agents.verification.agent import VerificationAgent
+
+    async def _generated(**_kwargs):
+        return "That's something a representative can help with — could I get your email address?"
+
+    monkeypatch.setattr("agent.llm.response_generator.generate_recovery_message", _generated)
+
+    out = await VerificationAgent()._generate_guard_response(
+        {
+            "messages": [{"role": "assistant", "content": "Is there anything else I can help you with?"}],
+            "awaiting_slot": "",
+            "slot_attempts": {},
+        },
+        "OFFTOPIC_AGENT",
+    )
+    assert "email address" not in out
+
+
+async def test_a_pending_slot_is_re_asked_rather_than_offered_the_exit(monkeypatch):
+    """The decline fallback ends with "anything else I can help you with?" —
+    right when the call is on that question, catastrophic when it is three
+    turns into taking a name."""
+    from agent.agents.verification.agent import VerificationAgent
+
+    async def _generated(**_kwargs):
+        return "Would you prefer SMS or email?"  # stripped: foreign to first_name
+
+    monkeypatch.setattr("agent.llm.response_generator.generate_recovery_message", _generated)
+
+    out = await VerificationAgent()._generate_guard_response(
+        {
+            "messages": [{"role": "user", "content": "How are you doing today?"}],
+            "awaiting_slot": "first_name",
+            "slot_attempts": {},
+        },
+        "OFFTOPIC_AGENT",
+    )
+    assert "anything else" not in out.lower()
+    assert "first name" in out.lower()
+
+
+async def test_with_nothing_pending_the_open_question_is_still_handed_back(monkeypatch):
+    async def _generated(**_kwargs):
+        return "Would you prefer SMS or email?"
+
+    monkeypatch.setattr("agent.llm.response_generator.generate_recovery_message", _generated)
+
+    from agent.agents.verification.agent import VerificationAgent
+
+    out = await VerificationAgent()._generate_guard_response(
+        {
+            "messages": [
+                {"role": "assistant", "content": "Is there anything else I can help you with?"},
+                {"role": "user", "content": "How are you doing today?"},
+            ],
+            "awaiting_slot": "",
+            "slot_attempts": {},
+        },
+        "OFFTOPIC_AGENT",
+    )
+    assert out.endswith("Is there anything else I can help you with?")
