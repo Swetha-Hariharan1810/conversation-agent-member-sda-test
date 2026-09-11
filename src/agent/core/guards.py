@@ -73,7 +73,7 @@ class ConversationGuardsMixin:
         self, state: State, guard: str, *, attempt_override: int | None = None
     ) -> str:
         from agent.llm.redaction import _is_reportable_slot, mask_confirmed
-        from agent.llm.response_generator import generate_recovery_message
+        from agent.llm.response_generator import generate_recovery_message, sanitize_generated
         from agent.utils import _last_user_msg
 
         awaiting = state.get("awaiting_slot") or ""
@@ -91,7 +91,7 @@ class ConversationGuardsMixin:
             for k, attempt_rec in (state.get("slot_attempts") or {}).items()
             if isinstance(attempt_rec, dict) and attempt_rec.get("confirmed") and _is_reportable_slot(k)
         }
-        return await generate_recovery_message(
+        text = await generate_recovery_message(
             slot_name=awaiting,
             attempt=attempt,
             guard=guard,
@@ -99,6 +99,37 @@ class ConversationGuardsMixin:
             user_utterance=_last_user_msg(messages),
             confirmed_slots=mask_confirmed(confirmed),
         )
+        if guard not in ("OFFTOPIC_AGENT", "OFFTOPIC"):
+            return text
+        # A decline redirects to awaiting_slot and to nothing else. The slot
+        # pipeline sanitizes its own generated re-asks; this path did not, so
+        # an ask the model invented for some other slot went out as spoken —
+        # "would you prefer SMS or email for claim status updates?" on a turn
+        # that was waiting on a yes/no to the benefits offer. Anything left
+        # standing asks for the pending slot or asks for nothing.
+        return sanitize_generated(
+            text,
+            guard=guard,
+            collecting_slot=awaiting,
+            fallback_text=self._decline_handoff(state),
+        )
+
+    @staticmethod
+    def _decline_handoff(state: State) -> str:
+        """Decline + the question already on the table, for when sanitizing
+        leaves nothing standing.
+
+        The pending question is the one thing that is right at every step: the
+        offers and confirmations (benefits, Care Coach, "is that the number on
+        file?") have no field to ask for, and the _FALLBACKS templates all end
+        in "could I get your {slot}?"."""
+        from agent.utils import _last_agent_question
+
+        decline = "That's not something I can help with on this call."
+        pending = _last_agent_question(list(state.get("messages") or []))
+        if not pending:
+            return f"{decline} Is there anything else I can help you with today?"
+        return f"{decline} {pending}"
 
     def _handle_non_member_caller(
         self,
