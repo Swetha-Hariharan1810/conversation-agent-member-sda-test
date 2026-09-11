@@ -110,9 +110,18 @@ class BaseAgent(ConversationGuardsMixin, SlotManagerMixin, SignalsMixin, ABC):
             return result
         self.logger.info(
             "execute: answered a side question the turn left unanswered",
-            extra={"agent": self.AGENT_NAME, "query": query},
+            extra={"agent": self.AGENT_NAME, "query": query, "spoken_now": self.speaks(result)},
         )
-        return self.prefix_side_answer(result, answer)
+        if self.speaks(result):
+            return self.prefix_side_answer(result, answer)
+        # This turn says nothing of its own — it hands off, and the next agent
+        # opens. Emitting the answer here would make it a separate AI turn in
+        # front of that opener; the caller should hear one. Carry it instead,
+        # and ask_member puts it in front of whatever is said next.
+        result["pending_side_answer"] = self.join_side_answer(
+            answer, str(result.get("pending_side_answer") or "")
+        )
+        return result
 
     def consume_cross_agent_request(self, state: State, kinds: tuple, targets: tuple) -> dict:
         """The in-flight cross-agent request this agent should serve now, or {}.

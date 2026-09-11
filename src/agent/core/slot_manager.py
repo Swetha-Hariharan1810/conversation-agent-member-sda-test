@@ -756,26 +756,34 @@ class SlotManagerMixin:
             return message
         return f"{answer} {message}".strip() if message else answer
 
+    @staticmethod
+    def speaks(result: dict) -> bool:
+        """Does this turn say something to the member?
+
+        A hand-off says nothing: signal_complete(message="") writes no
+        "messages", and the next agent opens. An escalation says nothing here
+        either — it speaks through escalation_pre_message.
+        """
+        message = (result or {}).get("messages")
+        return isinstance(message, dict) and str(message.get("role")) == "assistant"
+
     @classmethod
     def prefix_side_answer(cls, result: dict, answer: str) -> dict:
-        """Put the side answer in front of whatever message ``result`` speaks.
+        """Put the side answer in front of what ``result`` already speaks.
 
-        For a handler with several exit branches this is less invasive than
-        threading a prefix into each one. A result that speaks nothing — a
-        hand-off via signal_complete(message="") — gets the answer as its
-        message, which is the whole point: otherwise nobody says it.
+        Only ever prefixes — a result that speaks nothing is left alone, and
+        the answer is carried in state instead (see BaseAgent.execute).
+        Inventing a message here is what put the answer in the transcript as
+        its own AI turn ahead of the next agent's opener.
         """
         answer = (answer or "").strip()
-        if not answer or not isinstance(result, dict):
+        if not answer or not cls.speaks(result):
             return result
-        message = result.get("messages")
-        if isinstance(message, dict) and str(message.get("role")) == "assistant":
-            result["messages"] = {
-                **message,
-                "content": cls.join_side_answer(answer, str(message.get("content") or "")),
-            }
-        else:
-            result["messages"] = {"role": "assistant", "content": answer}
+        message = result["messages"]
+        result["messages"] = {
+            **message,
+            "content": cls.join_side_answer(answer, str(message.get("content") or "")),
+        }
         return result
 
     def build_coming_up(

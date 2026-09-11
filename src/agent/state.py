@@ -96,6 +96,13 @@ class State(TypedDict):
 
     # ── Slot tracking ────────────────────────────────────────────────────────
     awaiting_slot: str
+    # An answer to a side question, waiting for the next thing actually spoken
+    # to the member. A turn that hands off to another agent has nothing of its
+    # own to say, and emitting the answer there would make it a separate AI
+    # message ahead of the next agent's opener — two AI turns in a row where
+    # the caller should hear one. ask_member drains it into the message it is
+    # about to send. See BaseAgent._answer_unanswered_side_question.
+    pending_side_answer: str
     correction_return_to: str
     ambiguous_counts: dict
     # Follow-ups parked for later in the call. Structured entries:
@@ -296,6 +303,7 @@ def reset_for_new_intent(state: State, new_intent: Optional[str]) -> dict:
         "phone_update_requested": False,
         # ── Verification sub-step pointer → initial (restart at first_name) ───
         "awaiting_slot": "",  # verification recomputes first empty slot = first_name
+        "pending_side_answer": "",
         "slot_attempts": {},
         "correction_return_to": "",
         "ambiguous_counts": {},

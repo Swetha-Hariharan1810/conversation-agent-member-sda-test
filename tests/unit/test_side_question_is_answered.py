@@ -193,8 +193,57 @@ async def test_the_reported_call_answers_the_id_card_question_once(generation, m
     )
     result = await dm.DeliveryManagementAgent.from_state(state).execute(state)
 
-    assert result["messages"]["content"].count(ANSWER) == 1
+    # This turn hands off to benefits, so it says nothing of its own: the
+    # answer waits for the next thing actually spoken rather than going out as
+    # an AI turn of its own.
+    assert "messages" not in result
+    assert result["pending_side_answer"] == ANSWER
     assert len(generation) == 1, "the question was answered more than once"
+
+
+async def test_the_carried_answer_and_the_next_agent_are_one_message(generation):
+    """What the caller hears is one AI turn, not two.
+
+        AI    You can get a replacement ID card by calling a different line.
+        AI    By the way, you are eligible for a free health and wellness coach…
+
+    was two, because the agent that answered had handed off and the next one
+    opened with its own script."""
+    spoken = _Forgetful(_answered_with(None)).ask_member(
+        _state(pending_side_answer=ANSWER),
+        "By the way, you are eligible for a free health and wellness coach.",
+    )
+    assert spoken["messages"]["content"] == (
+        f"{ANSWER} By the way, you are eligible for a free health and wellness coach."
+    )
+
+
+def test_the_carried_answer_is_cleared_once_spoken(generation):
+    """Otherwise it rides along and is repeated on every later turn."""
+    spoken = _Forgetful(_answered_with(None)).ask_member(_state(pending_side_answer=ANSWER), "Anything else?")
+    assert spoken["pending_side_answer"] == ""
+
+
+def test_nothing_waiting_leaves_the_message_untouched(generation):
+    spoken = _Forgetful(_answered_with(None)).ask_member(_state(), "Anything else?")
+    assert spoken["messages"]["content"] == "Anything else?"
+
+
+def test_a_completion_that_speaks_also_takes_the_waiting_answer(generation):
+    """Closure's goodbye is the next thing the member hears — the rule is
+    whatever is actually said takes the answer with it, not ask_member alone."""
+    agent = _Forgetful(_answered_with(None))
+    spoken = agent.signal_complete(_state(pending_side_answer=ANSWER), message="Thanks for calling.")
+    assert spoken["messages"]["content"] == f"{ANSWER} Thanks for calling."
+    assert spoken["pending_side_answer"] == ""
+
+
+def test_an_escalation_does_not_take_it(generation):
+    """signal_escalate passes "" to _build and speaks through
+    escalation_pre_message, so there is no message to ride out on."""
+    agent = _Forgetful(_answered_with(None))
+    result = agent.signal_escalate(_state(pending_side_answer=ANSWER), "Transferring you.", reason="x")
+    assert "messages" not in result
 
 
 # ── the recording point every slot-collecting agent shares ───────────────────
@@ -248,11 +297,18 @@ def test_join_with_no_answer_is_the_message_alone():
     assert SlotManagerMixin.join_side_answer("", "Anything else?") == "Anything else?"
 
 
-def test_prefix_gives_a_silent_handoff_something_to_say():
-    """signal_complete(message="") speaks nothing — without this the answer is
-    generated and then thrown away, which is the original bug with extra steps."""
+def test_prefix_leaves_a_silent_handoff_alone():
+    """Inventing a message on a hand-off is what put the answer in the
+    transcript as its own AI turn, ahead of the next agent's opener. A silent
+    result carries the answer in state instead."""
     result = {"last_agent_signal": {"status": "complete"}}
-    assert SlotManagerMixin.prefix_side_answer(result, ANSWER)["messages"]["content"] == ANSWER
+    assert "messages" not in SlotManagerMixin.prefix_side_answer(result, ANSWER)
+
+
+def test_speaks_distinguishes_a_turn_with_words_from_a_hand_off():
+    assert SlotManagerMixin.speaks({"messages": {"role": "assistant", "content": "hi"}}) is True
+    assert SlotManagerMixin.speaks({"last_agent_signal": {"status": "complete"}}) is False
+    assert SlotManagerMixin.speaks({}) is False
 
 
 def test_prefix_with_no_answer_leaves_the_result_untouched():
