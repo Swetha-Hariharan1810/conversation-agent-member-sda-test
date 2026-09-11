@@ -32,47 +32,36 @@ FIELDS
     Whether the caller confirms the ZIP the agent just read aloud.
     Only extract when the agent just read a ZIP in the preceding turn.
 
-    Bias rule (explicit denials only): clear negations such as "no",
-    "that's wrong", "incorrect", "nope", "not right" → "no".
-    Do NOT apply the bias rule to hedged or uncertain responses.
+    Decide by what the answer DOES, not by which words carry it:
 
-    Stale-address statements are also declines → "no":
-      "I moved", "I moved recently", "my address has changed",
-      "I don't live there anymore", "we relocated", "that's my old zip"
-      The member is indicating the ZIP on file is no longer valid —
-      this is an unambiguous decline even without the word "no".
+      "yes" — the caller affirms the ZIP on file is the one to use.
+              "yes", "correct", "that's right", "yep", "yeah".
 
-    Indirect update/change intent is also a decline → "no":
-      "I want to update", "I'd like to update", "I need to update",
-      "I want to change it", "I'd like to change that", "let me update",
-      "No. I want to update.", "no, I want to change"
-      When the member signals they want to update or change their ZIP
-      (with or without an explicit "no"), extract zip_confirmed = "no".
-
-    Key distinction: "I moved recently" is a DECLINE (the member knows the
-    value on file is wrong). "I'm not sure if that's still right" is
-    AMBIGUOUS (the member does not know). Only use ambiguous when the
-    member genuinely cannot confirm or deny.
-
-    Genuine uncertainty — "maybe", "not sure", "I'm not sure", "probably" — →
-    event_type "ambiguous", leave zip_confirmed empty. The agent will
-    re-ask for zip_confirmed confirmation.
-
-    Clear affirmation ("yes", "correct", "that's right", "yep",
-    "yeah") → "yes".
+      "no"  — the caller indicates it is NOT the one to use: it is wrong, it
+              is out of date, they have moved, or they want it changed. Any
+              phrasing at all. There is no list to match against — if the
+              caller is not affirming the ZIP and is not giving you a
+              different one, they are declining it.
 
     If the caller provides a new 5-digit ZIP alongside a negation
     ("no, it's 10001"), extract zip_code with the new value; leave
     zip_confirmed empty.
 
+    The one case that is NEITHER: the caller genuinely does not know.
+    "maybe", "not sure", "I'm not sure", "probably", "I think so?" →
+    event_type "ambiguous", leave zip_confirmed empty. The agent re-asks the
+    confirmation. Keep this narrow — it is the difference between a caller who
+    cannot answer and one who is answering no. "I moved recently" is a DECLINE
+    (the caller knows the value on file is wrong); "I'm not sure if that's
+    still right" is AMBIGUOUS (the caller does not know).
+
 CONFIDENCE NOTES (see header [ANCHOR: CONFIDENCE])
 - zip_code: not exactly 5 digits after normalization → ambiguous. Never pad short values.
 - provider_type: does not map to a medical provider category → ambiguous.
-- zip_confirmed: only extract when a ZIP was just read aloud. Stale-address
-  statements ("I moved", "my address changed") are unambiguous declines —
-  extract "no". Indirect update intent ("I want to update", "I'd like to
-  change it") is also an unambiguous decline — extract "no". Only use
-  ambiguous when the member genuinely does not know whether the ZIP is correct.
+- zip_confirmed: only extract when a ZIP was just read aloud. Anything that is
+  not an affirmation and not a new ZIP is a decline — extract "no" without
+  looking for a particular wording. Only use ambiguous when the member
+  genuinely does not know whether the ZIP is correct.
 
 FOLLOWUP CLASSIFICATION NOTES
 - Questions about HOW the provider list will be delivered ("will I receive a
