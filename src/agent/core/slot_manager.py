@@ -1983,22 +1983,31 @@ class SlotManagerMixin:
                         decision=decision,
                         slot_type=slot_type,
                     )
-                    # The generated sentence carries the re-ask (no value was
-                    # captured, so "Collecting:" named the real slot). If it
-                    # came back without one — the model answered and stopped,
-                    # or the sanitizer took an ask for a different slot — the
-                    # static ask goes on the end: a turn that answers a
+                    # Lazy import (core → llm → core cycle at module level).
+                    from agent.llm.response_generator import mentions_slot
+
+                    # The generated sentence normally carries the re-ask
+                    # itself (no value was captured, so "Collecting:" named the
+                    # real slot). Python only adds one when the sentence put
+                    # the question back in NO form — neither a closing question
+                    # nor a mention of the slot — because a turn that answers a
                     # question and then asks for nothing strands the caller.
-                    if "?" not in msg:
+                    #
+                    # "…and I'll need your first name to get started." is the
+                    # ask, stated rather than questioned, and appending to it
+                    # says the same thing twice:
+                    #     "…I'll need your first name to get started. I want to
+                    #      make sure I get this right — what's your first name?"
+                    #
+                    # When one IS needed it comes from the first-ask pool, not
+                    # the retry pool: nothing failed here — the caller was heard
+                    # and answered — so "Sorry, I didn't catch that" and "I
+                    # still don't have your first name" are untrue as well as
+                    # graceless.
+                    if not msg.rstrip().endswith("?") and not mentions_slot(msg, slot_name, slot_label):
                         ask = (
-                            build_retry_prompt(
-                                slot_type,
-                                slot_name=slot_name,
-                                attempt=slot.attempt_count,
-                                slot_label=slot_label,
-                                value=self._confirmation_value(state, slot_name),
-                            )
-                            if has_static_retry(slot_type, slot_name)
+                            build_initial_prompt(slot_type)
+                            if slot_type is not None
                             else self._next_slot_ask(slot_name, slot_configs, ctx)
                         )
                         msg = msg.rstrip() + " " + ask

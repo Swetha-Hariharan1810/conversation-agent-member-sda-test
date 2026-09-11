@@ -8,7 +8,10 @@ sentence ends in an ask:
   system speaks the next question after your sentence. Do NOT ask for, re-ask,
   or re-confirm any slot, and do not indicate what comes next.
 - "Collecting:" names a real slot — nothing was captured this turn. Handle the
-  side question and re-ask THAT slot in the same sentence.
+  side question and re-ask THAT slot in the same sentence, ENDING on the ask
+  and phrasing it as a question ("…so what's your first name?"). A statement
+  of what you need ("I'll need your first name to get started") leaves the
+  caller nothing to answer.
 
 Where "Extracted this turn" is present, the value WAS captured — acknowledge it
 briefly first. Then handle the side question in "Followup:":

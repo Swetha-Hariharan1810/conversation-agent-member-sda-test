@@ -368,6 +368,16 @@ def _mentions(sentence: str, terms: Sequence[str]) -> bool:
     return any(t in lowered for t in terms)
 
 
+def mentions_slot(text: str, *names: str) -> bool:
+    """Does ``text`` name any of these slots, in any wording the generator uses?
+
+    The same fuzzy match the sanitizer strips asks by — so a caller of the
+    generator can ask "did the sentence put the question back?" and get the
+    same answer the sanitizer would.
+    """
+    return any(_mentions(text, _slot_match_terms(n)) for n in names if n)
+
+
 def _foreign_slot_terms(
     collecting_slot: str,
     exempt_slots: Sequence[str] = (),

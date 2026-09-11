@@ -154,11 +154,47 @@ async def test_no_canned_line_lands_in_front_of_the_real_sentence(generation):
     assert result["messages"]["content"].startswith("Sure — I was asking for your first name.")
 
 
-async def test_the_turn_still_ends_by_asking_for_the_slot(generation):
-    """Answering a question and then asking for nothing strands the caller."""
+async def test_a_sentence_that_puts_the_question_back_is_left_alone(generation):
+    """ "I was asking for your first name" IS the ask. Adding the static re-ask
+    behind it says the same thing twice:
+
+        "…and I'll need your first name to get started. I want to make sure I
+         get this right — what's your first name?"
+    """
     result = await _Collector(_asked(REPEAT)).execute(_state())
-    assert result["messages"]["content"].rstrip().endswith("?")
+    assert result["messages"]["content"] == "Sure — I was asking for your first name."
     assert result["awaiting_slot"] == "first_name"
+
+
+async def test_a_sentence_that_asks_for_nothing_gets_the_ask_appended(monkeypatch):
+    """The other half of the rule: answering a question and then asking for
+    nothing strands the caller."""
+
+    async def _answer_only(**_kwargs):
+        return "Of course — this call is about your claim status."
+
+    monkeypatch.setattr("agent.llm.response_generator.generate_recovery_message", _answer_only)
+
+    content = (await _Collector(_asked(REPEAT)).execute(_state()))["messages"]["content"]
+    assert content.startswith("Of course — this call is about your claim status.")
+    assert "first name" in content.replace("Of course — this call is about your claim status.", "")
+
+
+async def test_the_appended_ask_never_says_the_caller_was_not_heard(monkeypatch):
+    """Nothing failed on this turn — the caller was heard and answered. The
+    retry pools ("Sorry, I didn't catch that", "I still don't have your first
+    name") would be untrue as well as graceless, so the ask comes from the
+    first-ask pool."""
+
+    async def _answer_only(**_kwargs):
+        return "Of course — this call is about your claim status."
+
+    monkeypatch.setattr("agent.llm.response_generator.generate_recovery_message", _answer_only)
+
+    for _ in range(25):
+        content = (await _Collector(_asked(REPEAT)).execute(_state()))["messages"]["content"]
+        assert "didn't catch" not in content
+        assert "still don't have" not in content
 
 
 async def test_asking_a_question_is_not_a_failed_attempt(generation):
