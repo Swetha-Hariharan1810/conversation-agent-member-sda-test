@@ -188,6 +188,13 @@ MSG_SSN_ASK_EXHAUSTED = (
     "Let me connect you with a representative who can help."
 )
 
+# A field we never captured (or lost) is not a field that failed to match —
+# saying "that didn't match" sends the caller hunting for our own bug.
+MSG_SSN_NEED_FIELD = [
+    "Sorry, I still need your {field_label} — could you give me that again?",
+    "One more thing — could I get your {field_label}?",
+]
+
 MAX_SSN_ATTEMPTS = 3
 
 # Member ID denial phrases (deterministic detection).
