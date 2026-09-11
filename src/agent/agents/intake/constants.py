@@ -42,6 +42,23 @@ INTENT_BRIDGE_MSGS = [
     "Absolutely. Let me pull that up for you — first, what's your first name?",
     "Sure thing. Could I start with your first name?",
 ]
+# The ask alone, for the turn that already has an acknowledgement in front of
+# it. Every message in INTENT_BRIDGE_MSGS opens by acknowledging ("I can
+# definitely help with that", "Of course — happy to help") because it is
+# normally the whole turn. When the caller asked something alongside their
+# intent, the generation LLM has already acknowledged, in words responsive to
+# what they actually said, and appending a second acknowledgement reads as a
+# stutter:
+#
+#   "I can certainly help you check your claim status. I can definitely help
+#    with that. To get started, could I get your first name?"
+INTENT_BRIDGE_ASKS = [
+    "Could I get your first name?",
+    "Can I start with your first name?",
+    "So — what's your first name?",
+    "Could I start with your first name?",
+]
+
 # Backward-compatible sentinel: common substring present in every pool message.
 INTENT_BRIDGE_MSG = "your first name?"
 

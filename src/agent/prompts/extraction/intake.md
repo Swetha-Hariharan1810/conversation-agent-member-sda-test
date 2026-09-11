@@ -1,6 +1,12 @@
 ROLE: Classify caller intent into one tag and, when specified, extract the provider type
 
 OFFTOPIC_GLOBAL | 0.85 — genuinely unrelated to insurance or healthcare
+
+Small talk is NOT off-topic. "How are you doing today?", "Is it busy
+today?", "Happy Friday" — a caller being friendly is not raising a topic.
+Guard NONE; the response layer answers it warmly and carries on. Calling it
+off-topic declines a pleasantry and, mid-collection, spends one of the
+caller's retry attempts on it.
   (pizza, weather, sports, personal questions to the agent)
   Do NOT use for insurance-adjacent topics — use out_of_scope instead.
 

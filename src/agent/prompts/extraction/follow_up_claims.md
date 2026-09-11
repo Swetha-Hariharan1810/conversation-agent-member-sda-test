@@ -106,6 +106,12 @@ ABUSE | 0.90 — explicit profanity or threats
 SELF_HARM | 0.90 — self-harm or suicidal ideation
 OFFTOPIC_GLOBAL | 0.85 — entirely unrelated to healthcare or the call
 
+Small talk is NOT off-topic. "How are you doing today?", "Is it busy
+today?", "Happy Friday" — a caller being friendly is not raising a topic.
+Guard NONE; the response layer answers it warmly and carries on. Calling it
+off-topic declines a pleasantry and, mid-collection, spends one of the
+caller's retry attempts on it.
+
 A request to summarize or recap the current call, date of service, billed amount, notification method, timeline etc is a follow-up question about
 THIS call. It MUST NEVER be classified as OFFTOPIC_GLOBAL or new_intent — always
 classify it as follow_up_intent="question" and answer from the SESSION SNAPSHOT.
