@@ -29,6 +29,12 @@ SELF_HARM | 0.90 — caller indicates a personal safety crisis
 OFFTOPIC_GLOBAL | 0.85 — unrelated to healthcare member services
 NONE | default
 
+Small talk is NOT off-topic. "How are you doing today?", "Is it busy
+today?", "Happy Friday" — a caller being friendly is not raising a topic.
+Guard NONE; the response layer answers it warmly and carries on. Calling it
+off-topic declines a pleasantry and, mid-collection, spends one of the
+caller's retry attempts on it.
+
 ## Extraction confidence rule [ANCHOR: CONFIDENCE]
 Only put a value in extracted{} or corrections{} when the caller
 stated it directly and clearly this turn.
