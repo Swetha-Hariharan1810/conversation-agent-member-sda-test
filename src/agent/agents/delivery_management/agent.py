@@ -191,6 +191,9 @@ class DeliveryManagementAgent(BaseAgent):
         current_attempt = attempts_dict.get(current_awaiting, {})
         attempt_count = current_attempt.get("attempt_count", 0) if isinstance(current_attempt, dict) else 0
 
+        # Same list the extractor gets as Pending: — a side question about
+        # a step still ahead is answered from it instead of parked.
+        state = self.with_coming_up(state, remaining_slots(DELIVERY_SLOT_ORDER, current_awaiting))
         result = await extract_delivery_management_decision(
             get_extraction_llm(),
             build_extraction_prompt_extraction("extraction/delivery_management.md"),
