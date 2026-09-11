@@ -18,6 +18,7 @@ import uuid
 
 from agent.agents.intake.constants import (
     GREETING,
+    INTENT_BRIDGE_ASKS,
     INTENT_BRIDGE_MSGS,
     LOG_DIFFERENT_MEMBER,
     LOG_INTAKE_GREETING,
@@ -226,8 +227,18 @@ class IntakeAgent(BaseAgent):
                     ),
                 ),
                 extracted_this_turn=intent_value,
+                # Python appends the first-name ask below, so the generated
+                # sentence must not ask for it too. Without this the model's own
+                # ask survives and the caller hears the whole thing twice:
+                #   "…check your claim status. Could I get your first name?
+                #    I can definitely help with that. To get started, could I
+                #    get your first name?"
+                next_slot_label="first name",
+                will_append_ask=True,
             )
-            bridge = self.ask_member(state, msg.rstrip() + " " + random.choice(INTENT_BRIDGE_MSGS))
+            # The bare ask, not a full bridge: the sentence above has already
+            # acknowledged, in words that answer what the caller actually said.
+            bridge = self.ask_member(state, msg.rstrip() + " " + random.choice(INTENT_BRIDGE_ASKS))
             bridge["call_intent"] = intent_value
             bridge["app_run_id"] = app_run_id
             bridge["resolved_intents"] = ["intake"]
