@@ -39,7 +39,7 @@ from agent.agents.delivery_management.pipelines import (
     build_fax_pipeline,
 )
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import is_not_an_answer
+from agent.core.confirmation import carried_contact, is_not_an_answer
 from agent.core.request_detection import detect_request, reconcile_worker_result
 from agent.core.slot_ownership import canonical_capability_topic
 from agent.llm.config import get_extraction_llm
@@ -345,7 +345,20 @@ class DeliveryManagementAgent(BaseAgent):
                     return interrupt
             delivery_method = collected["delivery_method"]
             logger.info(LOG_METHOD_COLLECTED, extra={"delivery_method": delivery_method})
-            # Immediately proceed to contact confirmation in the same turn
+            # A contact given in the same breath as the channel ("send it by
+            # fax, use 415-555-3211") is the caller's answer too. Read THAT
+            # back, not the one on file — confirming a number the caller never
+            # said, on the strength of their "yes", sends the list to the wrong
+            # place with their apparent agreement.
+            if carried := carried_contact(result, delivery_method):
+                logger.info(
+                    LOG_CONTACT_UPDATED,
+                    extra={"method": delivery_method, "source": "given with the channel"},
+                )
+                return self._confirm_carried_contact(
+                    state, delivery_method, carried, fax_on_file, email_on_file
+                )
+            # Otherwise confirm what is on file.
             return self._ask_contact_confirmation(state, delivery_method, fax_on_file, email_on_file)
 
         # ── FAX CONFIRMATION ─────────────────────────────────────────────────
@@ -675,6 +688,34 @@ class DeliveryManagementAgent(BaseAgent):
     # Private helpers
     # -------------------------------------------------------------------------
 
+    def _confirm_carried_contact(
+        self, state: State, method: str, value: str, fax_on_file: str, email_on_file: str
+    ) -> dict:
+        """Read back the contact the caller just gave, held pending until confirmed.
+
+        The on-file value stays in state: nothing is written to Salesforce
+        until the caller confirms the read-back.
+        """
+        if method == "email":
+            confirm = self.ask_member(
+                state,
+                f"Just to be sure I have it right — your email address is {speak_email(value)}, correct?",
+            )
+            confirm["awaiting_slot"] = "email_confirmed"
+            confirm["pending_email"] = value
+            confirm["email"] = email_on_file
+        else:
+            confirm = self.ask_member(
+                state,
+                f"Just to be sure I have it right — your fax number is "
+                f"{value[:3]}-{value[3:6]}-{value[6:]}, correct?",
+            )
+            confirm["awaiting_slot"] = "fax_confirmed"
+            confirm["pending_fax"] = value
+            confirm["fax"] = fax_on_file
+        confirm["delivery_method"] = method
+        return confirm
+
     def _maybe_switch_method(  # noqa: C901
         self,
         state: State,
@@ -785,36 +826,11 @@ class DeliveryManagementAgent(BaseAgent):
         self.slot_ok("delivery_method", new_method)
 
         # New contact value in the same utterance → straight to its read-back.
-        carried_value = ""
-        if new_method == "email":
-            candidate = normalize_email(str(extracted.get("email") or ""))
-            if candidate and validate_email(candidate).valid:
-                carried_value = candidate
-        else:
-            candidate = normalize_fax_number(str(extracted.get("fax") or ""))
-            if candidate and validate_fax_number(candidate).valid:
-                carried_value = candidate
-
+        carried_value = carried_contact(result, new_method)
         if carried_value:
-            if new_method == "email":
-                confirm = self.ask_member(
-                    state,
-                    f"Just to be sure I have it right — your email address is "
-                    f"{speak_email(carried_value)}, correct?",
-                )
-                confirm["awaiting_slot"] = "email_confirmed"
-                confirm["pending_email"] = carried_value
-                confirm["email"] = email_on_file
-            else:
-                confirm = self.ask_member(
-                    state,
-                    f"Just to be sure I have it right — your fax number is "
-                    f"{carried_value[:3]}-{carried_value[3:6]}-{carried_value[6:]}, correct?",
-                )
-                confirm["awaiting_slot"] = "fax_confirmed"
-                confirm["pending_fax"] = carried_value
-                confirm["fax"] = fax_on_file
-            confirm["delivery_method"] = new_method
+            confirm = self._confirm_carried_contact(
+                state, new_method, carried_value, fax_on_file, email_on_file
+            )
             confirm[f"pending_{old_method}"] = ""
             return confirm
 
