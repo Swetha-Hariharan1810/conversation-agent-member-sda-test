@@ -127,9 +127,25 @@ class ConversationGuardsMixin:
 
         decline = "That's not something I can help with on this call."
         pending = _last_agent_question(list(state.get("messages") or []))
-        if not pending:
+        if pending:
+            return f"{decline} {pending}"
+
+        # No question on the table. What to hand back to depends on whether the
+        # call is in the middle of something: "is there anything else I can
+        # help you with?" is right when the call is on that question and
+        # catastrophic three turns into taking a name.
+        awaiting = state.get("awaiting_slot") or ""
+        if not awaiting:
             return f"{decline} Is there anything else I can help you with today?"
-        return f"{decline} {pending}"
+
+        from agent.llm.response_generator import _SLOT_LABELS
+
+        label = _SLOT_LABELS.get(awaiting, awaiting.replace("_", " ")).split("—")[0].strip()
+        # A "whether …" label is a yes/no already put to them, not a value to
+        # hand over — "could I get your whether they want the benefits" is not
+        # a sentence.
+        ask = "could you let me know?" if label.startswith("whether ") else f"could I get your {label}?"
+        return f"{decline} Back to where we were — {ask}"
 
     def _handle_non_member_caller(
         self,

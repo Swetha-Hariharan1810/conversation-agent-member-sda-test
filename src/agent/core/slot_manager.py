@@ -33,7 +33,13 @@ from agent.responses.builder import (
 from agent.responses.static import MSG_WAIT_ACK, MSG_WAIT_NUDGE, build_slot_exhausted_message
 from agent.slots.types import SlotType
 from agent.state import State, normalize_parked_followups
-from agent.utils import _last_user_msg, detect_cannot_provide, detect_wait_request, pick
+from agent.utils import (
+    _last_assistant_msg,
+    _last_user_msg,
+    detect_cannot_provide,
+    detect_wait_request,
+    pick,
+)
 
 # ── Empathetic "cannot provide" escalation message ────────────────────────────
 # Slot-aware: {slot_label} is filled at runtime from the SlotType label.
@@ -271,6 +277,7 @@ class SlotManagerMixin:
                 extracted_value=extracted_this_turn
                 if extracted_this_turn is not None
                 else sc.get("extracted_val"),
+                user_utterance=_last_user_msg(messages),
             )
         ):
             static_msg = build_retry_prompt(
@@ -280,11 +287,22 @@ class SlotManagerMixin:
                 slot_label=fallback_slot_label or slot_name.replace("_", " "),
                 value=self._confirmation_value(state, slot_name),
             )
-            self.logger.info(
-                "_generate_slot_retry_response: static re-ask (no generation LLM call)",
-                extra={"slot": slot_name, "guard": guard, "attempt": slot_state.attempt_count},
-            )
-            return static_msg
+            # Never say the identical sentence twice running. The pools are
+            # small, so a second retry can draw the line the caller just heard
+            # — and a caller who is already struggling hears a machine looping
+            # rather than a person re-asking. Generating gives them a different
+            # way in, which is the whole point of asking again.
+            if static_msg.strip() == _last_assistant_msg(messages).strip():
+                self.logger.info(
+                    "_generate_slot_retry_response: static re-ask repeats the last turn — generating",
+                    extra={"slot": slot_name, "guard": guard},
+                )
+            else:
+                self.logger.info(
+                    "_generate_slot_retry_response: static re-ask (no generation LLM call)",
+                    extra={"slot": slot_name, "guard": guard, "attempt": slot_state.attempt_count},
+                )
+                return static_msg
 
         slot_label_override: str | None = None
         if slot_name == "relationship" and state.get("relationship"):
