@@ -68,6 +68,18 @@ new channel. When the caller expresses a clear preference for a channel
 positive intent is the answer — even when paired with a negation of the
 current channel. Do not let the negation override the affirmative.
 
+## A contact given in the same breath as the channel
+When the caller names the channel AND gives the contact in one utterance,
+extract BOTH — the number or address is their answer just as much as the
+channel is:
+  "send it by fax, use four one five five five five three two one one"
+    → extracted={"delivery_method":"fax","fax":"4155553211"}
+  "email it to jane at example dot com"
+    → extracted={"delivery_method":"email","email":"jane@example.com"}
+Never drop the contact because the channel was the slot being asked for. A
+contact left unextracted is a contact the agent reads back from file instead,
+and the caller confirms a destination they never gave.
+
 ## Answering delivery_method with "instead of X" phrasing
 When the awaiting slot IS delivery_method and the caller chooses a method
 by contrasting it with the other ("send to email instead of fax", "actually
