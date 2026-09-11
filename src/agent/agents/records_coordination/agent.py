@@ -200,6 +200,20 @@ class RecordsCoordinationAgent(BaseAgent):
         # Phase: upload_consent — did member agree to receive the link?
         if current_awaiting == "upload_consent":
             upload_consent = normalize_yes_no(extracted.get("upload_consent", ""))
+            # A clear yes/no can still carry a real question ("yes — and how
+            # long does this take?"). Answer it in front of whichever message
+            # the branches below speak.
+            side_answer = (
+                await self.answer_side_question(
+                    state,
+                    messages,
+                    result=result,
+                    slot_name="upload_consent",
+                    extracted_value=upload_consent,
+                )
+                if upload_consent in ("yes", "no")
+                else ""
+            )
 
             if upload_consent == "yes":
                 # Confirm email before sending. A caller who answers with the
@@ -214,7 +228,7 @@ class RecordsCoordinationAgent(BaseAgent):
                     )
                     confirm_result["awaiting_slot"] = "email_confirmed"
                     confirm_result["pending_email"] = carried
-                    return confirm_result
+                    return self.prefix_side_answer(confirm_result, side_answer)
                 email_on_file = (state.get("email") or "").strip()
                 if email_on_file:
                     # Spell out the email in words ("at"/"dot") for the spoken message
@@ -222,15 +236,15 @@ class RecordsCoordinationAgent(BaseAgent):
                     msg = random.choice(EMAIL_READBACK_FOR_UPLOAD).format(email=display_email)
                     confirm_result = self.ask_member(state, msg)
                     confirm_result["awaiting_slot"] = "email_confirmed"
-                    return confirm_result
+                    return self.prefix_side_answer(confirm_result, side_answer)
                 else:
                     ask_result = self.ask_member(state, pick(MSG_EMAIL_UPDATE_PROMPT))
                     ask_result["awaiting_slot"] = "email"
-                    return ask_result
+                    return self.prefix_side_answer(ask_result, side_answer)
 
             if upload_consent == "no":
                 # Member declined link — offer Personal Guide
-                return await self._handle_guide_consent_ask(state)
+                return self.prefix_side_answer(await self._handle_guide_consent_ask(state), side_answer)
 
             # Ambiguous — retry
             # Never verbatim-repeat over an unhandled request (Phase 7).
@@ -414,15 +428,28 @@ class RecordsCoordinationAgent(BaseAgent):
         # Phase: personal_guide_consent — explicit consent required
         if current_awaiting == "personal_guide_consent":
             guide_consent = normalize_yes_no(extracted.get("personal_guide_consent", ""))
+            side_answer = (
+                await self.answer_side_question(
+                    state,
+                    messages,
+                    result=result,
+                    slot_name="personal_guide_consent",
+                    extracted_value=guide_consent,
+                )
+                if guide_consent in ("yes", "no")
+                else ""
+            )
 
             if guide_consent == "yes":
-                return await self._trigger_guide_and_proceed(state)
+                return self.prefix_side_answer(await self._trigger_guide_and_proceed(state), side_answer)
 
             if guide_consent == "no":
                 from agent.agents.follow_up.constants import MSG_FOLLOW_UP_ASK
 
                 handoff = pick(MSG_FOLLOW_UP_ASK)
-                result = self.ask_member(state, handoff)
+                # Shadows the extraction result — side_answer was computed from
+                # it above, before this point.
+                result = self.prefix_side_answer(self.ask_member(state, handoff), side_answer)
                 result["next_node"] = "follow_up_agent"
                 result["awaiting_slot"] = ""
                 result["records_branch_taken"] = "declined_personal_guide"

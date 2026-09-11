@@ -207,18 +207,30 @@ class NotificationSetupAgent(BaseAgent):
             else:
                 timeline_resp = normalize_yes_no(raw_timeline) if raw_timeline else ""
 
+            side_answer = (
+                await self.answer_side_question(
+                    state,
+                    messages,
+                    result=result,
+                    slot_name="timeline_question",
+                    extracted_value=timeline_resp,
+                )
+                if timeline_resp in ("question", "yes", "no")
+                else ""
+            )
+
             if timeline_resp in ("question", "yes"):
                 # Affirmative or explicit question → deliver the timeline answer,
                 # then move straight to the N2 channel ask in the same turn.
                 combined = f"{pick(MSG_TIMELINE_ANSWER)}\n\n{pick(N2_METHOD_ASK)}"
-                ask_result = self.ask_member(state, combined)
+                ask_result = self.prefix_side_answer(self.ask_member(state, combined), side_answer)
                 ask_result["awaiting_slot"] = "n2_notification_method"
                 return ask_result
 
             if timeline_resp == "no":
                 # Member declined the timeline walkthrough — skip the answer,
                 # ask the N2 channel question only.
-                ask_result = self.ask_member(state, pick(N2_METHOD_ASK))
+                ask_result = self.prefix_side_answer(self.ask_member(state, pick(N2_METHOD_ASK)), side_answer)
                 ask_result["awaiting_slot"] = "n2_notification_method"
                 return ask_result
 
@@ -341,7 +353,12 @@ class NotificationSetupAgent(BaseAgent):
                 return ask_result
 
             if contact_conf == "yes":
-                done = await self._save_and_complete(state, "sms", pending_phone or phone_on_file)
+                side_answer = await self.answer_side_question(
+                    state, messages, result=result, slot_name="phone_confirmed", extracted_value=contact_conf
+                )
+                done = self.prefix_side_answer(
+                    await self._save_and_complete(state, "sms", pending_phone or phone_on_file), side_answer
+                )
                 done["pending_phone"] = ""
                 return done
             # Never verbatim-repeat over an unhandled request (Phase 7).
@@ -477,7 +494,12 @@ class NotificationSetupAgent(BaseAgent):
                 return ask_result
 
             if contact_conf == "yes":
-                done = await self._save_and_complete(state, "email", pending_email or email_on_file)
+                side_answer = await self.answer_side_question(
+                    state, messages, result=result, slot_name="email_confirmed", extracted_value=contact_conf
+                )
+                done = self.prefix_side_answer(
+                    await self._save_and_complete(state, "email", pending_email or email_on_file), side_answer
+                )
                 done["pending_email"] = ""
                 return done
             # Never verbatim-repeat over an unhandled request (Phase 7).

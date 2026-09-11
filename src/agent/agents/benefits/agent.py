@@ -250,22 +250,19 @@ class BenefitsAgent(BaseAgent):
                 )
                 return hop
 
-        if normalized == "yes":
-            return self.signal_complete(
-                state,
-                message="",
-                resolved_intents=["benefits_inquiry"],
-                context_updates=self._completion_context(state, True),
-                proactive_offer_available=True,
+        if normalized in ("yes", "no"):
+            # "That sounds interesting, but I lost my ID card. Can you help?" —
+            # the yes/no is the answer AND the question is real. We hand off
+            # after this, so answering here is the only chance it gets.
+            side_answer = await self.answer_side_question(
+                state, messages, result=result, slot_name=_CARE_COACH_SLOT, extracted_value=normalized
             )
-
-        if normalized == "no":
             return self.signal_complete(
                 state,
-                message="",
+                message=side_answer,
                 resolved_intents=["benefits_inquiry"],
-                context_updates=self._completion_context(state, False),
-                proactive_offer_available=False,
+                context_updates=self._completion_context(state, normalized == "yes"),
+                proactive_offer_available=(normalized == "yes"),
             )
 
         # No clear yes/no — retry or exhaust gracefully
@@ -280,7 +277,10 @@ class BenefitsAgent(BaseAgent):
             )
 
         retry_msg = random.choice(CARE_COACH_OFFER_TEMPLATES)
-        retry_result = self.ask_member(state, retry_msg)
+        side_answer = await self.answer_side_question(
+            state, messages, result=result, slot_name=_CARE_COACH_SLOT, extracted_value=""
+        )
+        retry_result = self.ask_member(state, self.join_side_answer(side_answer, retry_msg))
         retry_result["awaiting_slot"] = _CARE_COACH_SLOT
         retry_result["benefits_explained"] = True
         return retry_result

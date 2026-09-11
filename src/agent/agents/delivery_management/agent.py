@@ -320,7 +320,7 @@ class DeliveryManagementAgent(BaseAgent):
 
         # ── BENEFITS RESPONSE PHASE ──────────────────────────────────────────
         if current_awaiting == "benefits_response":
-            return await self._handle_benefits_response(state, result)
+            return await self._handle_benefits_response(state, messages, result)
 
         # ── COLLECT DELIVERY METHOD ──────────────────────────────────────────
         if not delivery_method:
@@ -389,12 +389,24 @@ class DeliveryManagementAgent(BaseAgent):
                 new_fax_raw = ""
 
             if new_fax_raw:
+                # A value can arrive with a question too ("use 415-555-1234 —
+                # and how long does this take?"). The dispatch branches below
+                # speak; the read-back branch asks its own question.
+                side_answer = await self.answer_side_question(
+                    state,
+                    messages,
+                    result=result,
+                    slot_name="fax_confirmed",
+                    extracted_value=str(new_fax_raw),
+                )
                 normalized = normalize_fax_number(str(new_fax_raw))
                 if normalized and validate_fax_number(normalized).valid:
                     if normalized == normalize_fax_number(fax_on_file):
                         # Member repeated the fax we already have on file
                         logger.info(LOG_CONTACT_CONFIRMED, extra={"method": "fax"})
-                        done = await self._proceed_to_dispatch(state, delivery_method, fax_on_file)
+                        done = await self._proceed_to_dispatch(
+                            state, delivery_method, fax_on_file, prefix=side_answer
+                        )
                         done["pending_fax"] = ""
                         return done
                     if pending_fax and normalized == normalize_fax_number(pending_fax):
@@ -402,7 +414,9 @@ class DeliveryManagementAgent(BaseAgent):
                         if fail := await update_fax_in_salesforce(self, state, pending_fax):
                             return fail
                         logger.info(LOG_CONTACT_UPDATED, extra={"fax_tail": pending_fax[-4:]})
-                        done = await self._proceed_to_dispatch(state, delivery_method, pending_fax)
+                        done = await self._proceed_to_dispatch(
+                            state, delivery_method, pending_fax, prefix=side_answer
+                        )
                         done["pending_fax"] = ""
                         return done
                     # New fax — hold as pending until the member confirms the
@@ -434,15 +448,22 @@ class DeliveryManagementAgent(BaseAgent):
                 return ask_result
 
             if contact_conf == "yes":
+                side_answer = await self.answer_side_question(
+                    state, messages, result=result, slot_name="fax_confirmed", extracted_value=contact_conf
+                )
                 if pending_fax:
                     if fail := await update_fax_in_salesforce(self, state, pending_fax):
                         return fail
                     logger.info(LOG_CONTACT_UPDATED, extra={"fax_tail": pending_fax[-4:]})
-                    done = await self._proceed_to_dispatch(state, delivery_method, pending_fax)
+                    done = await self._proceed_to_dispatch(
+                        state, delivery_method, pending_fax, prefix=side_answer
+                    )
                     done["pending_fax"] = ""
                     return done
                 logger.info(LOG_CONTACT_CONFIRMED, extra={"method": "fax"})
-                done = await self._proceed_to_dispatch(state, delivery_method, fax_on_file)
+                done = await self._proceed_to_dispatch(
+                    state, delivery_method, fax_on_file, prefix=side_answer
+                )
                 done["pending_fax"] = ""
                 return done
             # Before anything else, never verbatim-repeat over an unhandled
@@ -550,12 +571,24 @@ class DeliveryManagementAgent(BaseAgent):
                 new_email_raw = ""
 
             if new_email_raw:
+                # A value can arrive with a question too ("use 415-555-1234 —
+                # and how long does this take?"). The dispatch branches below
+                # speak; the read-back branch asks its own question.
+                side_answer = await self.answer_side_question(
+                    state,
+                    messages,
+                    result=result,
+                    slot_name="email_confirmed",
+                    extracted_value=str(new_email_raw),
+                )
                 normalized = normalize_email(str(new_email_raw))
                 if normalized and validate_email(normalized).valid:
                     if normalized == normalize_email(email_on_file):
                         # Member repeated the email we already have on file
                         logger.info(LOG_CONTACT_CONFIRMED, extra={"method": "email"})
-                        done = await self._proceed_to_dispatch(state, delivery_method, email_on_file)
+                        done = await self._proceed_to_dispatch(
+                            state, delivery_method, email_on_file, prefix=side_answer
+                        )
                         done["pending_email"] = ""
                         return done
                     if pending_email and normalized == normalize_email(pending_email):
@@ -563,7 +596,9 @@ class DeliveryManagementAgent(BaseAgent):
                         if fail := await update_email_in_salesforce(self, state, pending_email):
                             return fail
                         logger.info(LOG_CONTACT_UPDATED, extra={"method": "email"})
-                        done = await self._proceed_to_dispatch(state, delivery_method, pending_email)
+                        done = await self._proceed_to_dispatch(
+                            state, delivery_method, pending_email, prefix=side_answer
+                        )
                         done["pending_email"] = ""
                         return done
                     # New email — hold as pending until the member confirms the
@@ -595,15 +630,22 @@ class DeliveryManagementAgent(BaseAgent):
                 return ask_result
 
             if contact_conf == "yes":
+                side_answer = await self.answer_side_question(
+                    state, messages, result=result, slot_name="email_confirmed", extracted_value=contact_conf
+                )
                 if pending_email:
                     if fail := await update_email_in_salesforce(self, state, pending_email):
                         return fail
                     logger.info(LOG_CONTACT_UPDATED, extra={"method": "email"})
-                    done = await self._proceed_to_dispatch(state, delivery_method, pending_email)
+                    done = await self._proceed_to_dispatch(
+                        state, delivery_method, pending_email, prefix=side_answer
+                    )
                     done["pending_email"] = ""
                     return done
                 logger.info(LOG_CONTACT_CONFIRMED, extra={"method": "email"})
-                done = await self._proceed_to_dispatch(state, delivery_method, email_on_file)
+                done = await self._proceed_to_dispatch(
+                    state, delivery_method, email_on_file, prefix=side_answer
+                )
                 done["pending_email"] = ""
                 return done
             # Never verbatim-repeat over an unhandled request (Phase 7).
@@ -896,16 +938,23 @@ class DeliveryManagementAgent(BaseAgent):
             return self._route_slot_update(state, detected.target, ctx, return_awaiting=current_awaiting)
         return None
 
-    async def _handle_benefits_response(self, state: State, result) -> dict:
+    async def _handle_benefits_response(self, state: State, messages: list, result) -> dict:
         """Process the member's yes/no response to the benefits offer."""
         extracted = (result.extracted or {}) if result else {}
         benefits_raw = extracted.get("benefits_response", "")
         benefits_conf = normalize_yes_no(benefits_raw) if benefits_raw else ""
 
         if benefits_conf in ("yes", "no"):
+            # "No. But I lost my ID card, can you help?" — the yes/no is the
+            # answer AND the question is real. Answer it here; we are handing
+            # off, so this is the only chance anyone has to say anything about
+            # it before the next agent starts its own script.
+            side_answer = await self.answer_side_question(
+                state, messages, result=result, slot_name="benefits_response", extracted_value=benefits_conf
+            )
             return self.signal_complete(
                 state,
-                message="",
+                message=side_answer,
                 resolved_intents=["delivery_management"],
                 context_updates=self._completion_context(
                     state,
@@ -928,7 +977,10 @@ class DeliveryManagementAgent(BaseAgent):
 
         provider_type = (state.get("provider_type") or "provider").strip()
         retry_msg = random.choice(BENEFITS_OFFER_TEMPLATES).format(provider_type=provider_type)
-        retry_result = self.ask_member(state, retry_msg)
+        side_answer = await self.answer_side_question(
+            state, messages, result=result, slot_name="benefits_response", extracted_value=""
+        )
+        retry_result = self.ask_member(state, self.join_side_answer(side_answer, retry_msg))
         retry_result["awaiting_slot"] = "benefits_response"
         retry_result["provider_list_sent"] = True
         retry_result["benefits_offer_made"] = True
@@ -958,7 +1010,7 @@ class DeliveryManagementAgent(BaseAgent):
         return ""
 
     async def _proceed_to_dispatch(
-        self, state: State, delivery_method: str, confirmed_destination: str
+        self, state: State, delivery_method: str, confirmed_destination: str, *, prefix: str = ""
     ) -> dict:
         """Dispatch the provider list then make the benefits offer."""
         # ── DISPATCH PRECONDITION (Phase 4, Bug C) ───────────────────────────
@@ -1018,7 +1070,7 @@ class DeliveryManagementAgent(BaseAgent):
             window_msg = pick(DELIVERY_WINDOW_MSG)
 
         benefits_msg = random.choice(BENEFITS_OFFER_TEMPLATES).format(provider_type=provider_type)
-        combined_msg = f"{window_msg} {benefits_msg}"
+        combined_msg = self.join_side_answer(prefix, f"{window_msg} {benefits_msg}")
 
         offer_result = self.ask_member(state, combined_msg)
         offer_result["awaiting_slot"] = "benefits_response"

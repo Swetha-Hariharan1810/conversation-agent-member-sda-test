@@ -641,6 +641,101 @@ class SlotManagerMixin:
             )
         return parked
 
+    async def answer_side_question(
+        self,
+        state: State,
+        messages: list,
+        *,
+        result: Any,
+        slot_name: str,
+        extracted_value: str,
+    ) -> str:
+        """The sentence that answers a side question asked alongside a slot answer.
+
+        Returns "" when the caller asked nothing, so a handler that calls this
+        unconditionally behaves exactly as it did before on ordinary turns.
+
+        _collect_slot has always done this — FOLLOWUP_RESPOND, via
+        _handle_answered_followup. Every slot collected by a hand-written
+        handler instead of the slot pipeline reimplemented only the "answer"
+        half of answer-plus-question: it read extracted[slot], branched on the
+        value and returned, so event_type and followup_query were dropped on
+        the floor.
+
+            AI      …would you like the benefits for office visits?
+            Caller  No. But I lost my ID card. Can you help me with a new one?
+            AI      By the way, you are eligible for a free health and wellness
+                    coach…
+
+        The "no" was taken and the question was never heard — on that turn and
+        on every repeat of it, because nothing escalates a question that
+        arrives as answered_with_followup: the guard layer needs
+        guard_confidence >= 0.7 to act at all, and the repeated-ignored-request
+        escalation only hangs off the OFFTOPIC_AGENT branch.
+
+        The answer never ends in a question: the caller is mid-flow, and the
+        handler's own next message — or the next agent's opener — is the one
+        question of the turn.
+        """
+        followup_query = (getattr(result, "followup_query", None) or "").strip()
+        if not followup_query:
+            return ""
+        ctx = ConversationContext.from_state(state)
+        self.logger.info(
+            "answer_side_question: answering a question asked with a slot answer",
+            extra={"agent": self.AGENT_NAME, "slot": slot_name, "query": followup_query},
+        )
+        return await self._generate_slot_retry_response(
+            state,
+            slot_name,
+            ctx,
+            messages,
+            guard="FOLLOWUP_RESPOND",
+            session_context=_mk_session_ctx(
+                followup_query=followup_query,
+                extracted_val=extracted_value,
+                coming_up=remaining_call_stages(
+                    intent=str(state.get("call_intent") or ""),
+                    current_agent=self.AGENT_NAME,
+                    state=state,
+                ),
+            ),
+            extracted_this_turn=extracted_value,
+            # The handler speaks next, or hands off to an agent that does.
+            will_append_ask=True,
+        )
+
+    @staticmethod
+    def join_side_answer(answer: str, message: str) -> str:
+        """Put the side answer in front of the message the handler was sending."""
+        answer = (answer or "").strip()
+        message = (message or "").strip()
+        if not answer:
+            return message
+        return f"{answer} {message}".strip() if message else answer
+
+    @classmethod
+    def prefix_side_answer(cls, result: dict, answer: str) -> dict:
+        """Put the side answer in front of whatever message ``result`` speaks.
+
+        For a handler with several exit branches this is less invasive than
+        threading a prefix into each one. A result that speaks nothing — a
+        hand-off via signal_complete(message="") — gets the answer as its
+        message, which is the whole point: otherwise nobody says it.
+        """
+        answer = (answer or "").strip()
+        if not answer or not isinstance(result, dict):
+            return result
+        message = result.get("messages")
+        if isinstance(message, dict) and str(message.get("role")) == "assistant":
+            result["messages"] = {
+                **message,
+                "content": cls.join_side_answer(answer, str(message.get("content") or "")),
+            }
+        else:
+            result["messages"] = {"role": "assistant", "content": answer}
+        return result
+
     def build_coming_up(
         self,
         state: State,
