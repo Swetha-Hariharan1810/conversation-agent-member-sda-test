@@ -116,6 +116,15 @@ _POST_CAPTURE_GUARDS = ("FOLLOWUP_ANSWER", "FOLLOWUP_RESPOND", "FOLLOWUP_PARK", 
 
 _COLLECTING_NOTHING = "(nothing — this turn's value was captured; do not ask for or re-confirm any slot)"
 
+# No slot is being collected at all — the caller is between steps, e.g. on
+# "is there anything else?". Falling back to the intent label here would
+# invent a collection step and send the caller back to a question that is
+# not being asked.
+_COLLECTING_NOTHING_PENDING = (
+    "(nothing — no slot is being collected; do not ask for or re-confirm any "
+    "slot, and return to the question already on the table)"
+)
+
 
 # ── Static fast path (no LLM 2 call) ─────────────────────────────────────────
 # RETRY and CLARIFY are the only guards whose whole job is "ask the same slot
@@ -366,10 +375,12 @@ def _render_payload(
     # Use the live prompt text when provided (dynamic slots such as relationship
     # and phone_confirmed whose options are only known at runtime from SF).
     # Fall back to the static label dict for fixed slots.
-    slot_label = slot_label_override or _SLOT_LABELS.get(
-        slot_name,
-        (slot_name or _SLOT_LABELS["intent"]).replace("_", " "),
-    )
+    if slot_label_override:
+        slot_label = slot_label_override
+    elif (slot_name or "").strip():
+        slot_label = _SLOT_LABELS.get(slot_name, slot_name.replace("_", " "))
+    else:
+        slot_label = _COLLECTING_NOTHING_PENDING
     # Post-confirmation guards with a captured value: nothing is being
     # collected this turn — the real label would invite a spurious re-ask.
     if guard in _POST_CAPTURE_GUARDS and extracted_value is not None:

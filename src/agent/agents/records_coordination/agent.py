@@ -424,6 +424,7 @@ class RecordsCoordinationAgent(BaseAgent):
                 handoff = pick(MSG_FOLLOW_UP_ASK)
                 result = self.ask_member(state, handoff)
                 result["next_node"] = "follow_up_agent"
+                result["awaiting_slot"] = ""
                 result["records_branch_taken"] = "declined_personal_guide"
                 # Mark the claim flow as complete so follow_up_agent's
                 # is_new_intake_intent gate recognises a subsequent same-intent

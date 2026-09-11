@@ -66,6 +66,7 @@ class CareWellnessAgent(BaseAgent):
         message = random.choice(CARE_COACH_INTRO_TEMPLATES).format(method=method, contact=contact)
         result = self.ask_member(state, message)  # is_interrupt=True — user sees message and can respond
         result["next_node"] = "follow_up_agent"  # their response goes to follow_up_agent
+        result["awaiting_slot"] = ""  # the care coach question is answered; nothing is being collected
         result.update(self._completion_context(state, dispatched=True))  # persist care coach flags into state
         return result
 
@@ -73,6 +74,7 @@ class CareWellnessAgent(BaseAgent):
         message = pick(CARE_COACH_NOOFFER_TEMPLATES)
         result = self.ask_member(state, message)
         result["next_node"] = "follow_up_agent"
+        result["awaiting_slot"] = ""
         result["care_coach_offered"] = True
         result["care_coach_nooffer_sent"] = True
         result["care_coach_details_sent"] = False
