@@ -491,6 +491,10 @@ class DeliveryManagementAgent(BaseAgent):
             # Phone delivery intercept: caller refuses fax and wants phone instead.
             # Reset delivery_method so the caller can choose fax or email fresh.
             if self._PHONE_DELIVERY_RE.search(last_user or ""):
+                # Reset the slot record before ask_member: a stale confirmed
+                # last_value would be re-persisted and resurrect the method we
+                # are clearing here.
+                self.get_slot("delivery_method").reset()
                 r = self.ask_member(state, pick(MSG_PHONE_DELIVERY_NOT_SUPPORTED))
                 r["awaiting_slot"] = "delivery_method"
                 r["delivery_method"] = ""
@@ -647,6 +651,10 @@ class DeliveryManagementAgent(BaseAgent):
             # Phone delivery intercept: caller refuses email and wants phone instead.
             # Reset delivery_method so the caller can choose fax or email fresh.
             if self._PHONE_DELIVERY_RE.search(last_user or ""):
+                # Reset the slot record before ask_member: a stale confirmed
+                # last_value would be re-persisted and resurrect the method we
+                # are clearing here.
+                self.get_slot("delivery_method").reset()
                 r = self.ask_member(state, pick(MSG_PHONE_DELIVERY_NOT_SUPPORTED))
                 r["awaiting_slot"] = "delivery_method"
                 r["delivery_method"] = ""
@@ -773,6 +781,18 @@ class DeliveryManagementAgent(BaseAgent):
         # confirmation counters must not leak into the new channel's flow.
         self.get_slot(f"{old_method}_change_cycles").reset()
         self.get_slot(f"{old_method}_confirmed").reset()
+        # The abandoned channel's contact slot may hold a value the caller
+        # gave but never confirmed (e.g. a replacement fax read back and then
+        # dropped for email) — a confirmed record would be re-persisted into
+        # state on a later interrupt and overwrite the on-file value.
+        self.get_slot(old_method).reset()
+        # Keep the delivery_method slot record in step with the state key we
+        # are about to rewrite. slot_attempts is shared across agents, so a
+        # record still reading "fax" is re-persisted by the next agent's
+        # interrupt (the benefits Care Coach offer) and silently resurrects
+        # the abandoned channel — care_wellness then sends the Care Coach
+        # details to the fax the caller just replaced.
+        self.slot_ok("delivery_method", new_method)
 
         # New contact value in the same utterance → straight to its read-back.
         carried_value = ""
