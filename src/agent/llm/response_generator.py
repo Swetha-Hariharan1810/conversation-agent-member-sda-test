@@ -159,12 +159,28 @@ _COLLECTING_NOTHING_PENDING = (
 _STATIC_ELIGIBLE_GUARDS = frozenset({"RETRY", "CLARIFY"})
 
 
+# "Sorry, I didn't catch that" is a claim about hearing, and it is only true of
+# a short, contentless turn — silence, "uh", "what". A caller who says a whole
+# clear sentence was heard perfectly well; telling them otherwise is both false
+# and, said twice running, insulting:
+#
+#     AI    Sorry, I didn't catch that — could you say your first name again?
+#     User  Please check my claim status today.
+#     AI    Sorry, I didn't catch that — could you say your first name again?
+#
+# Four words is the line. Below it a canned re-ask is honest and costs nothing;
+# at or above it the turn has content the template cannot answer, and the
+# generation LLM gets to respond to what was actually said.
+_STATIC_RETRY_MAX_WORDS = 4
+
+
 def needs_freeform_response(
     *,
     guard: str,
     decision: object | None = None,
     followup_query: str | None = None,
     extracted_value: str | None = None,
+    user_utterance: str | None = None,
 ) -> bool:
     """Does this turn need a generated sentence, or will a static re-ask do?
 
@@ -175,9 +191,14 @@ def needs_freeform_response(
     The decision is driven by ``WorkerResult.needs_freeform_response``, set by
     the extraction LLM that already read the utterance — no extra call. It is
     overridden to True whenever there is content the static template cannot
-    carry (a side question, a value to name back), and defaults to True when
-    no extraction result was passed, so un-wired call sites keep the old
-    always-generate behaviour.
+    carry (a side question, a value to name back, or simply a sentence long
+    enough to have been heard), and defaults to True when no extraction result
+    was passed, so un-wired call sites keep the old always-generate behaviour.
+
+    The length rule is a safety net under the model's flag, not a replacement
+    for it: the flag is set by a model that can be wrong about its own output,
+    and it was wrong on "Please check my claim status today" — a clear request
+    that got "I didn't catch that" twice.
     """
     if guard not in _STATIC_ELIGIBLE_GUARDS:
         return True
@@ -194,6 +215,8 @@ def needs_freeform_response(
     if (getattr(decision, "update_target", None) or "").strip():
         return True
     if (getattr(decision, "followup_query", None) or "").strip():
+        return True
+    if len((user_utterance or "").split()) >= _STATIC_RETRY_MAX_WORDS:
         return True
     flag = getattr(decision, "needs_freeform_response", None)
     if flag is None:

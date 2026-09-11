@@ -4,6 +4,22 @@ Covers the two halves of the fix:
   1. needs_freeform_response() routes plain retries to build_retry_prompt.
   2. sanitize_generated() strips a foreign-slot ask when the generation LLM
      does run, so a retry can never drift onto a different slot.
+
+And the converse, which the fast path got wrong: a turn that is NOT plain must
+not get the canned re-ask.
+
+    AI    Sorry, I didn't catch that — could you say your first name again?
+    User  Please check my claim status today.
+    AI    Sorry, I didn't catch that — could you say your first name again?
+    User  How are you doing today?
+    AI    I'm doing well, thank you for asking — and could you please tell me
+          your first name?
+
+The third turn is what the second should have been. "I didn't catch that" is a
+claim about hearing, and the caller was heard perfectly — the whole sentence
+reached the extractor, which then set needs_freeform_response=False and got
+the canned line. The flag comes from a model that can be wrong about its own
+output, and nothing in Python was checking it against what was said.
 """
 
 from __future__ import annotations
@@ -281,3 +297,90 @@ def test_correction_ack_still_strips_a_foreign_slot_ask():
     )
     assert "Member ID" not in out
     assert "last name" in out
+
+
+# ── A turn with content is never told it was not heard ───────────────────────
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "Please check my claim status today.",  # the reported turn
+        "How are you doing today?",
+        "Can you repeat that?",
+        "I need to speak to somebody else",
+    ],
+)
+def test_a_whole_sentence_gets_a_real_response(utterance):
+    """Long enough to have been heard, so "I didn't catch that" would be false."""
+    flagged_static = WorkerResult(needs_freeform_response=False)
+    assert needs_freeform_response(guard="RETRY", decision=flagged_static, user_utterance=utterance) is True
+
+
+@pytest.mark.parametrize("utterance", ["", "uh", "what?", "hmm sorry", "yeah"])
+def test_a_short_non_answer_still_takes_the_canned_re_ask(utterance):
+    """This is what the fast path is for — no LLM call, no drift, and the
+    apology is true."""
+    flagged_static = WorkerResult(needs_freeform_response=False)
+    assert needs_freeform_response(guard="RETRY", decision=flagged_static, user_utterance=utterance) is False
+
+
+def test_the_length_rule_does_not_override_a_model_asking_to_generate():
+    assert (
+        needs_freeform_response(
+            guard="RETRY", decision=WorkerResult(needs_freeform_response=True), user_utterance="uh"
+        )
+        is True
+    )
+
+
+def test_an_unwired_call_site_is_unchanged():
+    """No utterance passed — the flag decides, exactly as before."""
+    assert (
+        needs_freeform_response(guard="RETRY", decision=WorkerResult(needs_freeform_response=False)) is False
+    )
+
+
+# ── The same sentence is never said twice running ────────────────────────────
+
+
+ONE_LINE = "Sorry, I didn't catch that — could you say your first name again?"
+
+
+async def _re_ask(monkeypatch, last_agent: str, generated: str = "Let's try once more — your first name?"):
+    """One retry turn with the static pool pinned to a single line."""
+    from agent.agents.verification.agent import VerificationAgent
+    from agent.conversation.context import ConversationContext
+
+    monkeypatch.setattr("agent.responses.builder.random.choice", lambda pool: ONE_LINE)
+
+    async def _generate(**_kwargs):
+        return generated
+
+    monkeypatch.setattr("agent.llm.response_generator.generate_recovery_message", _generate)
+
+    messages = [{"role": "assistant", "content": last_agent}, {"role": "user", "content": "uh"}]
+    agent = VerificationAgent()
+    return await agent._generate_slot_retry_response(
+        {"messages": messages, "slot_attempts": {}},
+        "first_name",
+        ConversationContext(),
+        messages,
+        guard="RETRY",
+        decision=WorkerResult(needs_freeform_response=False),
+        slot_type=SlotType.FIRST_NAME,
+    )
+
+
+async def test_a_fresh_static_re_ask_is_used(monkeypatch):
+    assert await _re_ask(monkeypatch, last_agent="Can I get your first name, please?") == ONE_LINE
+
+
+async def test_the_same_sentence_is_not_said_twice_running(monkeypatch):
+    """The retry pools are small, so a second retry can draw the line the
+    caller just heard — and a caller already struggling hears a machine
+    looping rather than a person re-asking. Generating gives them another way
+    in, which is the point of asking again."""
+    out = await _re_ask(monkeypatch, last_agent=ONE_LINE)
+    assert out != ONE_LINE
+    assert out == "Let's try once more — your first name?"
