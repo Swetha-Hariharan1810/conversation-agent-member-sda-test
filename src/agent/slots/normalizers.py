@@ -548,10 +548,61 @@ def _digit_string_to_mdy(text: str) -> str | None:
     return yyyymmdd or ddmmyyyy
 
 
+# Spoken repetition. A caller dictating a long number says "triple five" for a
+# 555 exchange far more often than "five five five", and "double oh" for 00.
+# The word carries no digit of its own — it multiplies the one after it — so a
+# flat word-by-word map dropped it and every number containing one came out
+# short by two or three digits.
+_DIGIT_MULTIPLIERS: dict[str, int] = {
+    "double": 2,
+    "triple": 3,
+    "treble": 3,  # British English for 3×, and a frequent ASR reading of "triple"
+    "quadruple": 4,
+}
+
+# Punctuation a transcript hangs on a spoken digit — "two three one, triple
+# five, three two one one." Stripped per token before mapping: "one," is not a
+# key in any of the word maps, so it used to pass through unmapped and then get
+# erased by the digit filter, silently shortening the number.
+_TOKEN_PUNCTUATION = ",.;:!?\"'()[]{}"
+
+
+def _expand_multipliers(words: list[str]) -> list[str]:
+    """Expand "triple five" → ["five", "five", "five"], in place in the token list.
+
+    The digit after the multiplier is repeated, whether it is spoken ("triple
+    five") or already numeric ("triple 5"). A multiplier with nothing usable
+    after it is left alone — it then falls through the caller's word map and is
+    erased with the other non-digits, exactly as before.
+    """
+    out: list[str] = []
+    index = 0
+    while index < len(words):
+        repeat = _DIGIT_MULTIPLIERS.get(words[index])
+        following = words[index + 1] if index + 1 < len(words) else ""
+        as_digit = _DIGIT_WORDS.get(following, following)
+        if repeat and len(as_digit) == 1 and as_digit.isdigit():
+            out.extend([following] * repeat)
+            index += 2
+            continue
+        out.append(words[index])
+        index += 1
+    return out
+
+
+def _tokenize_spoken(text: str) -> list[str]:
+    """Lowercased tokens with surrounding punctuation stripped, multipliers expanded."""
+    words = [w.strip(_TOKEN_PUNCTUATION) for w in text.lower().split()]
+    return _expand_multipliers([w for w in words if w])
+
+
 def _convert_spoken_digits(text: str) -> str:
-    """Replace spoken digit words with their numeric equivalents: 'one six' → '1 6'."""
-    words = text.lower().split()
-    return " ".join(_DIGIT_WORDS.get(w, w) for w in words)
+    """Replace spoken digit words with their numeric equivalents: 'one six' → '1 6'.
+
+    Handles spoken repetition ("triple five" → '5 5 5') and transcript
+    punctuation ("one," → '1'), both of which used to cost the number a digit.
+    """
+    return " ".join(_DIGIT_WORDS.get(w, w) for w in _tokenize_spoken(text))
 
 
 # ---------------------------------------------------------------------------
@@ -579,11 +630,14 @@ def normalize_member_id(value: str | None) -> str:
     Handles spoken words: "m nine zero seven five oh three" → "M907503"
     All digit words (including "oh") map to their digit (0-9).
     Phonetic letter names resolved via _SPOKEN_LETTER_MAP ("em" → "M", etc.).
+    Spoken repetition ("triple seven") and transcript punctuation ("three.")
+    are handled by the shared tokenizer — unlike the digit-only slots, an
+    unmapped word here survives the alphanumeric filter as LETTERS, so
+    "m nine, zero, three" used to normalize to "MNINEZERO3".
     N-prefix IDs are mapped to M (N and M are phonetically similar over phone/ASR
     and all member IDs in this system use the M prefix).
     """
-    cleaned = _clean(value)
-    words = cleaned.lower().split()
+    words = _tokenize_spoken(_clean(value))
     parts = [_MEMBER_ID_WORD_MAP.get(w, w) for w in words]
     joined = re.sub(r"[^A-Z0-9]", "", "".join(parts).upper())
     # N → M prefix correction: callers sometimes say/hear "N" instead of "M"

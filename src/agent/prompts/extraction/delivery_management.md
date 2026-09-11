@@ -159,12 +159,18 @@ FIELDS
     Normalization rules:
       - Map each spoken word to EXACTLY ONE digit (0-9). Valid single-digit
         words: zero, oh, one, two, three, four, five, six, seven, eight, nine.
+      - A repetition word ("double", "triple", "treble", "quadruple") is not a
+        digit and is not an invalid word — it repeats the digit that follows
+        it. Expand it, then count:
+          "two three one, triple five, three two one one" → 2315553211
+          "four one five, triple oh, seven seven two one" → 4150007721
       - Multi-digit number words ("ten", "eleven", "twelve", etc.) are NOT
         valid single digits. If the caller uses any such word, return ambiguous.
       - After mapping, if the total digit count is not exactly 10, return ambiguous.
       - NEVER strip a leading digit as a country code — each word must produce
         exactly one digit; if normalization yields 11 digits, it is ambiguous.
-    Return ambiguous if not exactly 10 single-digit words after normalization.
+    Return ambiguous if the expanded digit count is not exactly 10. Count
+    DIGITS, not words: "triple five" is one word and three digits.
 
   email  valid email string (must contain "@" and a domain)
     New email replacing the one on file. Only extract when caller is
