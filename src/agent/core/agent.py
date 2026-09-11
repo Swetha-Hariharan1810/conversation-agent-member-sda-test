@@ -39,6 +39,9 @@ class BaseAgent(ConversationGuardsMixin, SlotManagerMixin, SignalsMixin, ABC):
         self._slots: Dict[str, SlotAttempt] = {}
         self._newly_confirmed: Set[str] = set()
         self._pending_ambiguous_resets: Set[str] = set()
+        # A question the caller asked alongside this turn's answer, recorded by
+        # the guard layer and cleared by whoever answers it. See execute().
+        self._side_question: Dict[str, str] = {}
 
     @classmethod
     def from_state(cls, state: State) -> "BaseAgent":
@@ -49,7 +52,67 @@ class BaseAgent(ConversationGuardsMixin, SlotManagerMixin, SignalsMixin, ABC):
         return instance
 
     async def execute(self, state: State) -> dict:
-        return await self.run(state)
+        """Run this agent's turn, then make sure a side question was answered.
+
+        A caller answers and asks in the same breath — "No. But I lost my ID
+        card, can you help me with the new one?" — and both halves are real.
+        _collect_slot has always handled both for the slots it collects. Every
+        hand-written handler had to remember to, and a handler that forgets
+        fails silently: it reads extracted[slot], branches on the value and
+        returns, so the question is indistinguishable from never having been
+        asked. Nothing downstream catches it either — the guard layer needs
+        guard_confidence >= 0.7 to act, such a turn carries 0.0, and the
+        repeated-ignored-request escalation only hangs off the OFFTOPIC_AGENT
+        branch, so a caller can ask three times and be ignored three times.
+
+        Remembering is not a thing a handler should have to do, so it is not
+        asked of them. Every agent node in the graph calls execute(); the guard
+        layer records the question; any handler that answers it consumes it on
+        the way through _generate_slot_retry_response; and whatever is left
+        here is put in front of what the turn says. A new slot cannot silently
+        drop a question, because no handler has to do anything to keep it.
+        """
+        result = await self.run(state)
+        return await self._answer_unanswered_side_question(state, result)
+
+    async def _answer_unanswered_side_question(self, state: State, result: dict) -> dict:
+        """Put an unanswered side question's answer in front of this turn."""
+        pending = self.consume_side_question()
+        query = (pending.get("query") or "").strip()
+        if not query or not isinstance(result, dict):
+            return result
+
+        # An escalating turn speaks through escalation_pre_message and carries
+        # no "messages" of its own by design (signals.signal_escalate). Attaching
+        # an answer here would invent one, and a caller being transferred does
+        # not need an aside first — the representative they are going to is the
+        # answer. Guard-driven escalations never reach this (the guard discards
+        # the question); this covers the ones raised inside run().
+        # model_dump() keeps the enum, so str() would give "AgentStatus.ESCALATE"
+        # — the same getattr(.value) idiom the request/disposition reads use.
+        raw_status = (result.get("last_agent_signal") or {}).get("status")
+        status = str(getattr(raw_status, "value", raw_status) or "").strip().lower()
+        if status in ("escalate", "blocked"):
+            self.logger.info(
+                "execute: side question dropped — this turn escalates",
+                extra={"agent": self.AGENT_NAME, "query": query},
+            )
+            return result
+
+        answer = await self.answer_side_question(
+            state,
+            list(state.get("messages") or []),
+            followup_query=query,
+            slot_name=str(state.get("awaiting_slot") or ""),
+            extracted_value=pending.get("value", ""),
+        )
+        if not answer:
+            return result
+        self.logger.info(
+            "execute: answered a side question the turn left unanswered",
+            extra={"agent": self.AGENT_NAME, "query": query},
+        )
+        return self.prefix_side_answer(result, answer)
 
     def consume_cross_agent_request(self, state: State, kinds: tuple, targets: tuple) -> dict:
         """The in-flight cross-agent request this agent should serve now, or {}.

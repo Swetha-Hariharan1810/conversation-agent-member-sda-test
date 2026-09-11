@@ -164,7 +164,22 @@ class ConversationGuardsMixin:
         result["awaiting_slot"] = ""
         return result
 
-    async def run_conversation_guards(  # noqa: C901
+    async def run_conversation_guards(
+        self,
+        state: State,
+        *,
+        user_text: str,
+        result: Optional["WorkerResult"] = None,
+    ) -> Optional[dict]:
+        """Run the guards. A guard that takes the turn owns the whole response,
+        so the side question recorded for this turn is dropped with it — a
+        transfer or an abuse escalation must not carry an aside about ID cards."""
+        interrupt = await self._run_conversation_guards(state, user_text=user_text, result=result)
+        if interrupt is not None:
+            self.discard_side_question()
+        return interrupt
+
+    async def _run_conversation_guards(  # noqa: C901
         self,
         state: State,
         *,
@@ -176,6 +191,12 @@ class ConversationGuardsMixin:
         # identifies themselves as a non-member.
         # result.extracted is already populated by each agent's LLM call —
         # no extra LLM call needed here.
+        # Record a question asked alongside this turn's answer, before any
+        # branch can forget it. Nothing is generated here — a guard may yet
+        # take the turn, and most turns carry no question at all. See
+        # BaseAgent.execute for where an unanswered one is picked up.
+        self.note_side_question(result)
+
         if result and result.extracted and not state.get("caller_type_handled"):
             detected = result.extracted.get("caller_type", "")
             if detected and detected not in ("member", "unknown", ""):

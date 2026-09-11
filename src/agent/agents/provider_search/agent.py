@@ -227,10 +227,7 @@ class ProviderSearchAgent(BaseAgent):
 
             if zip_conf == "yes":
                 logger.info(LOG_ZIP_CONFIRMED, extra={"zip_code": zip_on_file})
-                side_answer = await self.answer_side_question(
-                    state, messages, result=result, slot_name="zip_confirmed", extracted_value=zip_conf
-                )
-                return self._signal_done(state, provider_type, zip_on_file, prefix=side_answer)
+                return self._signal_done(state, provider_type, zip_on_file)
 
             # Everything from here is NOT a confirmation. Which way it goes is
             # decided by what the caller's turn IS, never by which words it
@@ -316,7 +313,7 @@ class ProviderSearchAgent(BaseAgent):
         retry_result["zip_code"] = zip_on_file
         return retry_result
 
-    def _signal_done(self, state: State, provider_type: str, zip_code_used: str, *, prefix: str = "") -> dict:
+    def _signal_done(self, state: State, provider_type: str, zip_code_used: str) -> dict:
         """
         Provider search complete — ask how the member wants the list delivered.
 
@@ -351,7 +348,7 @@ class ProviderSearchAgent(BaseAgent):
             result["zip_code_used"] = zip_code_used
             return result
 
-        msg = self.join_side_answer(prefix, pick(DELIVERY_BRIDGE_TEMPLATES))
+        msg = pick(DELIVERY_BRIDGE_TEMPLATES)
         result = self.ask_member(state, msg)
         result["next_node"] = "delivery_management_agent"  # human_node reads this
         result["awaiting_slot"] = ""  # delivery_management_agent starts fresh

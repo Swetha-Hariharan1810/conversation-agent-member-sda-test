@@ -246,6 +246,12 @@ class SlotManagerMixin:
 
         slot_state = self.get_slot(slot_name)
         sc = session_context or {}
+        if sc.get("followup_query"):
+            # This turn is addressing the side question, so the safety net in
+            # BaseAgent.execute must not address it again. Every path that
+            # answers one — the slot pipeline, intake, the name read-back, the
+            # records re-asks, answer_side_question — passes through here.
+            self.consume_side_question()
 
         # ── Static fast path ────────────────────────────────────────────────
         # A plain non-answer with nothing to acknowledge does not need the
@@ -641,12 +647,48 @@ class SlotManagerMixin:
             )
         return parked
 
+    def note_side_question(self, result: Any) -> None:
+        """Record a question the caller asked alongside this turn's answer.
+
+        Called once per turn from the guard layer, which every slot-collecting
+        agent already runs with the extraction result. Recording is not
+        answering: what the turn does with it is decided later, and most turns
+        carry nothing.
+        """
+        query = (getattr(result, "followup_query", None) or "").strip() if result else ""
+        extracted = (getattr(result, "extracted", None) or {}) if result else {}
+        self._side_question = (
+            {
+                "query": query,
+                "value": ", ".join(str(v) for v in extracted.values() if v),
+            }
+            if query
+            else {}
+        )
+
+    def consume_side_question(self) -> dict:
+        """Take the recorded question, marking it answered.
+
+        A handler that addresses the question itself calls this so the safety
+        net in BaseAgent.execute does not answer it a second time. Every path
+        that already addressed one goes through _generate_slot_retry_response
+        with a followup_query, which consumes there — no handler has to
+        remember to.
+        """
+        pending = getattr(self, "_side_question", {}) or {}
+        self._side_question = {}
+        return pending
+
+    def discard_side_question(self) -> None:
+        """Drop the recorded question — this turn's response is owned elsewhere."""
+        self._side_question = {}
+
     async def answer_side_question(
         self,
         state: State,
         messages: list,
         *,
-        result: Any,
+        followup_query: str,
         slot_name: str,
         extracted_value: str,
     ) -> str:
@@ -677,7 +719,7 @@ class SlotManagerMixin:
         handler's own next message — or the next agent's opener — is the one
         question of the turn.
         """
-        followup_query = (getattr(result, "followup_query", None) or "").strip()
+        followup_query = (followup_query or "").strip()
         if not followup_query:
             return ""
         ctx = ConversationContext.from_state(state)
