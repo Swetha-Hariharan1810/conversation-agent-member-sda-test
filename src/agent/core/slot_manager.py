@@ -1984,33 +1984,32 @@ class SlotManagerMixin:
                         slot_type=slot_type,
                     )
                     # Lazy import (core → llm → core cycle at module level).
-                    from agent.llm.response_generator import mentions_slot
+                    from agent.llm.response_generator import guard_fallback
 
-                    # The generated sentence normally carries the re-ask
-                    # itself (no value was captured, so "Collecting:" named the
-                    # real slot). Python only adds one when the sentence put
-                    # the question back in NO form — neither a closing question
-                    # nor a mention of the slot — because a turn that answers a
-                    # question and then asks for nothing strands the caller.
-                    #
-                    # "…and I'll need your first name to get started." is the
-                    # ask, stated rather than questioned, and appending to it
-                    # says the same thing twice:
+                    # Nothing is appended to what comes back. No value was
+                    # captured, so "Collecting:" named the real slot and the
+                    # prompt had the sentence end on the ask — and a sentence
+                    # that names the slot has asked for it whether or not it
+                    # ends in a question mark. Python adding its own re-ask
+                    # behind that says the same thing twice:
                     #     "…I'll need your first name to get started. I want to
                     #      make sure I get this right — what's your first name?"
                     #
-                    # When one IS needed it comes from the first-ask pool, not
-                    # the retry pool: nothing failed here — the caller was heard
-                    # and answered — so "Sorry, I didn't catch that" and "I
-                    # still don't have your first name" are untrue as well as
-                    # graceless.
-                    if not msg.rstrip().endswith("?") and not mentions_slot(msg, slot_name, slot_label):
-                        ask = (
+                    # The one turn Python still speaks for is the one with
+                    # nothing in it: the generation failed, or sanitizing
+                    # emptied it, and the guard's canned line came back — "Got
+                    # it, I'll keep that in mind." answers nothing and asks
+                    # nothing. The static ask REPLACES it (never trails it),
+                    # and comes from the first-ask pool rather than the retry
+                    # pool: nothing failed here — the caller was heard and
+                    # answered — so "Sorry, I didn't catch that" would be
+                    # untrue as well as graceless.
+                    if msg.strip() in ("", guard_fallback("FOLLOWUP_RESPOND", slot_label)):
+                        msg = (
                             build_initial_prompt(slot_type)
                             if slot_type is not None
                             else self._next_slot_ask(slot_name, slot_configs, ctx)
                         )
-                        msg = msg.rstrip() + " " + ask
                     interrupt = self.ask_member_with_context(state, msg, ctx)
                     interrupt["awaiting_slot"] = slot_name
                     interrupt["ambiguous_counts"] = {

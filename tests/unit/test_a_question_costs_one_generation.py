@@ -49,7 +49,12 @@ import pytest
 from agent.agents.verification.pipelines import build_identity_pipeline
 from agent.core.agent import BaseAgent
 from agent.core.constants import MAX_FREE_FOLLOWUP_TURNS
-from agent.llm.response_generator import _declarative_lead, _render_payload, sanitize_generated
+from agent.llm.response_generator import (
+    _declarative_lead,
+    _render_payload,
+    guard_fallback,
+    sanitize_generated,
+)
 from agent.llm.schema import EventType, FollowupDisposition, WorkerResult
 
 REPEAT = "Can you repeat?"
@@ -166,9 +171,9 @@ async def test_a_sentence_that_puts_the_question_back_is_left_alone(generation):
     assert result["awaiting_slot"] == "first_name"
 
 
-async def test_a_sentence_that_asks_for_nothing_gets_the_ask_appended(monkeypatch):
-    """The other half of the rule: answering a question and then asking for
-    nothing strands the caller."""
+async def test_nothing_is_appended_to_a_sentence_that_stands_on_its_own(monkeypatch):
+    """Not even to one that asks for nothing. The prompt tells the model to end
+    on the ask; second-guessing it in Python is what put two asks in one turn."""
 
     async def _answer_only(**_kwargs):
         return "Of course — this call is about your claim status."
@@ -176,20 +181,35 @@ async def test_a_sentence_that_asks_for_nothing_gets_the_ask_appended(monkeypatc
     monkeypatch.setattr("agent.llm.response_generator.generate_recovery_message", _answer_only)
 
     content = (await _Collector(_asked(REPEAT)).execute(_state()))["messages"]["content"]
-    assert content.startswith("Of course — this call is about your claim status.")
-    assert "first name" in content.replace("Of course — this call is about your claim status.", "")
+    assert content == "Of course — this call is about your claim status."
 
 
-async def test_the_appended_ask_never_says_the_caller_was_not_heard(monkeypatch):
+async def test_a_turn_with_nothing_in_it_asks_instead_of_saying_nothing(monkeypatch):
+    """The one thing Python still speaks for: the generation failed or
+    sanitizing emptied it, and the guard's canned line came back. "Got it —
+    I'll keep that in mind." answers nothing and asks nothing, so the ask
+    replaces it — it never trails it."""
+
+    async def _nothing(**_kwargs):
+        return guard_fallback("FOLLOWUP_RESPOND")
+
+    monkeypatch.setattr("agent.llm.response_generator.generate_recovery_message", _nothing)
+
+    content = (await _Collector(_asked(REPEAT)).execute(_state()))["messages"]["content"]
+    assert "I'll keep that in mind" not in content
+    assert "first name" in content
+
+
+async def test_the_replacement_never_says_the_caller_was_not_heard(monkeypatch):
     """Nothing failed on this turn — the caller was heard and answered. The
     retry pools ("Sorry, I didn't catch that", "I still don't have your first
-    name") would be untrue as well as graceless, so the ask comes from the
-    first-ask pool."""
+    name") would be untrue as well as graceless, so it comes from the first-ask
+    pool."""
 
-    async def _answer_only(**_kwargs):
-        return "Of course — this call is about your claim status."
+    async def _nothing(**_kwargs):
+        return guard_fallback("FOLLOWUP_RESPOND")
 
-    monkeypatch.setattr("agent.llm.response_generator.generate_recovery_message", _answer_only)
+    monkeypatch.setattr("agent.llm.response_generator.generate_recovery_message", _nothing)
 
     for _ in range(25):
         content = (await _Collector(_asked(REPEAT)).execute(_state()))["messages"]["content"]

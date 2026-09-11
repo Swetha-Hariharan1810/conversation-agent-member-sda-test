@@ -368,14 +368,14 @@ def _mentions(sentence: str, terms: Sequence[str]) -> bool:
     return any(t in lowered for t in terms)
 
 
-def mentions_slot(text: str, *names: str) -> bool:
-    """Does ``text`` name any of these slots, in any wording the generator uses?
+def guard_fallback(guard: str, slot_label: str = "") -> str:
+    """The canned line this guard falls back to when there is nothing else.
 
-    The same fuzzy match the sanitizer strips asks by — so a caller of the
-    generator can ask "did the sentence put the question back?" and get the
-    same answer the sanitizer would.
+    Public so a caller can recognise its own fallback coming back — a turn
+    that got the canned line got nothing from the model, whatever the reason
+    (the call failed, or sanitizing emptied the text).
     """
-    return any(_mentions(text, _slot_match_terms(n)) for n in names if n)
+    return _FALLBACKS.get(guard, "Got it.").format(slot_label=slot_label or "that")
 
 
 def _foreign_slot_terms(
@@ -545,8 +545,7 @@ def sanitize_generated(
         if fallback_text:
             result = fallback_text
         else:
-            template = _FALLBACKS.get(guard, "Got it.")
-            result = template.format(slot_label=fallback_slot_label or "that")
+            result = guard_fallback(guard, fallback_slot_label)
         logger.info("sanitize_generated: text emptied — substituting %s fallback", guard)
     return result
 
