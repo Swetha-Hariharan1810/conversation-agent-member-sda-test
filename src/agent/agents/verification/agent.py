@@ -990,6 +990,20 @@ class VerificationAgent(BaseAgent):
         # guards) and appends the next static ask, so the event must reach the
         # pipeline intact.
 
+        # ── DETERMINISTIC RECONCILE (Phase 1) ────────────────────────────────
+        # llm.py already reconciles on success, but extraction fallbacks (and
+        # monkeypatched results) bypass it — re-running here is idempotent and
+        # guarantees a mid-verification update request ("also I need to update
+        # my last name") reaches the pipeline as update_target.
+        #
+        # It runs BEFORE the guards, not after. run_conversation_guards is where
+        # note_side_question records the turn's side question, and reconcile is
+        # what recovers a question the extractor dropped and clears one it
+        # invented. Reconciling afterwards left those corrections invisible to
+        # the side-question net on exactly the path this call exists for — the
+        # one where llm.py's reconcile did not run.
+        result = reconcile_worker_result(result, last_user)
+
         if interrupt := await self.run_conversation_guards(
             state,
             user_text=last_user,
@@ -998,13 +1012,6 @@ class VerificationAgent(BaseAgent):
             if getattr(result, "guard", "") == "OFFTOPIC_AGENT":
                 return redirect_off_topic(self, state, collected, self._identity_pipeline)
             return interrupt
-
-        # ── DETERMINISTIC RECONCILE (Phase 1) ────────────────────────────────
-        # llm.py already reconciles on success, but extraction fallbacks (and
-        # monkeypatched results) bypass it — re-running here is idempotent and
-        # guarantees a mid-verification update request ("also I need to update
-        # my last name") reaches the pipeline as update_target.
-        result = reconcile_worker_result(result, last_user)
 
         # ── Member ID denial → SSN fallback (semantic) ───────────────────────
         # The pre-extraction gate above is a keyword fast path. This is the one

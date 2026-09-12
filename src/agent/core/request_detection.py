@@ -37,7 +37,11 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from agent.core.followup_grounding import is_grounded_followup
+from agent.core.followup_grounding import (
+    is_grounded_followup,
+    quotes_the_caller,
+    recover_side_question,
+)
 from agent.core.slot_ownership import SLOT_OWNERSHIP
 from agent.utils import detect_cannot_provide
 
@@ -254,6 +258,137 @@ def _coerce_like(sample: Any, value: str) -> Any:
     return value
 
 
+# Schema field names the extractor sometimes writes INTO extracted{} instead of
+# alongside it — seen in production as
+#     "extracted": {"care_coach_response": "yes",
+#                   "update_target": "ID card", "request_kind": "update"}
+# extracted{} is slot name → caller value, and every consumer treats it that
+# way: note_side_question joins its values into the "Extracted this turn:" line
+# the generation LLM reads back ("yes, ID card, update"), and the slot
+# pipelines index it by slot name. A schema key in there is never a slot, so it
+# is dropped rather than spoken.
+_RESERVED_RESULT_KEYS = frozenset(
+    {
+        "event_type",
+        "guard",
+        "guard_confidence",
+        "followup_disposition",
+        "followup_query",
+        "update_target",
+        "request_kind",
+        "cannot_provide",
+        "fallback_pivot",
+        "needs_freeform_response",
+        "extracted",
+        "corrections",
+    }
+)
+
+
+def _strip_reserved_keys(result: Any) -> Any:
+    """Remove schema field names the model wrote into extracted{}/corrections{}."""
+    for field in ("extracted", "corrections"):
+        values = getattr(result, field, None)
+        if not isinstance(values, dict):
+            continue
+        leaked = [k for k in values if k in _RESERVED_RESULT_KEYS]
+        if not leaked:
+            continue
+        try:
+            setattr(result, field, {k: v for k, v in values.items() if k not in _RESERVED_RESULT_KEYS})
+        except (AttributeError, ValueError):  # non-WorkerResult shim in tests
+            continue
+        logger.info(
+            "request_detection: dropped schema keys from %s",
+            field,
+            extra={"source": "schema_hygiene", "field": field, "llm_value": ", ".join(leaked)},
+        )
+    return result
+
+
+def _recover_missed_followup(result: Any, last_user: str | None) -> Any:
+    """Fill in a side question the caller asked and the extractor did not report.
+
+    The veto below handles a question the model invented. This is the other
+    half, and it is the same bug seen from the other side:
+
+        Caller  No. But I lost my credit ID card. Can you help me with the
+                new one?                        (awaiting benefits_response)
+        →       event_type "answered", followup_query null
+
+        Caller  That sounds interesting, but I lost my ID card. Can you help
+                me to get a new one?            (awaiting care_coach_response)
+        →       event_type "answered_with_followup",
+                followup_query "can you help me to get a new one"
+
+    The same request, two turns apart, classified both ways. Not model
+    variance: those slots run different prompt stacks. benefits_response is
+    collected by delivery_management against header_extraction.md +
+    delivery_management.md, 4,100 words with the follow-up rules a long way
+    from the field definitions; care_coach_response by the benefits agent
+    against header_core.md + benefits.md, 1,300 words with a request block
+    directly under FIELDS. Whether the caller is heard depends on which prompt
+    file the slot they are on happens to live in.
+
+    A missed question is invisible downstream — BaseAgent.execute's safety net
+    only fires when followup_query is set, so a dropped one looks exactly like
+    a caller who asked nothing, on that turn and on every repeat of it. Nothing
+    escalates it either: the guard layer needs guard_confidence >= 0.7 and such
+    a turn carries 0.0.
+
+    Only the clean "answer, then ask" shape is recovered, and only when the
+    extractor found a value — so there is an answer half — and reported no
+    question. recover_side_question is far stricter than the veto's cue test,
+    because a false positive here puts words in the caller's mouth.
+    """
+    reported = (getattr(result, "followup_query", None) or "").strip()
+    if not any(v for v in (getattr(result, "extracted", None) or {}).values()):
+        return result
+    event_raw = getattr(result, "event_type", None)
+    event = str(getattr(event_raw, "value", event_raw) or "").strip().lower()
+    if event not in ("answered", "answered_with_followup"):
+        return result
+    recovered = recover_side_question(last_user)
+    if not recovered:
+        return result
+    # The LLM stays primary: a question it reported that is about what the
+    # caller talked about is its call to make, paraphrase and all. Recovery
+    # only overrides the reported question when it shares no topic word with
+    # the turn at all — the signature of one lifted from the AI's own earlier
+    # turns, which the cue-based veto cannot catch on a turn where the caller
+    # genuinely did ask something ("help with claim status" reported against
+    # "No. But I lost my credit ID card. Can you help me with the new one?").
+    if reported and quotes_the_caller(reported, last_user):
+        return result
+    try:
+        result.followup_query = recovered
+        result.followup_disposition = _coerce_like(getattr(result, "followup_disposition", None), "answer")
+        result.event_type = _coerce_like(event_raw, "answered_with_followup")
+    except (AttributeError, ValueError):  # non-WorkerResult shim in tests
+        return result
+    logger.info(
+        "request_detection: grounding_fallback %s followup_query",
+        "replaced" if reported else "recovered",
+        extra={
+            "source": "grounding_fallback",
+            "field": "followup_query",
+            "llm_value": reported,
+            "final_value": recovered,
+        },
+    )
+    if event != "answered_with_followup":
+        logger.info(
+            "request_detection: grounding_fallback changed event_type",
+            extra={
+                "source": "grounding_fallback",
+                "field": "event_type",
+                "llm_value": event,
+                "final_value": "answered_with_followup",
+            },
+        )
+    return result
+
+
 def _reconcile_followup_query(result: Any, last_user: str | None) -> Any:
     """Drop a side question the caller did not ask, and the event that carried it.
 
@@ -360,14 +495,22 @@ def reconcile_worker_result(result: Any, last_user: str | None) -> Any:
       request in the caller's words → clear it, and downgrade an
       ANSWERED_WITH_FOLLOWUP that carried nothing else to ANSWERED. See
       _reconcile_followup_query and core.followup_grounding.
+    - the caller plainly answered AND then asked, and followup_query came back
+      null → recover the question from their own words and mark the event
+      ANSWERED_WITH_FOLLOWUP. See _recover_missed_followup.
+    - extracted{} or corrections{} carry a schema field name as a key
+      ("update_target": "ID card") → drop it; those dicts are slot → value and
+      every consumer reads them that way. See _strip_reserved_keys.
     - detect_cannot_provide fires but the LLM left cannot_provide false →
       set it. The flag is semantic and the model is the primary source; this
       is the backstop for a missed call or an extraction that threw, so a
       caller who cannot supply a slot still reaches the fallback offer.
     - Neither detects → result returned untouched.
     """
+    result = _strip_reserved_keys(result)
     result = _reconcile_cannot_provide(result, last_user)
     result = _reconcile_followup_query(result, last_user)
+    result = _recover_missed_followup(result, last_user)
 
     detected = detect_request(last_user)
     if detected is None:
