@@ -37,7 +37,7 @@ from agent.responses.static import (
     MSG_TRANSFER_REQUEST,
 )
 from agent.state import State
-from agent.utils import _last_user_msg, detect_transfer_request, pick
+from agent.utils import _last_user_msg, detect_transfer_request, detect_wait_request, pick
 
 if TYPE_CHECKING:
     from agent.llm.schema import WorkerResult
@@ -225,6 +225,29 @@ class ConversationGuardsMixin:
 
         if result is not None and result.guard_confidence >= 0.7:
             guard = result.guard
+            # A caller asking for a moment is not interrupting and is not off
+            # topic. These three guards take the whole turn, so a wait read as
+            # one of them never reaches the agent's wait handling at all — and
+            # now also spends the deflection budget on its way past. "Hold on,
+            # let me grab my card" is the single most common thing a caller
+            # says mid-collection; it must land on "take your time", whichever
+            # slot they are on.
+            #
+            # Only the soft guards defer. TRANSFER_REQUEST, ABUSE and SELF_HARM
+            # always win: "hold on, get me a human" is a transfer, and a wait
+            # phrase in front of abuse or a safety signal changes nothing.
+            # Returning None hands the turn to the agent, whose own wait branch
+            # owns it — one implementation, not a fourth copy here.
+            if guard in ("INTERRUPTION", "OFFTOPIC_GLOBAL", "OFFTOPIC_AGENT") and detect_wait_request(
+                user_text
+            ):
+                self.logger.info(
+                    "%s: %s suppressed — the caller asked for a moment",
+                    self.AGENT_NAME,
+                    guard,
+                    extra={"utterance": user_text},
+                )
+                return None
             # When the caller provides the awaiting slot value AND asks an
             # off-topic question in the same turn, the OFFTOPIC guard should
             # not intercept — the slot pipeline's FOLLOWUP_DECLINE path

@@ -48,7 +48,7 @@ from agent.agents.notification_setup.handlers import (
 from agent.agents.notification_setup.llm import extract_notification_decision
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import carried_contact, is_not_an_answer
+from agent.core.confirmation import carried_contact, is_not_an_answer, is_read_back_echo
 from agent.core.request_detection import reconcile_worker_result
 from agent.llm.config import get_extraction_llm
 from agent.llm.extractor import remaining_slots
@@ -66,6 +66,7 @@ from agent.utils import (
     _last_assistant_msg,
     _last_user_msg,
     build_extraction_prompt_extraction,
+    join_turn,
     pick,
     speak_email,
 )
@@ -170,7 +171,7 @@ class NotificationSetupAgent(BaseAgent):
             re.IGNORECASE,
         )
         if current_awaiting == "timeline_question" and _TIMELINE_RE.search(last_user or ""):
-            combined = f"{pick(MSG_TIMELINE_ANSWER)}\n\n{pick(N2_METHOD_ASK)}"
+            combined = join_turn(pick(MSG_TIMELINE_ANSWER), pick(N2_METHOD_ASK))
             ask_result = self.ask_member(state, combined)
             ask_result["awaiting_slot"] = "n2_notification_method"
             return ask_result
@@ -217,7 +218,7 @@ class NotificationSetupAgent(BaseAgent):
             if timeline_resp in ("question", "yes"):
                 # Affirmative or explicit question → deliver the timeline answer,
                 # then move straight to the N2 channel ask in the same turn.
-                combined = f"{pick(MSG_TIMELINE_ANSWER)}\n\n{pick(N2_METHOD_ASK)}"
+                combined = join_turn(pick(MSG_TIMELINE_ANSWER), pick(N2_METHOD_ASK))
                 ask_result = self.ask_member(state, combined)
                 ask_result["awaiting_slot"] = "n2_notification_method"
                 return ask_result
@@ -233,6 +234,9 @@ class NotificationSetupAgent(BaseAgent):
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
             # Ambiguous — proper slot retry pattern
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "timeline_question", decision=result):
+                return wait
             self.slot_fail("timeline_question")
             if self.get_slot("timeline_question").is_exhausted():
                 return self.signal_escalate(
@@ -267,6 +271,9 @@ class NotificationSetupAgent(BaseAgent):
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "notification_method", decision=result):
+                return wait
             self.slot_fail("notification_method")
             if self.get_slot("notification_method").is_exhausted():
                 return self.signal_escalate(
@@ -307,11 +314,13 @@ class NotificationSetupAgent(BaseAgent):
             # directly so a clear yes/no advances on the first turn. Gated on the
             # absence of a replacement phone so an inline correction
             # ("no, use 555-1234") still routes through the replacement branch.
-            # Extraction contract: a replacement phone and contact_confirmed are
-            # mutually exclusive. If a "no" arrives alongside a phone, the phone is
-            # an echo of the Confirmed: context line — discard it so the decline is
-            # honored.
-            if contact_conf == "no":
+            # A "no" with a DIFFERENT value is a decline carrying its
+            # replacement — keep it and let the block below take it. Only a
+            # value matching what we just read back is a context echo. See
+            # core.confirmation.is_read_back_echo.
+            if contact_conf == "no" and is_read_back_echo(
+                new_phone_raw, pending_phone or phone_on_file, normalize_phone_number
+            ):
                 new_phone_raw = ""
 
             if new_phone_raw:
@@ -358,6 +367,9 @@ class NotificationSetupAgent(BaseAgent):
             # Not an answer to the read-back — uncertain, holding, or raising
             # something else. Re-ask it.
             if is_not_an_answer(result, last_user, owned_slots=("phone", "phone_confirmed")):
+                # Waiting is not a failed attempt — see wait_ack.
+                if wait := self.wait_ack(state, "phone_confirmed", decision=result):
+                    return wait
                 self.slot_fail("phone_confirmed")
                 if self.get_slot("phone_confirmed").is_exhausted():
                     return self.signal_escalate(
@@ -407,6 +419,9 @@ class NotificationSetupAgent(BaseAgent):
                     confirm["pending_phone"] = normalized
                     confirm["notification_channel"] = "sms"
                     return confirm
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "phone", decision=result):
+                return wait
             self.slot_fail("phone")
             if self.get_slot("phone").is_exhausted():
                 return self.signal_escalate(
@@ -441,11 +456,13 @@ class NotificationSetupAgent(BaseAgent):
             # ("yes thats correct", "yes", "yes please" → "yes") directly so a clear
             # yes/no advances on the first turn. Gated on the absence of a
             # replacement email so an inline correction does not get swallowed.
-            # Extraction contract: a replacement email and contact_confirmed are
-            # mutually exclusive. If a "no" arrives alongside an email, the email is
-            # an echo of the Confirmed: context line — discard it so the decline is
-            # honored.
-            if contact_conf == "no":
+            # A "no" with a DIFFERENT value is a decline carrying its
+            # replacement — keep it and let the block below take it. Only a
+            # value matching what we just read back is a context echo. See
+            # core.confirmation.is_read_back_echo.
+            if contact_conf == "no" and is_read_back_echo(
+                new_email_raw, pending_email or email_on_file, normalize_email
+            ):
                 new_email_raw = ""
 
             if new_email_raw:
@@ -555,6 +572,9 @@ class NotificationSetupAgent(BaseAgent):
                     confirm["pending_email"] = normalized
                     confirm["notification_channel"] = "email"
                     return confirm
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "email", decision=result):
+                return wait
             self.slot_fail("email")
             if self.get_slot("email").is_exhausted():
                 return self.signal_escalate(
@@ -634,6 +654,9 @@ class NotificationSetupAgent(BaseAgent):
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "n2_notification_method", decision=result):
+                return wait
             self.slot_fail("n2_notification_method")
             if self.get_slot("n2_notification_method").is_exhausted():
                 return self.signal_escalate(

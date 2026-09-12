@@ -539,11 +539,32 @@ def reconcile_worker_result(result: Any, last_user: str | None) -> Any:
             },
         )
 
-    if not llm_target and not llm_kind:
+    # Each field is filled on its own. This used to require BOTH to be missing,
+    # which left a half-filled result half-filled — and every downstream branch
+    # that needs the pair then behaved as though no request had been made:
+    #
+    #     AI      …Would you like us to send you details about our Care
+    #             Coach Guides?
+    #     Caller  please change my email address?
+    #     AI      One more thing — you're eligible for a complimentary health
+    #             and wellness coach. Would you like me to…
+    #
+    # detect_request reads that utterance as update/email without difficulty.
+    # The extractor returned update_target "email" and left request_kind "none",
+    # so the gap-filler declined to fill either — and benefits_agent's block for
+    # exactly this case ("please change my email address?" during the Care Coach
+    # offer, route to delivery as a redo) tests request_kind == "update" and
+    # never fired. The request was dropped and the offer re-asked.
+    #
+    # Filling one field is still "fills gaps", never overriding a concrete
+    # detection: a target the LLM named is kept even when the regex found a
+    # different one, and only the empty side is written.
+    if not llm_target:
         result.update_target = detected.target
-        result.request_kind = _coerce_like(kind_raw, detected.kind)
         _log_change("regex_fallback", "update_target", llm_target, detected.target)
-        _log_change("regex_fallback", "request_kind", llm_kind or "none", detected.kind)
+    if not llm_kind:
+        result.request_kind = _coerce_like(kind_raw, detected.kind)
+        _log_change("regex_fallback", "request_kind", "none", detected.kind)
 
     # Redo-over-contact-field veto: "send that list to my email instead of fax"
     # fires redo patterns but the LLM often sets update_target to a contact field

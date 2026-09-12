@@ -153,6 +153,30 @@ OUT_OF_SCOPE_MSG_TEMPLATES = [
 PROVIDER_TYPE_UNSUPPORTED_REASON = "provider_type_unsupported_at_intake"
 LOG_PROVIDER_TYPE_UNSUPPORTED = "IntakeAgent: unsupported provider type at intake — escalating"
 
+# When the caller names a specialty we can read back. _extract_provider_type_
+# from_utterance returns the sentinel "this provider type" when it cannot, and
+# these templates render that as "looking for a this provider type" / "For this
+# provider type searches" — broken English, spoken to a member. The pool below
+# says the same thing without naming anything, and is used whenever the type
+# could not be read from the caller's words.
+PROVIDER_TYPE_UNSUPPORTED_UNNAMED_ESCALATION = [
+    (
+        "That's not a specialty our in-network search covers — it currently "
+        "handles Primary Care Physicians, Pediatricians, Cardiologists, "
+        "Dermatologists, and Orthopedic Specialists. Let me connect you with a "
+        "representative who can help you find the right provider."
+    ),
+    (
+        "Our self-service search covers Primary Care Physicians, Pediatricians, "
+        "Cardiologists, Dermatologists, and Orthopedic Specialists, so for this "
+        "one I'll connect you with one of our representatives."
+    ),
+]
+
+# The sentinel _extract_provider_type_from_utterance returns when the caller's
+# words name no specialty it recognises.
+PROVIDER_TYPE_UNKNOWN = "this provider type"
+
 PROVIDER_TYPE_UNSUPPORTED_ESCALATION = [
     (
         "I can see you're looking for a {provider_type}. Unfortunately, "

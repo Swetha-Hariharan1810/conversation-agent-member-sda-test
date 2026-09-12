@@ -282,6 +282,45 @@ def build_system_prompt(agent_prompt_file: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Openers a message carries because it is usually the whole turn. Two pools
+# concatenated then open twice:
+#
+#   MSG_DOCTOR_DIRECT_ACK  "Sure, that's fine."
+#   MSG_UPLOAD_OFFER       "Sure. I can also send a secure link..."
+#   spoken                 "Sure, that's fine.  Sure. I can also send..."
+#
+# One in six combinations of those two pools stutters, and another reads "Sure,
+# that's fine. Thank You. I can also...". The openers are right when the offer
+# stands alone and wrong the moment something acknowledges ahead of it, so they
+# are dropped from the second half rather than removed from the pools.
+_LEADING_OPENER_RE = _re.compile(
+    r"^(?:sure|of\s+course|certainly|absolutely|okay|ok|alright|"
+    r"thank\s+you|thanks|great|perfect|no\s+problem)\b[\s,.!—-]*",
+    _re.IGNORECASE,
+)
+
+
+def join_turn(first: str, second: str, *, separator: str = "\n\n") -> str:
+    """Join two spoken messages without opening twice.
+
+    ``first`` keeps its opener; ``second`` loses one if it has one, because
+    something has already acknowledged for it. Either side being empty returns
+    the other unchanged, so a call site does not have to check.
+    """
+    lead = (first or "").strip()
+    tail = (second or "").strip()
+    if not lead:
+        return tail
+    if not tail:
+        return lead
+    trimmed = _LEADING_OPENER_RE.sub("", tail, count=1).lstrip()
+    # Only take the trim when something is left to say — an offer that is
+    # nothing but its opener keeps it.
+    if trimmed:
+        tail = trimmed[0].upper() + trimmed[1:] if trimmed[0].islower() else trimmed
+    return f"{lead}{separator}{tail}"
+
+
 def pick(pool) -> str:
     """Randomly select from a pool, or return the string as-is."""
     if isinstance(pool, list):
@@ -501,6 +540,36 @@ def detect_cannot_provide(text: str | None) -> bool:
 _WAIT_PATTERNS: list = [_re.compile(p, _re.IGNORECASE) for p in WAIT_PATTERNS]
 
 
+# Spelled-out digits, for callers who read a number aloud ("four five one
+# nine"). Dictated numbers are normalised elsewhere; here we only need to know
+# that digits were spoken.
+_SPOKEN_DIGITS: frozenset[str] = frozenset(
+    "zero oh one two three four five six seven eight nine ten "
+    "eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen "
+    "nineteen twenty thirty forty fifty sixty seventy eighty ninety "
+    "hundred double triple".split()
+)
+
+# An identifier the caller might have read out alongside a wait phrase: a token
+# mixing letters and digits (M451982), or a run of digits.
+_VALUE_TOKEN_RE = _re.compile(r"[a-z]\d{3,}|\d{3,}[a-z]|\d", _re.IGNORECASE)
+
+
+def _looks_like_a_value(text: str) -> bool:
+    """Does ``text`` carry something value-shaped, as opposed to prose?
+
+    Used by detect_wait_request to tell "hold on, it's M451982" (a value the
+    extractor should have) from "hold on, let me dig out the letter" (a caller
+    narrating their search). Deliberately about shape, never about length.
+    """
+    if sum(c.isdigit() for c in text) >= 4:
+        return True
+    if _re.search(r"[a-z]\d{3,}|\d{3,}[a-z]", text, _re.IGNORECASE):
+        return True
+    spoken = [w for w in _re.findall(r"[a-z]+", text.lower()) if w in _SPOKEN_DIGITS]
+    return len(spoken) >= 3
+
+
 def detect_wait_request(text: str | None) -> bool:
     """
     Return True when the caller is asking for time to find or think about
@@ -519,9 +588,24 @@ def detect_wait_request(text: str | None) -> bool:
     Precedence rules:
       1. detect_cannot_provide() outranks wait — "I don't have it" must
          route to the cannot-provide escalation, never a wait ack.
-      2. If, after removing every matched wait phrase, a plausible slot-value
-         continuation remains (>= 3 word tokens or >= 4 digits), return False
-         and let extraction handle the turn — the value wins.
+      2. If, after removing every matched wait phrase, a plausible slot VALUE
+         remains, return False and let extraction handle the turn — the value
+         wins. "Plausible value" means value-shaped: digits, spelled-out
+         digits, or an alphanumeric identifier.
+
+    Rule 2 used to count words instead: three or more word tokens left over
+    meant "a value follows". Word count is the wrong proxy, and it read the
+    commonest wait turn there is as an answer —
+
+        Caller  hold on, let me dig out the letter... one second
+        AI      Sorry, I didn't catch that — could you repeat the reference
+                number?
+
+    "hold on" and "one second" both matched; the leftover "let me dig out the
+    letter" is six words, so the guard vetoed the wait and the caller burned a
+    retry for narrating their search. Six words of English is the opposite of
+    a slot value — a reference number is eight digits, a member ID is M plus
+    six. Prose after "hold on" is the caller telling you they are looking.
     """
     if not text:
         return False
@@ -541,8 +625,6 @@ def detect_wait_request(text: str | None) -> bool:
         remainder = pat.sub(" ", remainder)
     if remainder == lowered:
         return False  # no wait phrase matched
-    word_tokens = _re.findall(r"[a-z']+", remainder)
-    digit_count = sum(c.isdigit() for c in remainder)
-    if len(word_tokens) >= 3 or digit_count >= 4:
-        return False  # plausible slot-value continuation — extraction decides
+    if _looks_like_a_value(remainder):
+        return False  # a value follows the wait phrase — extraction decides
     return True

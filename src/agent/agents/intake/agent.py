@@ -37,6 +37,8 @@ from agent.agents.intake.handlers import (
     handle_out_of_scope_intent,
     handle_unclear_intent,
     handle_unsupported_provider_type,
+    screen_out_of_scope,
+    screen_unsupported_provider_type,
 )
 from agent.agents.intake.llm import extract_intake_intent, extract_same_member_decision
 from agent.agents.intake.models import IntentTag
@@ -135,27 +137,37 @@ class IntakeAgent(BaseAgent):
 
         intent_value = (result.extracted or {}).get("intent", IntentTag.UNCLEAR.value)
 
+        # ── Deterministic screens ──────────────────────────────────────────────
+        # Both read tables that already knew the answer, and both used to run
+        # only after the classification they were rescuing had come back right.
+        # An appeal named in the caller's words is an appeal, and a specialty
+        # named in the caller's words is a specialty, whatever the tag says —
+        # so they are checked before the tag is branched on. See the screens in
+        # handlers.py for the two transcripts that made this necessary.
+        #
+        # Appeals first: "appeal my neurologist's denial" belongs to the appeals
+        # team, not to the unsupported-specialty handoff.
+        if screen_out_of_scope(intent_value, last_user):
+            logger.info(
+                "IntakeAgent: deterministic screen overriding %s to out_of_scope",
+                intent_value,
+                extra={"utterance": last_user},
+            )
+            return await handle_out_of_scope_intent(agent=self, state=state, result=result)
+
+        if screened := screen_unsupported_provider_type(intent_value, last_user):
+            logger.info(
+                "IntakeAgent: deterministic screen overriding %s to provider_type_unsupported",
+                intent_value,
+                extra={"utterance": last_user, "provider_type": screened},
+            )
+            return await handle_unsupported_provider_type(agent=self, state=state, result=result)
+
         # ── Unsupported provider type — escalate immediately at intake ────────
         # Fires before verification so the member is never put through identity
         # collection for a provider type the system cannot serve.
         if intent_value == IntentTag.PROVIDER_TYPE_UNSUPPORTED.value:
             return await handle_unsupported_provider_type(agent=self, state=state, result=result)
-
-        # ── Deterministic unsupported-type guard ───────────────────────────────
-        # The extraction LLM occasionally misclassifies an explicitly-unsupported
-        # specialty (e.g. neurologist) as provider_services. Cross-check with the
-        # same keyword list used by handle_unsupported_provider_type — if the
-        # utterance names a known unsupported type, override and escalate now.
-        if intent_value == IntentTag.PROVIDER_SERVICES.value:
-            from agent.agents.intake.handlers import _extract_provider_type_from_utterance
-
-            if _extract_provider_type_from_utterance(last_user) != "this provider type":
-                logger.info(
-                    "IntakeAgent: deterministic guard overriding provider_services "
-                    "to provider_type_unsupported",
-                    extra={"utterance": last_user},
-                )
-                return await handle_unsupported_provider_type(agent=self, state=state, result=result)
 
         if intent_value == IntentTag.OUT_OF_SCOPE.value:
             return await handle_out_of_scope_intent(agent=self, state=state, result=result)
@@ -197,9 +209,10 @@ class IntakeAgent(BaseAgent):
         # followup_query null. Generating here hands FOLLOWUP_RESPOND a payload
         # with no "Followup:" line to answer, and it pads. The clean bridge
         # below says the same thing better, with no LLM call.
-        if result.event_type == EventType.ANSWERED_WITH_FOLLOWUP and (
-            getattr(result, "followup_query", None) or ""
-        ).strip():
+        if (
+            result.event_type == EventType.ANSWERED_WITH_FOLLOWUP
+            and (getattr(result, "followup_query", None) or "").strip()
+        ):
             from agent.conversation.context import ConversationContext
             from agent.core.call_stages import remaining_call_stages
             from agent.core.slot_manager import _DISPOSITION_GUARDS, _mk_session_ctx

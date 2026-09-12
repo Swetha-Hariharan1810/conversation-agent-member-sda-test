@@ -47,10 +47,12 @@ from agent.agents.claim_adjustment.llm import extract_claim_adjustment_decision
 from agent.agents.verification.constants import MAX_LOOKUP_ATTEMPTS
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
+from agent.core.constants import MAX_WAIT_TURNS
 from agent.core.request_detection import reconcile_worker_result
 from agent.llm.config import get_extraction_llm
+from agent.llm.schema import EventType
 from agent.logger import get_logger
-from agent.responses.static import MSG_WAIT_ACK
+from agent.responses.static import MSG_WAIT_ACK, MSG_WAIT_NUDGE
 from agent.slots.normalizers import (
     normalize_billed_amount,
     normalize_claim_number,
@@ -330,6 +332,44 @@ class ClaimAdjustmentAgent(BaseAgent):
                     logger.info(LOG_REF_COLLECTED)
                     state = {**state, "reference_number": reference_number}
                 else:
+                    # ── WAIT: the caller is looking for it ────────────────────
+                    # Every other slot in the codebase gets this from
+                    # _collect_slot; reference_number is collected by hand here
+                    # and was the one that did not, so
+                    #
+                    #     Caller  hold on, let me find the letter...
+                    #     AI      Could you say that reference number once more?
+                    #
+                    # burned a retry and told a caller who was reading us their
+                    # paperwork that we had not heard them. Its own two fallback
+                    # sub-flows (claim number, date + amount) both check for a
+                    # wait; the primary collection did not.
+                    #
+                    # Placed here, after extraction and inside the branch where
+                    # no usable value was found, so a value always wins — the
+                    # same ordering _collect_slot uses and for the same reason.
+                    # No slot_fail, no generation call: waiting is not a failed
+                    # attempt.
+                    _event = getattr(result, "event_type", None)
+                    _is_wait = str(
+                        getattr(_event, "value", _event) or ""
+                    ) == EventType.WAIT.value or detect_wait_request(last_user)
+                    if _is_wait and not detect_cannot_provide(last_user):
+                        wait_count = int(state.get("wait_count") or 0) + 1
+                        logger.info(
+                            "claim_adjustment_agent: WAIT during reference_number collection",
+                            extra={"wait_count": wait_count},
+                        )
+                        msg = (
+                            pick(MSG_WAIT_ACK)
+                            if wait_count < MAX_WAIT_TURNS
+                            else pick(MSG_WAIT_NUDGE).format(slot_label="reference number")
+                        )
+                        wait_result = self.ask_member(state, msg)
+                        wait_result["awaiting_slot"] = "reference_number"
+                        wait_result["wait_count"] = wait_count
+                        return wait_result
+
                     if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                         return handled
                     self.slot_fail("reference_number")
@@ -351,6 +391,7 @@ class ClaimAdjustmentAgent(BaseAgent):
                     )
                     retry = self.ask_member(state, msg)
                     retry["awaiting_slot"] = "reference_number"
+                    retry["wait_count"] = 0  # non-WAIT turn resets the wait streak
                     return retry
 
         # ── PHASE 2: Salesforce lookup ─────────────────────────────────────────

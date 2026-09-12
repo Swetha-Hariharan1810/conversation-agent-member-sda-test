@@ -39,7 +39,7 @@ from agent.agents.delivery_management.pipelines import (
     build_fax_pipeline,
 )
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import carried_contact, is_not_an_answer
+from agent.core.confirmation import carried_contact, is_not_an_answer, is_read_back_echo
 from agent.core.request_detection import detect_request, reconcile_worker_result
 from agent.core.slot_ownership import canonical_capability_topic
 from agent.llm.config import get_extraction_llm
@@ -376,7 +376,14 @@ class DeliveryManagementAgent(BaseAgent):
                 return switch
             extracted = (result.extracted or {}) if result else {}
             new_fax_raw = extracted.get("fax", "")
-            contact_conf_raw = extracted.get("fax_confirmed", "")
+            # Accept either key. "contact_confirmed" is the canonical field and
+            # the slot name is the deviation the model reaches for, but this branch
+            # read only the slot name while notification_setup and
+            # records_coordination read only or mostly the canonical one — so a
+            # decline arriving under the other name was invisible here, and an
+            # echoed on-file value then read as "the member repeated it", which
+            # dispatches to the address they just declined.
+            contact_conf_raw = extracted.get("fax_confirmed", "") or extracted.get("contact_confirmed", "")
             pending_fax = (state.get("pending_fax") or "").strip()
 
             contact_conf = normalize_yes_no(contact_conf_raw) if contact_conf_raw else ""
@@ -390,8 +397,8 @@ class DeliveryManagementAgent(BaseAgent):
             # from the on-file value it is a genuine replacement alongside the decline
             # — let the new_fax_raw block below handle it. Only clear new_fax_raw
             # when it matches the on-file value (Confirmed: context echo).
-            if contact_conf == "no" and (
-                not new_fax_raw or normalize_fax_number(str(new_fax_raw)) == normalize_fax_number(fax_on_file)
+            if contact_conf == "no" and is_read_back_echo(
+                new_fax_raw, pending_fax or fax_on_file, normalize_fax_number
             ):
                 new_fax_raw = ""
 
@@ -463,6 +470,9 @@ class DeliveryManagementAgent(BaseAgent):
             # something else. Re-ask it; reading a decline into these would be
             # wrong.
             if is_not_an_answer(result, last_user, owned_slots=("fax", "fax_confirmed")):
+                # Waiting is not a failed attempt — see wait_ack.
+                if wait := self.wait_ack(state, "fax_confirmed", decision=result, slot_label="fax number"):
+                    return wait
                 self.slot_fail("fax_confirmed")
                 if self.get_slot("fax_confirmed").is_exhausted():
                     return self.signal_escalate(
@@ -536,7 +546,7 @@ class DeliveryManagementAgent(BaseAgent):
                 return switch
             extracted = (result.extracted or {}) if result else {}
             new_email_raw = extracted.get("email", "")
-            contact_conf_raw = extracted.get("email_confirmed", "")
+            contact_conf_raw = extracted.get("email_confirmed", "") or extracted.get("contact_confirmed", "")
             pending_email = (state.get("pending_email") or "").strip()
 
             contact_conf = normalize_yes_no(contact_conf_raw) if contact_conf_raw else ""
@@ -551,8 +561,8 @@ class DeliveryManagementAgent(BaseAgent):
             # differs from the on-file value it is a genuine replacement alongside
             # the decline — let the new_email_raw block below handle it. Only clear
             # new_email_raw when it matches the on-file value (Confirmed: context echo).
-            if contact_conf == "no" and (
-                not new_email_raw or normalize_email(str(new_email_raw)) == normalize_email(email_on_file)
+            if contact_conf == "no" and is_read_back_echo(
+                new_email_raw, pending_email or email_on_file, normalize_email
             ):
                 new_email_raw = ""
 
@@ -621,6 +631,11 @@ class DeliveryManagementAgent(BaseAgent):
 
             # Not an answer to the read-back — re-ask it.
             if is_not_an_answer(result, last_user, owned_slots=("email", "email_confirmed")):
+                # Waiting is not a failed attempt — see wait_ack.
+                if wait := self.wait_ack(
+                    state, "email_confirmed", decision=result, slot_label="email address"
+                ):
+                    return wait
                 self.slot_fail("email_confirmed")
                 if self.get_slot("email_confirmed").is_exhausted():
                     return self.signal_escalate(
@@ -921,6 +936,10 @@ class DeliveryManagementAgent(BaseAgent):
                 ),
                 proactive_offer_available=(benefits_conf == "yes"),
             )
+
+        # Waiting is not a failed attempt — see wait_ack.
+        if wait := self.wait_ack(state, "benefits_response", decision=result, slot_label="answer"):
+            return wait
 
         # No clear yes/no — retry or exhaust gracefully
         self.slot_fail("benefits_response")

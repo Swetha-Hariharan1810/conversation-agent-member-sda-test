@@ -39,11 +39,15 @@ from agent.agents.records_coordination.constants import (
     MSG_UPLOAD_SENT,
     RECORDS_SLOT_ORDER,
 )
-from agent.agents.records_coordination.handlers import dispatch_personal_guide, dispatch_upload_link
+from agent.agents.records_coordination.handlers import (
+    dispatch_personal_guide,
+    dispatch_upload_link,
+    screen_upload_method,
+)
 from agent.agents.records_coordination.llm import extract_records_decision
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import carried_contact, is_not_an_answer
+from agent.core.confirmation import carried_contact, is_not_an_answer, is_read_back_echo
 from agent.core.request_detection import reconcile_worker_result
 from agent.llm.config import get_extraction_llm
 from agent.llm.extractor import remaining_slots
@@ -56,6 +60,8 @@ from agent.utils import (
     _last_assistant_msg,
     _last_user_msg,
     build_extraction_prompt_extraction,
+    detect_cannot_provide,
+    join_turn,
     pick,
     speak_email,
 )
@@ -145,6 +151,20 @@ class RecordsCoordinationAgent(BaseAgent):
         if current_awaiting == "upload_method":
             upload_method = extracted.get("upload_method", "")
 
+            # The caller named an option and extraction did not report it. Read
+            # it from their words rather than burning a retry and generating
+            # prose about a branch that exists right below. "decline" is never
+            # screened — see screen_upload_method. A wait or a cannot-provide
+            # keeps its own path: neither names an option, so the screen returns
+            # "" for both.
+            if not upload_method and not detect_cannot_provide(last_user):
+                if screened := screen_upload_method(last_user):
+                    logger.info(
+                        "records_coordination: upload_method read from the caller's words",
+                        extra={"value": screened, "utterance": (last_user or "")[:60]},
+                    )
+                    upload_method = screened
+
             if upload_method == "member_upload":
                 # Member wants to upload themselves — offer the link
                 offer_result = self.ask_member(state, pick(MSG_UPLOAD_OFFER))
@@ -156,7 +176,9 @@ class RecordsCoordinationAgent(BaseAgent):
                 logger.info(LOG_DOCTOR_DIRECT)
                 ack = pick(MSG_DOCTOR_DIRECT_ACK)
                 offer = pick(MSG_UPLOAD_OFFER)
-                combined = f"{ack}\n\n{offer}"
+                # One pool acknowledges, the next offers, and both carry an
+                # opener — see utils.join_turn.
+                combined = join_turn(ack, offer)
                 offer_result = self.ask_member(state, combined)
                 offer_result["awaiting_slot"] = "upload_consent"
                 return offer_result
@@ -177,6 +199,9 @@ class RecordsCoordinationAgent(BaseAgent):
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "upload_method", decision=result):
+                return wait
             self.slot_fail("upload_method")
             if self.get_slot("upload_method").is_exhausted():
                 return self.signal_escalate(
@@ -243,6 +268,9 @@ class RecordsCoordinationAgent(BaseAgent):
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "upload_consent", decision=result):
+                return wait
             self.slot_fail("upload_consent")
             if self.get_slot("upload_consent").is_exhausted():
                 return await self._handle_guide_consent_ask(state)
@@ -272,11 +300,13 @@ class RecordsCoordinationAgent(BaseAgent):
             pending_email = (state.get("pending_email") or "").strip()
 
             contact_conf = normalize_yes_no(contact_conf_raw) if contact_conf_raw else ""
-            # Extraction contract: a replacement email and email_confirmed are
-            # mutually exclusive. If a "no" arrives alongside an email, the email is
-            # an echo of the Confirmed: context line — discard it so the decline is
-            # honored.
-            if contact_conf == "no":
+            # A "no" with a DIFFERENT value is a decline carrying its
+            # replacement — keep it and let the block below take it. Only a
+            # value matching what we just read back is a context echo. See
+            # core.confirmation.is_read_back_echo.
+            if contact_conf == "no" and is_read_back_echo(
+                new_email_raw, pending_email or email_on_file, normalize_email
+            ):
                 new_email_raw = ""
 
             # Inline replacement: member declined AND provided new email in same utterance
@@ -350,6 +380,11 @@ class RecordsCoordinationAgent(BaseAgent):
                 ask_result["pending_email"] = ""
                 return ask_result
 
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "email_confirmed", decision=result):
+                wait["pending_email"] = pending_email
+                return wait
+
             self.slot_fail("email_confirmed")
             if self.get_slot("email_confirmed").is_exhausted():
                 # FIX: escalate on exhaustion instead of silently pivoting to email collection.
@@ -402,6 +437,9 @@ class RecordsCoordinationAgent(BaseAgent):
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "email", decision=result):
+                return wait
             self.slot_fail("email")
             if self.get_slot("email").is_exhausted():
                 return self.signal_escalate(
@@ -452,6 +490,9 @@ class RecordsCoordinationAgent(BaseAgent):
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "personal_guide_consent", decision=result):
+                return wait
             self.slot_fail("personal_guide_consent")
             if self.get_slot("personal_guide_consent").is_exhausted():
                 return self.signal_escalate(
@@ -526,7 +567,7 @@ class RecordsCoordinationAgent(BaseAgent):
 
         sent_msg = pick(MSG_UPLOAD_SENT)
         guide_msg = pick(MSG_PERSONAL_GUIDE_OFFER)
-        combined = f"{sent_msg}\n\n{guide_msg}"
+        combined = join_turn(sent_msg, guide_msg)
 
         result = self.ask_member(state, combined)
         result["upload_link_sent"] = True
@@ -546,7 +587,7 @@ class RecordsCoordinationAgent(BaseAgent):
 
         scheduled_msg = pick(MSG_GUIDE_SCHEDULED)
         notification_bridge = pick(MSG_NOTIFICATION_BRIDGE)
-        combined = f"{scheduled_msg}\n\n{notification_bridge}"
+        combined = join_turn(scheduled_msg, notification_bridge)
 
         result = self.ask_member(state, combined)
         result["personal_guide_outreach_requested"] = True
