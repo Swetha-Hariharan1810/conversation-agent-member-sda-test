@@ -33,7 +33,8 @@ told us is wrong.
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from agent.llm.schema import EventType, FollowupDisposition
 from agent.utils import detect_wait_request
@@ -89,6 +90,39 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
 
     target = str(getattr(result, "update_target", "") or "").strip().lower()
     return bool(target) and target not in {s.strip().lower() for s in owned_slots}
+
+
+def is_read_back_echo(new_value: Any, read_back: str, normalizer: Callable[[str], str]) -> bool:
+    """Is the value the extractor returned just the one we read back to them?
+
+    The extraction contract says a replacement contact and a yes/no on the
+    read-back are mutually exclusive. The model breaks it both ways, so four
+    confirmation branches compensated — and three of them compensated in the
+    wrong direction, clearing the replacement whenever a "no" arrived with it:
+
+        AI      The email address we have on file is james.wilson@gmail.com.
+                Is this correct or has it been changed?
+        Caller  no, use james.one@example.com
+        AI      No problem — what is the correct email address?
+        Caller  no, actually use james.two@example.com
+        AI      No problem — what is the correct email address?
+
+    The caller handed over the new address twice and was asked for it twice
+    more. records_coordination is the clearest case: the line that threw the
+    value away sat three lines above a branch commented "Inline replacement:
+    member declined AND provided new email in same utterance", which it made
+    unreachable.
+
+    Telling an echo from a replacement needs no model. An echo is the value we
+    just said; a replacement is a different one. So compare them — against what
+    the read-back actually put to the caller (the pending value when there is
+    one, otherwise the value on file), not merely against the value on file,
+    since a second read-back reads the pending value back.
+    """
+    text = str(new_value or "").strip()
+    if not text:
+        return True  # nothing to keep
+    return normalizer(text) == normalizer((read_back or "").strip())
 
 
 # Extraction field and validation for each delivery channel a caller can name.

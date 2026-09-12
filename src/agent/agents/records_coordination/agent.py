@@ -43,7 +43,7 @@ from agent.agents.records_coordination.handlers import dispatch_personal_guide, 
 from agent.agents.records_coordination.llm import extract_records_decision
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import carried_contact, is_not_an_answer
+from agent.core.confirmation import carried_contact, is_not_an_answer, is_read_back_echo
 from agent.core.request_detection import reconcile_worker_result
 from agent.llm.config import get_extraction_llm
 from agent.llm.extractor import remaining_slots
@@ -278,11 +278,13 @@ class RecordsCoordinationAgent(BaseAgent):
             pending_email = (state.get("pending_email") or "").strip()
 
             contact_conf = normalize_yes_no(contact_conf_raw) if contact_conf_raw else ""
-            # Extraction contract: a replacement email and email_confirmed are
-            # mutually exclusive. If a "no" arrives alongside an email, the email is
-            # an echo of the Confirmed: context line — discard it so the decline is
-            # honored.
-            if contact_conf == "no":
+            # A "no" with a DIFFERENT value is a decline carrying its
+            # replacement — keep it and let the block below take it. Only a
+            # value matching what we just read back is a context echo. See
+            # core.confirmation.is_read_back_echo.
+            if contact_conf == "no" and is_read_back_echo(
+                new_email_raw, pending_email or email_on_file, normalize_email
+            ):
                 new_email_raw = ""
 
             # Inline replacement: member declined AND provided new email in same utterance

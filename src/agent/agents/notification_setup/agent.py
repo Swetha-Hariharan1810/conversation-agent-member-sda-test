@@ -48,7 +48,7 @@ from agent.agents.notification_setup.handlers import (
 from agent.agents.notification_setup.llm import extract_notification_decision
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import carried_contact, is_not_an_answer
+from agent.core.confirmation import carried_contact, is_not_an_answer, is_read_back_echo
 from agent.core.request_detection import reconcile_worker_result
 from agent.llm.config import get_extraction_llm
 from agent.llm.extractor import remaining_slots
@@ -313,11 +313,13 @@ class NotificationSetupAgent(BaseAgent):
             # directly so a clear yes/no advances on the first turn. Gated on the
             # absence of a replacement phone so an inline correction
             # ("no, use 555-1234") still routes through the replacement branch.
-            # Extraction contract: a replacement phone and contact_confirmed are
-            # mutually exclusive. If a "no" arrives alongside a phone, the phone is
-            # an echo of the Confirmed: context line — discard it so the decline is
-            # honored.
-            if contact_conf == "no":
+            # A "no" with a DIFFERENT value is a decline carrying its
+            # replacement — keep it and let the block below take it. Only a
+            # value matching what we just read back is a context echo. See
+            # core.confirmation.is_read_back_echo.
+            if contact_conf == "no" and is_read_back_echo(
+                new_phone_raw, pending_phone or phone_on_file, normalize_phone_number
+            ):
                 new_phone_raw = ""
 
             if new_phone_raw:
@@ -453,11 +455,13 @@ class NotificationSetupAgent(BaseAgent):
             # ("yes thats correct", "yes", "yes please" → "yes") directly so a clear
             # yes/no advances on the first turn. Gated on the absence of a
             # replacement email so an inline correction does not get swallowed.
-            # Extraction contract: a replacement email and contact_confirmed are
-            # mutually exclusive. If a "no" arrives alongside an email, the email is
-            # an echo of the Confirmed: context line — discard it so the decline is
-            # honored.
-            if contact_conf == "no":
+            # A "no" with a DIFFERENT value is a decline carrying its
+            # replacement — keep it and let the block below take it. Only a
+            # value matching what we just read back is a context echo. See
+            # core.confirmation.is_read_back_echo.
+            if contact_conf == "no" and is_read_back_echo(
+                new_email_raw, pending_email or email_on_file, normalize_email
+            ):
                 new_email_raw = ""
 
             if new_email_raw:
