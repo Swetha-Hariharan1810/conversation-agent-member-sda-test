@@ -463,6 +463,9 @@ class DeliveryManagementAgent(BaseAgent):
             # something else. Re-ask it; reading a decline into these would be
             # wrong.
             if is_not_an_answer(result, last_user, owned_slots=("fax", "fax_confirmed")):
+                # Waiting is not a failed attempt — see wait_ack.
+                if wait := self.wait_ack(state, "fax_confirmed", decision=result, slot_label="fax number"):
+                    return wait
                 self.slot_fail("fax_confirmed")
                 if self.get_slot("fax_confirmed").is_exhausted():
                     return self.signal_escalate(
@@ -621,6 +624,11 @@ class DeliveryManagementAgent(BaseAgent):
 
             # Not an answer to the read-back — re-ask it.
             if is_not_an_answer(result, last_user, owned_slots=("email", "email_confirmed")):
+                # Waiting is not a failed attempt — see wait_ack.
+                if wait := self.wait_ack(
+                    state, "email_confirmed", decision=result, slot_label="email address"
+                ):
+                    return wait
                 self.slot_fail("email_confirmed")
                 if self.get_slot("email_confirmed").is_exhausted():
                     return self.signal_escalate(
@@ -921,6 +929,10 @@ class DeliveryManagementAgent(BaseAgent):
                 ),
                 proactive_offer_available=(benefits_conf == "yes"),
             )
+
+        # Waiting is not a failed attempt — see wait_ack.
+        if wait := self.wait_ack(state, "benefits_response", decision=result, slot_label="answer"):
+            return wait
 
         # No clear yes/no — retry or exhaust gracefully
         self.slot_fail("benefits_response")

@@ -36,6 +36,7 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 from agent.llm.schema import EventType, FollowupDisposition
+from agent.utils import detect_wait_request
 
 
 def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] = ()) -> bool:
@@ -60,6 +61,21 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
         return True
 
     if getattr(result, "event_type", None) in (EventType.AMBIGUOUS, EventType.WAIT):
+        return True
+
+    # The same case, read from the caller's words rather than from the label.
+    # The WAIT above fires only when the extractor tagged the turn, and on the
+    # reported transcripts it did not — it returned a plain ANSWERED with
+    # nothing extracted, which falls through to the bottom of this function as
+    # False and is read as a decline of the value on file:
+    #
+    #     AI      Just to be sure — your fax number is 231-555-3211, correct?
+    #     Caller  hold on, let me dig out the letter... one second
+    #     AI      No problem — what is the correct fax number?
+    #
+    # The caller asked for a second and lost the number we already had. A wait
+    # is not a position on the value, whoever labelled the turn.
+    if detect_wait_request(last_user):
         return True
 
     if getattr(result, "followup_disposition", None) in (

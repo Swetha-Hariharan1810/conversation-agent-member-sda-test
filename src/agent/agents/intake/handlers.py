@@ -32,6 +32,13 @@ def _get_clarification_attempts(state: State) -> int:
 
 
 async def handle_unclear_intent(agent, state: State, result=None) -> dict:
+    # Waiting is not a failed attempt — see SlotManagerMixin.wait_ack. A caller
+    # who says "hold on, let me grab my card" at the greeting has not failed to
+    # state their intent; they asked for a moment, and spending one of two
+    # clarification attempts on it brings the escalation forward by a turn.
+    if wait := agent.wait_ack(state, INTENT_SLOT, decision=result, slot_label="what you need today"):
+        return wait
+
     attempts = _get_clarification_attempts(state)
 
     if attempts >= MAX_CLARIFICATION_ATTEMPTS:

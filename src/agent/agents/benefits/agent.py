@@ -275,6 +275,10 @@ class BenefitsAgent(BaseAgent):
                 proactive_offer_available=False,
             )
 
+        # Waiting is not a failed attempt — see wait_ack.
+        if wait := self.wait_ack(state, _CARE_COACH_SLOT, decision=result, slot_label="answer"):
+            return wait
+
         # No clear yes/no — retry or exhaust gracefully
         self.slot_fail(_CARE_COACH_SLOT)
         if self.get_slot(_CARE_COACH_SLOT).is_exhausted():
