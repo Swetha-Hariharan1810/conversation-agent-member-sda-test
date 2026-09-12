@@ -282,6 +282,45 @@ def build_system_prompt(agent_prompt_file: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Openers a message carries because it is usually the whole turn. Two pools
+# concatenated then open twice:
+#
+#   MSG_DOCTOR_DIRECT_ACK  "Sure, that's fine."
+#   MSG_UPLOAD_OFFER       "Sure. I can also send a secure link..."
+#   spoken                 "Sure, that's fine.  Sure. I can also send..."
+#
+# One in six combinations of those two pools stutters, and another reads "Sure,
+# that's fine. Thank You. I can also...". The openers are right when the offer
+# stands alone and wrong the moment something acknowledges ahead of it, so they
+# are dropped from the second half rather than removed from the pools.
+_LEADING_OPENER_RE = _re.compile(
+    r"^(?:sure|of\s+course|certainly|absolutely|okay|ok|alright|"
+    r"thank\s+you|thanks|great|perfect|no\s+problem)\b[\s,.!—-]*",
+    _re.IGNORECASE,
+)
+
+
+def join_turn(first: str, second: str, *, separator: str = "\n\n") -> str:
+    """Join two spoken messages without opening twice.
+
+    ``first`` keeps its opener; ``second`` loses one if it has one, because
+    something has already acknowledged for it. Either side being empty returns
+    the other unchanged, so a call site does not have to check.
+    """
+    lead = (first or "").strip()
+    tail = (second or "").strip()
+    if not lead:
+        return tail
+    if not tail:
+        return lead
+    trimmed = _LEADING_OPENER_RE.sub("", tail, count=1).lstrip()
+    # Only take the trim when something is left to say — an offer that is
+    # nothing but its opener keeps it.
+    if trimmed:
+        tail = trimmed[0].upper() + trimmed[1:] if trimmed[0].islower() else trimmed
+    return f"{lead}{separator}{tail}"
+
+
 def pick(pool) -> str:
     """Randomly select from a pool, or return the string as-is."""
     if isinstance(pool, list):

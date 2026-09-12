@@ -66,6 +66,7 @@ from agent.utils import (
     _last_assistant_msg,
     _last_user_msg,
     build_extraction_prompt_extraction,
+    join_turn,
     pick,
     speak_email,
 )
@@ -170,7 +171,7 @@ class NotificationSetupAgent(BaseAgent):
             re.IGNORECASE,
         )
         if current_awaiting == "timeline_question" and _TIMELINE_RE.search(last_user or ""):
-            combined = f"{pick(MSG_TIMELINE_ANSWER)}\n\n{pick(N2_METHOD_ASK)}"
+            combined = join_turn(pick(MSG_TIMELINE_ANSWER), pick(N2_METHOD_ASK))
             ask_result = self.ask_member(state, combined)
             ask_result["awaiting_slot"] = "n2_notification_method"
             return ask_result
@@ -217,7 +218,7 @@ class NotificationSetupAgent(BaseAgent):
             if timeline_resp in ("question", "yes"):
                 # Affirmative or explicit question → deliver the timeline answer,
                 # then move straight to the N2 channel ask in the same turn.
-                combined = f"{pick(MSG_TIMELINE_ANSWER)}\n\n{pick(N2_METHOD_ASK)}"
+                combined = join_turn(pick(MSG_TIMELINE_ANSWER), pick(N2_METHOD_ASK))
                 ask_result = self.ask_member(state, combined)
                 ask_result["awaiting_slot"] = "n2_notification_method"
                 return ask_result

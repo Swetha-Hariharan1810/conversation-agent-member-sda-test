@@ -25,7 +25,13 @@ from agent.llm.config import get_extraction_llm
 from agent.logger import get_logger
 from agent.slots.normalizers import normalize_yes_no
 from agent.state import State, normalize_parked_followups
-from agent.utils import _last_assistant_msg, _last_user_msg, build_extraction_prompt_core, pick
+from agent.utils import (
+    _last_assistant_msg,
+    _last_user_msg,
+    build_extraction_prompt_core,
+    join_turn,
+    pick,
+)
 
 logger = get_logger(__name__)
 
@@ -120,7 +126,7 @@ class BenefitsAgent(BaseAgent):
                 family_oop_max=fam_oop,
             )
             care_coach_offer = random.choice(CARE_COACH_OFFER_TEMPLATES)
-            full_message = f"{explanation}\n\n{care_coach_offer}"
+            full_message = join_turn(explanation, care_coach_offer)
 
             logger.info(LOG_BENEFITS_EXPLAINED)
 
