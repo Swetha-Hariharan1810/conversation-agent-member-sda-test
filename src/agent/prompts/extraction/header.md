@@ -58,21 +58,12 @@ When in doubt → event_type:"ambiguous".
               If Confirmed[] is empty, use "answered" instead.
               Exception: a value-less update request sets update_target with
               empty corrections{} — see CROSS-CALL REQUESTS below.
-"answered_with_followup" — caller clearly answered the awaiting slot AND also
-              asked for a repeat, a read-back, a confirmation, or a side
-              question **that is explicitly present in the "Caller just said:" line**.
-              Extract the value into extracted{} as normal.
-              NEVER use this event_type when the caller's utterance contains only
-              the slot value. NEVER infer a side question from topics the AI
-              mentioned in prior turns — the secondary signal must appear in the
-              caller's own words this turn.
+"answered_with_followup" — caller answered the awaiting slot AND asked
+              something. See THE FOLLOW-UP CONTRACT below.
 "wait"      — caller is asking for time, not answering — see WAIT below.
 "ambiguous" — genuinely nothing extractable, garbled, or uncertain — do not guess (see CONFIDENCE anchor above).
-              IMPORTANT: when the caller asks a clarifying question about what the
-              agent needs (e.g. "what do you need exactly?", "what format?", "which
-              records?") with NO slot value given, set event_type: "ambiguous" AND
-              set followup_query to their question (short paraphrase). This allows
-              the system to answer their question before re-asking.
+              A caller who asked INSTEAD of answering is ambiguous AND carries a
+              followup_query. See THE FOLLOW-UP CONTRACT below.
 
 ## WAIT
 "wait" — the caller is asking for time to find or think about the value,
@@ -125,100 +116,14 @@ updates MUST be a slot listed in Confirmed:. Never a LOCKED FIELD.
   update_target:"benefits" or update_target:"provider_list";
   event_type rules as for redo.
 A replay of a single confirmed VALUE ("can you repeat my ZIP") is NOT a
-replay request — that stays an answer follow-up per the table below.
+replay request — that stays an ordinary side question (see THE FOLLOW-UP
+CONTRACT below).
 
 If the caller asks to change or redo something not in Confirmed:, not a
 known slot, and not a known redo/replay topic → still set update_target to
 their words and the best-fit request_kind; the system carries unknown topics
-to a representative. Only treat it as a plain follow-up question (disposition
-per the table below) when no change/redo/replay is being requested at all.
-
-## THE FOLLOW-UP TEST — apply before setting answered_with_followup
-`answered_with_followup` and `followup_query` are the most over-used fields in
-this schema. Before setting either one, point at the words in the "Caller just
-said:" line that are the question. If you cannot quote them, there is no
-follow-up: use `answered`, leave `followup_query` null, and leave
-`followup_disposition` "none".
-
-Two specific mistakes to avoid, both seen in production:
-  - Do NOT turn the caller's own answer into a follow-up. "Monique" answers the
-    question; it does not also ask one.
-  - Do NOT turn a topic the AI raised into a follow-up. If the AI said "I can
-    help with your claim status" two turns ago, "help with claim status" is not
-    something the caller asked — it is something you read in your own history.
-
-| Caller just said                        | event_type | followup_query |
-|-----------------------------------------|------------|----------------|
-| "Customer."                             | answered   | null           |
-| "M451982."                              | answered   | null           |
-| "Yes, that's right."                    | answered   | null           |
-| "November 5th, 1992."                   | answered   | null           |
-| "Smith — sorry, bad line."              | answered   | null           |
-| "90210, and when will I get the list?"  | answered_with_followup | "when will the list arrive" |
-
-## FOLLOWUP DISPOSITION
-Applies only when event_type = answered_with_followup.
-Set followup_query to the caller's side question (short paraphrase).
-followup_query MUST be derived from the caller's current utterance ("Caller
-just said:" line) only. NEVER synthesize a followup_query from topics the
-AI raised in prior turns — if the caller did not ask it, it is not a follow-up.
-Set followup_disposition:
-  answer    — every side question. It covers the question answerable from
-               Confirmed:, the repeat/read-back request, the update request
-               per CROSS-CALL REQUESTS above, and the question the CURRENT
-               stage already answers — e.g. a notification-timing question
-               asked while delivery is being arranged. It also covers a
-               question about a step still ahead ("will I get this by
-               email?"): the system passes the remaining steps to the
-               responder, which answers from them. And it covers a question
-               unrelated to this call — the system declines gracefully.
-
-Use answer for delivery, notifications, timelines, and anything else this
-call will reach later. A side question is handled in the turn it is asked;
-nothing is deferred to the end of the call.
-
-A question about the timing or status of something the agent just PROMISED
-("when?", "when will you update my zip?", "did you change it yet?") is NOT a
-slot answer and must never be extracted as one. Classify it as
-answered_with_followup (or ambiguous when no slot value is present) with
-followup_query = "timing of <promised item>".
-
-### Disposition quick examples
-| Side question                                                | Disposition |
-|--------------------------------------------------------------|-------------|
-| "will I get a text/notification when it's sent?"             | answer      |
-| "how long will delivery take?"                               | answer      |
-| "when will I hear back about this?"                          | answer      |
-| "what's your favorite color?"                                | answer      |
-| "do you sell car insurance?"                                 | answer      |
-| "can you repeat my ZIP?" (zip_code in Confirmed:)            | answer      |
-| "what email do you have for me?" (email in Confirmed:)       | answer      |
-
-When event_type != answered_with_followup, omit or set "none".
-
-### ANSWERED vs AMBIGUOUS quick examples
-| Caller says                        | event_type | Reason                              |
-|------------------------------------|------------|-------------------------------------|
-| "uh, July twenty-third"            | answered   | Partial but clearly a date attempt  |
-| "I think maybe M… something"       | ambiguous  | No extractable value, indirect      |
-| "no wait that's wrong"             | ambiguous  | Correction intent, no new value     |
-| "actually it's M451982"            | corrected  | Explicit replacement with new value |
-| "November 5 1992"                  | answered   | Clear complete value                |
-| "It's Jhonny — could you repeat the question?" | answered_with_followup | Valid value + repeat request |
-| "give me a minute"                 | wait       | Asking for time, no value           |
-| "hold on, let me grab my card"     | wait       | Asking for time, no value           |
-| "hold on... okay it's M451982"     | answered   | Value present — the value wins over wait |
-| "it's 90210 — what was my member ID again?" (member_id in Confirmed:) | answered_with_followup | disposition "answer" — answerable from Confirmed: |
-| "it's 90210 — will I get a text about this?" (notifications in Pending:) | answered_with_followup | disposition "answer" — answered from the steps still ahead |
-| "it's 90210 — do you sell car insurance?" | answered_with_followup | disposition "answer" — system responds gracefully |
-| "it's 90210 — sorry, say that again?" | answered_with_followup | disposition "answer" — repeat request |
-| "actually my last name is Smith"   | corrected  | Update shape 1: new value, no answer to awaiting slot |
-| "it's 90210 — and actually my email is a@b.com" | answered_with_followup | Update shape 2: answer + corrections{email}, disposition "answer" |
-| "and I need to change my email"    | corrected  | Update shape 3: no value — corrections{} empty, update_target "email", request_kind "update" |
-| "actually send that list to my email instead of fax" | corrected | Redo: update_target "delivery_method", request_kind "redo" |
-| "yes — oh, and can you resend that?" | answered_with_followup | Answer + redo: extracted value, update_target "delivery_method", request_kind "redo", disposition "answer" |
-| "can you repeat my benefits again" | corrected  | Replay: update_target "benefits", request_kind "replay", corrections{} empty |
-| "what did you send me exactly?"    | corrected  | Replay: update_target "provider_list", request_kind "replay" |
+to a representative. Only treat it as a plain side question (see THE FOLLOW-UP
+CONTRACT below) when no change/redo/replay is being requested at all.
 
 ## LOCKED FIELDS
 Never put these in corrections{}: member_status_verify, call_intent.
@@ -304,8 +209,12 @@ Return JSON only — no markdown, no explanation.
 event_type: "answered" | "answered_with_followup" | "corrected" | "ambiguous" | "wait" | "none" — default "answered"
 `extracted` — newly provided slot values; `corrections` — replaces a previously accepted slot
 `guard` — triggered guard label or null; `guard_confidence` — 0.0 when no guard fires
-`followup_disposition` — "answer" | "none"; "none" unless event_type is "answered_with_followup"
-`followup_query` — the caller's side question, condensed, verbatim-ish; null when no follow-up
+followup_query: the caller's side question in their own words, condensed;
+  null unless event_type is "answered_with_followup" or "ambiguous", and
+  null whenever you cannot quote the question from the "Caller just said:"
+  line. See THE FOLLOW-UP CONTRACT.
+followup_disposition: always "none" — the system decides what happens to a
+  side question. See THE FOLLOW-UP CONTRACT.
 `update_target` — slot the caller wants to change when NO new value was given, or the redo/replay topic; null otherwise
 `request_kind` — "update" | "redo" | "replay" per CROSS-CALL REQUESTS; "none" when no such request
 `needs_freeform_response` — true only when a canned re-ask would leave the caller unaddressed (see NEEDS FREEFORM RESPONSE); false by default

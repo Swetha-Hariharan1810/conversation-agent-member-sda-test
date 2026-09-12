@@ -39,29 +39,6 @@ NOT wait — classify the correction/update instead.
 "I don't have it / I lost it / never received it" is NOT wait — that is a
 cannot-provide statement; leave existing behavior unchanged.
 
-## THE FOLLOW-UP TEST — apply before setting answered_with_followup
-`answered_with_followup` and `followup_query` are the most over-used fields in
-this schema. Before setting either one, point at the words in the "Caller just
-said:" line that are the question. If you cannot quote them, there is no
-follow-up: use `answered`, leave `followup_query` null, and leave
-`followup_disposition` "none".
-
-Two specific mistakes to avoid, both seen in production:
-  - Do NOT turn the caller's own answer into a follow-up. "Monique" answers the
-    question; it does not also ask one.
-  - Do NOT turn a topic the AI raised into a follow-up. If the AI said "I can
-    help with your claim status" two turns ago, "help with claim status" is not
-    something the caller asked — it is something you read in your own history.
-
-| Caller just said                        | event_type | followup_query |
-|-----------------------------------------|------------|----------------|
-| "Customer."                             | answered   | null           |
-| "M451982."                              | answered   | null           |
-| "Yes, that's right."                    | answered   | null           |
-| "November 5th, 1992."                   | answered   | null           |
-| "Smith — sorry, bad line."              | answered   | null           |
-| "90210, and when will I get the list?"  | answered_with_followup | "when will the list arrive" |
-
 ## Needs freeform response
 `needs_freeform_response` decides whether the reply to this turn must be
 written by a second LLM, or whether a canned re-ask of the same slot is
@@ -83,25 +60,27 @@ When unsure, use false.
 Return JSON only — no markdown, no explanation.
 
 When a classifiable intent is found:
-{"extracted": {"intent": "claim_services"}, "event_type": "answered", "guard": null, "guard_confidence": 0.0, "followup_query": null, "needs_freeform_response": false}
+{"extracted": {"intent": "claim_services"}, "event_type": "answered", "guard": null, "guard_confidence": 0.0, "followup_disposition": "none", "followup_query": null, "needs_freeform_response": false}
 
 When no intent is classifiable:
-{"extracted": {}, "event_type": "answered", "guard": null, "guard_confidence": 0.0, "followup_query": null, "needs_freeform_response": false}
+{"extracted": {}, "event_type": "answered", "guard": null, "guard_confidence": 0.0, "followup_disposition": "none", "followup_query": null, "needs_freeform_response": false}
 
-event_type: "answered" | "answered_with_followup" | "wait" | "none"
-  answered — default; the caller responded to the question, even if
-             extracted{} is empty (e.g. "Hi", "not sure")
+event_type: "answered" | "answered_with_followup" | "ambiguous" | "wait" | "none"
+  answered  — default; the caller responded to the question, even if
+              extracted{} is empty (e.g. "Hi", "not sure")
   answered_with_followup — the caller responded AND asked something you can
-             quote from their own words this turn; see THE FOLLOW-UP TEST.
-             Only this event_type may carry a non-null followup_query.
-  wait     — the caller asked for time (see WAIT above); extracted{} empty
-  none     — a guard fired; set extracted: {} and populate guard fields
+              quote from their own words this turn; see THE FOLLOW-UP
+              CONTRACT below
+  ambiguous — genuinely nothing extractable, or the caller asked INSTEAD of
+              answering; carries a followup_query too when they asked
+  wait      — the caller asked for time (see WAIT above); extracted{} empty
+  none      — a guard fired; set extracted: {} and populate guard fields
 
-followup_query: the side question in the caller's own words, condensed; null
-  on every other event_type, and null whenever you cannot quote the question
-  from the "Caller just said:" line. A non-null value routes the turn into a
-  second LLM whose only job is to answer this line, so a value the caller did
-  not ask for costs the call a sentence that answers nothing.
+followup_query: the caller's side question in their own words, condensed;
+  null whenever you cannot quote the question from the "Caller just said:"
+  line. See THE FOLLOW-UP CONTRACT below.
+followup_disposition: always "none" — the system decides what happens to a
+  side question. See THE FOLLOW-UP CONTRACT below.
 
 guard: null when no guard fired; the guard label string when one fires
   e.g. "TRANSFER_REQUEST" | "ABUSE" | "SELF_HARM" | "OFFTOPIC_GLOBAL"

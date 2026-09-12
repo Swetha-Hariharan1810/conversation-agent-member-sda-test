@@ -184,17 +184,29 @@ def detect_transfer_request(state: Any) -> bool:
     return any(p in content for p in all_patterns)
 
 
+# The side-question rules, composed into every extraction prompt from ONE file.
+#
+# They used to be written out inside each of the three headers, three different
+# ways — and header_core.md did not describe answered_with_followup at all — so
+# whether a caller's question was heard depended on which header the slot they
+# were on happened to use. Nineteen agent prompts and three headers cannot be
+# kept in step by hand, so they are no longer asked to be: the contract is read
+# from one place and every builder below composes the same copy.
+_FOLLOWUP_CONTRACT = "extraction/_followup_contract.md"
+
+
 @lru_cache(maxsize=36)
 def build_extraction_prompt(agent_prompt_file: str) -> str:
     """
     System prompt for LLM 1 (get_extraction_llm).
-    Combines extraction header + agent-specific rules only.
-    No global behavioural rules — extraction LLM does not need them.
+    Combines extraction header + the shared follow-up contract + agent-specific
+    rules only. No global behavioural rules — extraction LLM does not need them.
     """
     global_prompt = read_prompt("system/global_extraction.md")
     header = read_prompt("extraction/header.md")
+    followup = read_prompt(_FOLLOWUP_CONTRACT)
     agent = read_prompt(agent_prompt_file)
-    return f"{global_prompt}\n\n---\n\n{header}\n\n---\n\n{agent}\n\n"
+    return f"{global_prompt}\n\n---\n\n{header}\n\n---\n\n{followup}\n\n---\n\n{agent}\n\n"
 
 
 @lru_cache(maxsize=36)
@@ -204,12 +216,17 @@ def build_extraction_prompt_core(agent_prompt_file: str) -> str:
     and simple field extraction (no corrections, no spelling handling).
 
     Use for: intake, benefits, care_wellness.
-    Input tokens: ~200-300 (vs ~1050-1450 with full header).
+
+    Still the smallest of the three tiers, but no longer the one that skips the
+    side-question rules: those are composed in from the shared contract, the
+    same copy every other tier gets. Dropping them here is what made a caller's
+    question audible on one slot and inaudible on the next.
     """
     global_prompt = read_prompt("system/global_extraction.md")
     core_header = read_prompt("extraction/header_core.md")
+    followup = read_prompt(_FOLLOWUP_CONTRACT)
     agent = read_prompt(agent_prompt_file)
-    return f"{global_prompt}\n\n---\n\n{core_header}\n\n---\n\n{agent}\n\n"
+    return f"{global_prompt}\n\n---\n\n{core_header}\n\n---\n\n{followup}\n\n---\n\n{agent}\n\n"
 
 
 @lru_cache(maxsize=36)
@@ -224,8 +241,9 @@ def build_extraction_prompt_extraction(agent_prompt_file: str) -> str:
     """
     global_prompt = read_prompt("system/global_extraction.md")
     extraction_header = read_prompt("extraction/header_extraction.md")
+    followup = read_prompt(_FOLLOWUP_CONTRACT)
     agent = read_prompt(agent_prompt_file)
-    return f"{global_prompt}\n\n---\n\n{extraction_header}\n\n---\n\n{agent}\n\n"
+    return f"{global_prompt}\n\n---\n\n{extraction_header}\n\n---\n\n{followup}\n\n---\n\n{agent}\n\n"
 
 
 @lru_cache(maxsize=36)

@@ -51,28 +51,12 @@ extracted{} may only contain values the caller actually spoke this turn.
 
 ## Event type
 "answered"  — caller directly and clearly provided the requested value
-"answered_with_followup" — caller clearly provided the requested value AND
-              also directed a secondary signal at the agent **that is explicitly
-              present in the "Caller just said:" line**. extracted{} must
-              contain the slot value; if no clear value was provided this turn,
-              use "answered" or "ambiguous" instead.
-              NEVER use this event_type when the caller's utterance contains only
-              the slot value. NEVER infer a secondary signal from topics the AI
-              mentioned in prior turns — it must appear in the caller's own words.
-              Secondary signals:
-                repeat requests       — "can you say that again", "sorry what was that"
-                confirmation requests — "did you get that", "is that right"
-                side questions the agent cannot answer from session state —
-                                        "do you speak Spanish", "what are your hours"
-                format uncertainty about their own answer —
-                                        "I think it's...", "not sure if that's right"
+"answered_with_followup" — caller provided the requested value AND asked
+              something. See THE FOLLOW-UP CONTRACT below.
 "wait"      — caller is asking for time, not answering — see WAIT below
 "ambiguous" — genuinely nothing extractable, garbled, or uncertain — do not guess
-  IMPORTANT: when the caller asks a clarifying question about what the agent
-  needs (e.g. "what do you need exactly?", "what format?", "why do you need
-  that?", "which records?") with NO slot value given, set event_type:
-  "ambiguous" AND set followup_query to their question (short paraphrase).
-  This allows the system to answer their question before re-asking.
+  A caller who asked INSTEAD of answering is ambiguous AND carries a
+  followup_query. See THE FOLLOW-UP CONTRACT below.
 "none"      — a guard fired; set when guard != NONE
 
 ## WAIT
@@ -120,44 +104,6 @@ replay request — that stays an answer follow-up.
 
 Asks to change/redo something not in Confirmed:, not a known slot, and not
 a known redo/replay topic → still set update_target to their words
-
-## THE FOLLOW-UP TEST — apply before setting answered_with_followup
-`answered_with_followup` and `followup_query` are the most over-used fields in
-this schema. Before setting either one, point at the words in the "Caller just
-said:" line that are the question. If you cannot quote them, there is no
-follow-up: use `answered`, leave `followup_query` null, and leave
-`followup_disposition` "none".
-
-Two specific mistakes to avoid, both seen in production:
-  - Do NOT turn the caller's own answer into a follow-up. "Monique" answers the
-    question; it does not also ask one.
-  - Do NOT turn a topic the AI raised into a follow-up. If the AI said "I can
-    help with your claim status" two turns ago, "help with claim status" is not
-    something the caller asked — it is something you read in your own history.
-
-| Caller just said                        | event_type | followup_query |
-|-----------------------------------------|------------|----------------|
-| "Customer."                             | answered   | null           |
-| "M451982."                              | answered   | null           |
-| "Yes, that's right."                    | answered   | null           |
-| "November 5th, 1992."                   | answered   | null           |
-| "Smith — sorry, bad line."              | answered   | null           |
-| "90210, and when will I get the list?"  | answered_with_followup | "when will the list arrive" |
-
-## Followup disposition
-Only when event_type = answered_with_followup. Set followup_query to the
-side question (short paraphrase). followup_query MUST be derived from the
-caller's current utterance ("Caller just said:" line) only — NEVER
-synthesize it from topics the AI raised in prior turns. If the caller did
-not ask or say it this turn, it is not a follow-up.
-Set followup_disposition:
-  answer    — every side question: answerable from values in Confirmed: (or a
-               repeat/read-back request, or an update request per above), or
-               about a step still ahead — the system passes the remaining
-               steps to the responder, which answers from them. Also answer
-               when the question is unrelated to this call — the system
-               responds gracefully without inventing data.
-When event_type != answered_with_followup, omit or set "none".
 
 ## Caller type detection
 Only extract when caller explicitly states who they are. Never infer.
@@ -238,15 +184,19 @@ Return JSON only — no markdown, no explanation.
 
 event_type: "answered" | "answered_with_followup" | "wait" | "ambiguous" | "none"
   answered  — caller directly provided a value for the slot
-  answered_with_followup — caller provided a value for the slot AND added a
-              secondary signal; extracted{} must hold the slot value
+  answered_with_followup — caller provided a value for the slot AND asked
+              something; extracted{} must hold the slot value. See THE
+              FOLLOW-UP CONTRACT
   wait      — caller asked for time; extracted{} empty
   ambiguous — genuinely nothing extractable, garbled, or uncertain — do not guess
   none      — a guard fired; set extracted: {} and populate guard fields
 
-followup_disposition: "answer" | "none" — "none"
-  unless event_type is "answered_with_followup"
-followup_query: the side question, condensed, verbatim-ish; null when none
+followup_query: the caller's side question in their own words, condensed;
+  null unless event_type is "answered_with_followup" or "ambiguous", and
+  null whenever you cannot quote the question from the "Caller just said:"
+  line. See THE FOLLOW-UP CONTRACT.
+followup_disposition: always "none" — the system decides what happens to a
+  side question. See THE FOLLOW-UP CONTRACT.
 update_target: slot the caller wants to change when NO new value was given,
   or the redo/replay topic; null otherwise
 request_kind: "update" | "redo" | "replay" per Cross-call requests above;
