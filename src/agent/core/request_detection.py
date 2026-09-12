@@ -37,6 +37,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from agent.core.followup_grounding import is_grounded_followup
 from agent.core.slot_ownership import SLOT_OWNERSHIP
 from agent.utils import detect_cannot_provide
 
@@ -253,6 +254,64 @@ def _coerce_like(sample: Any, value: str) -> Any:
     return value
 
 
+def _reconcile_followup_query(result: Any, last_user: str | None) -> Any:
+    """Drop a side question the caller did not ask, and the event that carried it.
+
+    `followup_query` routes the turn into FOLLOWUP_RESPOND, whose whole job is
+    to answer the "Followup:" line. A phantom line has no answer, so the
+    generator pads — usually by restating the sentence the caller just heard —
+    and the same phantom reaches BaseAgent.execute's safety net, which
+    generates a second sentence for the turn and prefixes it. One hallucinated
+    field, two generation calls, two sentences saying the same thing.
+
+    See core.followup_grounding for why the check lives in Python at all: three
+    extraction headers already forbid synthesizing a followup_query from topics
+    the AI raised, in capitals, and the field keeps coming back with one.
+
+    Only the question is cleared. corrections{} and update_target are the
+    caller's own request shapes and are reconciled below on their own evidence;
+    an ANSWERED_WITH_FOLLOWUP that still carries one of those keeps its event
+    type, because the update machinery (Case A / Case B) is what handles it.
+    With the question gone and nothing else to follow up on, the event is a
+    plain answer and must take the clean confirm path — the same downgrade
+    _collect_slot already made locally for an empty follow-up, applied once
+    here so intake, records coordination and verification get it too.
+    """
+    query = (getattr(result, "followup_query", None) or "").strip()
+    if not query or is_grounded_followup(query, last_user):
+        return result
+    try:
+        result.followup_query = None
+        result.followup_disposition = _coerce_like(getattr(result, "followup_disposition", None), "none")
+    except (AttributeError, ValueError):  # non-WorkerResult shim in tests
+        return result
+    logger.info(
+        "request_detection: grounding_veto cleared followup_query",
+        extra={
+            "source": "grounding_veto",
+            "field": "followup_query",
+            "llm_value": query,
+            "final_value": "",
+        },
+    )
+    event_raw = getattr(result, "event_type", None)
+    event = str(getattr(event_raw, "value", event_raw) or "").strip().lower()
+    has_corrections = any((getattr(result, "corrections", None) or {}).values())
+    has_target = bool((getattr(result, "update_target", None) or "").strip())
+    if event == "answered_with_followup" and not has_corrections and not has_target:
+        result.event_type = _coerce_like(event_raw, "answered")
+        logger.info(
+            "request_detection: grounding_veto changed event_type",
+            extra={
+                "source": "grounding_veto",
+                "field": "event_type",
+                "llm_value": event,
+                "final_value": "answered",
+            },
+        )
+    return result
+
+
 def _reconcile_cannot_provide(result: Any, last_user: str | None) -> Any:
     """Regex backstop for the LLM's cannot_provide flag.
 
@@ -297,6 +356,10 @@ def reconcile_worker_result(result: Any, last_user: str | None) -> Any:
       no extracted values, no corrections) → upgrade to CORRECTED: the
       extraction contract classifies bare cross-call requests as corrected,
       and only the CORRECTED path (C2) can honor a target with no value.
+    - followup_query names a side question with no trace of a question or a
+      request in the caller's words → clear it, and downgrade an
+      ANSWERED_WITH_FOLLOWUP that carried nothing else to ANSWERED. See
+      _reconcile_followup_query and core.followup_grounding.
     - detect_cannot_provide fires but the LLM left cannot_provide false →
       set it. The flag is semantic and the model is the primary source; this
       is the backstop for a missed call or an extraction that threw, so a
@@ -304,6 +367,7 @@ def reconcile_worker_result(result: Any, last_user: str | None) -> Any:
     - Neither detects → result returned untouched.
     """
     result = _reconcile_cannot_provide(result, last_user)
+    result = _reconcile_followup_query(result, last_user)
 
     detected = detect_request(last_user)
     if detected is None:

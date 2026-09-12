@@ -22,6 +22,7 @@ from typing import Any, Callable, Optional, Tuple
 from agent.conversation.context import ConversationContext
 from agent.core.call_stages import remaining_call_stages
 from agent.core.constants import MAX_FREE_FOLLOWUP_TURNS, MAX_WAIT_TURNS
+from agent.core.followup_grounding import is_grounded_followup
 from agent.core.models import SlotAttempt
 from agent.llm.config import Config
 from agent.responses.builder import (
@@ -705,15 +706,40 @@ class SlotManagerMixin:
             )
         return parked
 
-    def note_side_question(self, result: Any) -> None:
+    def note_side_question(self, result: Any, *utterances: str) -> None:
         """Record a question the caller asked alongside this turn's answer.
 
         Called once per turn from the guard layer, which every slot-collecting
         agent already runs with the extraction result. Recording is not
         answering: what the turn does with it is decided later, and most turns
         carry nothing.
+
+        ``utterances`` are the renderings of what the caller said this turn —
+        the guard layer passes both the ``user_text`` it was given and the last
+        user message in the transcript, which are the same string in production
+        and can differ in a test harness. A reported question with no trace of
+        a question or a request in ANY of them is not recorded at all: this is
+        the last gate in front of BaseAgent.execute's safety net, which
+        generates a whole extra sentence for the turn and prefixes it to what
+        the turn says. Fed a phantom, that sentence answers nothing and
+        restates what the caller is already hearing — the double-append.
+        reconcile_worker_result vetoes the same field upstream; this is here
+        because the net is reached from every agent, including the ones whose
+        extraction predates that funnel.
+
+        Passing no utterance at all leaves the extractor trusted: the veto
+        fires on evidence that the caller asked nothing, never on the absence
+        of a transcript to check.
         """
         query = (getattr(result, "followup_query", None) or "").strip() if result else ""
+        said = [u for u in utterances if (u or "").strip()]
+        if query and said and not any(is_grounded_followup(query, u) for u in said):
+            self.logger.info(
+                "note_side_question: dropped an ungrounded side question",
+                extra={"agent": self.AGENT_NAME, "query": query},
+            )
+            self._side_question = {}
+            return
         extracted = (getattr(result, "extracted", None) or {}) if result else {}
         self._side_question = (
             {

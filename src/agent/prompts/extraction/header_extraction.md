@@ -121,6 +121,29 @@ replay request — that stays an answer follow-up.
 Asks to change/redo something not in Confirmed:, not a known slot, and not
 a known redo/replay topic → still set update_target to their words
 
+## THE FOLLOW-UP TEST — apply before setting answered_with_followup
+`answered_with_followup` and `followup_query` are the most over-used fields in
+this schema. Before setting either one, point at the words in the "Caller just
+said:" line that are the question. If you cannot quote them, there is no
+follow-up: use `answered`, leave `followup_query` null, and leave
+`followup_disposition` "none".
+
+Two specific mistakes to avoid, both seen in production:
+  - Do NOT turn the caller's own answer into a follow-up. "Monique" answers the
+    question; it does not also ask one.
+  - Do NOT turn a topic the AI raised into a follow-up. If the AI said "I can
+    help with your claim status" two turns ago, "help with claim status" is not
+    something the caller asked — it is something you read in your own history.
+
+| Caller just said                        | event_type | followup_query |
+|-----------------------------------------|------------|----------------|
+| "Customer."                             | answered   | null           |
+| "M451982."                              | answered   | null           |
+| "Yes, that's right."                    | answered   | null           |
+| "November 5th, 1992."                   | answered   | null           |
+| "Smith — sorry, bad line."              | answered   | null           |
+| "90210, and when will I get the list?"  | answered_with_followup | "when will the list arrive" |
+
 ## Followup disposition
 Only when event_type = answered_with_followup. Set followup_query to the
 side question (short paraphrase). followup_query MUST be derived from the

@@ -31,7 +31,7 @@ from agent.responses.static import (
     MSG_TRANSFER_REQUEST,
 )
 from agent.state import State
-from agent.utils import detect_transfer_request, pick
+from agent.utils import _last_user_msg, detect_transfer_request, pick
 
 if TYPE_CHECKING:
     from agent.llm.schema import WorkerResult
@@ -74,7 +74,6 @@ class ConversationGuardsMixin:
     ) -> str:
         from agent.llm.redaction import _is_reportable_slot, mask_confirmed
         from agent.llm.response_generator import generate_recovery_message, sanitize_generated
-        from agent.utils import _last_user_msg
 
         awaiting = state.get("awaiting_slot") or ""
         slot_state = (state.get("slot_attempts") or {}).get(awaiting, {})
@@ -211,7 +210,7 @@ class ConversationGuardsMixin:
         # branch can forget it. Nothing is generated here — a guard may yet
         # take the turn, and most turns carry no question at all. See
         # BaseAgent.execute for where an unanswered one is picked up.
-        self.note_side_question(result)
+        self.note_side_question(result, user_text, _last_user_msg(list(state.get("messages") or [])))
 
         if result and result.extracted and not state.get("caller_type_handled"):
             detected = result.extracted.get("caller_type", "")

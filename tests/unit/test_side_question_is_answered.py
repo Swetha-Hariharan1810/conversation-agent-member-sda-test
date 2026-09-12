@@ -256,7 +256,7 @@ def test_the_guard_entry_records_the_question_for_every_agent():
 
     from agent.core.guards import ConversationGuardsMixin
 
-    assert "self.note_side_question(result)" in inspect.getsource(
+    assert "self.note_side_question(result" in inspect.getsource(
         ConversationGuardsMixin._run_conversation_guards
     )
     assert "self.discard_side_question()" in inspect.getsource(

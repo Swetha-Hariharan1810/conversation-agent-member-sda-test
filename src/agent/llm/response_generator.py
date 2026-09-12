@@ -160,18 +160,21 @@ _STATIC_ELIGIBLE_GUARDS = frozenset({"RETRY", "CLARIFY"})
 
 
 # "Sorry, I didn't catch that" is a claim about hearing, and it is only true of
-# a short, contentless turn — silence, "uh", "what". A caller who says a whole
-# clear sentence was heard perfectly well; telling them otherwise is both false
-# and, said twice running, insulting:
+# a contentless turn — silence, "uh", "what". A caller who asked for something
+# was heard perfectly well; telling them otherwise is both false and, said
+# twice running, insulting:
 #
 #     AI    Sorry, I didn't catch that — could you say your first name again?
 #     User  Please check my claim status today.
 #     AI    Sorry, I didn't catch that — could you say your first name again?
 #
-# Four words is the line. Below it a canned re-ask is honest and costs nothing;
-# at or above it the turn has content the template cannot answer, and the
-# generation LLM gets to respond to what was actually said.
-_STATIC_RETRY_MAX_WORDS = 4
+# The line used to be four words, and word count turned out to be the wrong
+# proxy: on a voice call nearly every non-answer clears four words ("um, I'm
+# not really sure about that"), so the static path almost never ran and the
+# generation LLM got a free hand on precisely the turns where — per the comment
+# above — there is nothing for it to add and a great deal for it to get wrong.
+# What separates the claim-status turn from a mumble is that it asks for
+# something, so that is what is tested: see followup_grounding.
 
 
 def needs_freeform_response(
@@ -191,15 +194,17 @@ def needs_freeform_response(
     The decision is driven by ``WorkerResult.needs_freeform_response``, set by
     the extraction LLM that already read the utterance — no extra call. It is
     overridden to True whenever there is content the static template cannot
-    carry (a side question, a value to name back, or simply a sentence long
-    enough to have been heard), and defaults to True when no extraction result
-    was passed, so un-wired call sites keep the old always-generate behaviour.
+    carry (a side question, a value to name back, or an utterance that asks for
+    something), and defaults to True when no extraction result was passed, so
+    un-wired call sites keep the old always-generate behaviour.
 
-    The length rule is a safety net under the model's flag, not a replacement
+    The content rule is a safety net under the model's flag, not a replacement
     for it: the flag is set by a model that can be wrong about its own output,
     and it was wrong on "Please check my claim status today" — a clear request
     that got "I didn't catch that" twice.
     """
+    from agent.core.followup_grounding import carries_freeform_content
+
     if guard not in _STATIC_ELIGIBLE_GUARDS:
         return True
     if followup_query:
@@ -216,7 +221,7 @@ def needs_freeform_response(
         return True
     if (getattr(decision, "followup_query", None) or "").strip():
         return True
-    if len((user_utterance or "").split()) >= _STATIC_RETRY_MAX_WORDS:
+    if carries_freeform_content(user_utterance):
         return True
     flag = getattr(decision, "needs_freeform_response", None)
     if flag is None:
