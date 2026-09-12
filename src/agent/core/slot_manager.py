@@ -48,6 +48,15 @@ from agent.utils import (
 _CANNOT_PROVIDE_MSG = "No problem — let me connect you with a representative "
 
 
+# Where a spoken value starts: after "it's", "that's", "my <field> is", "the
+# <field> is". Used only by salvage_slot_value's second reading — see
+# _value_readings.
+_VALUE_LEAD_IN_RE = re.compile(
+    r"\b(?:it'?s|it\s+is|that'?s|that\s+is|there'?s|is|are|was|were)\b",
+    re.IGNORECASE,
+)
+
+
 def _mk_session_ctx(
     *,
     extracted_val: str | None = None,
@@ -754,6 +763,97 @@ class SlotManagerMixin:
         interrupt["awaiting_slot"] = slot_name
         interrupt["wait_count"] = wait_count
         return interrupt
+
+    # Slot types whose validator is a genuine FORMAT gate, so the caller's raw
+    # words can be re-read without risk of capturing prose as a value. A date, a
+    # member ID, a ZIP and a reference number either parse or they do not.
+    #
+    # The name types are deliberately absent, and that is the whole reason this
+    # is a list rather than "try every slot": normalize_name accepts anything,
+    # so re-reading the utterance would confirm "I don't have it" as a last name
+    # and "the weather is terrible today" as a first name. free_text and yes_no
+    # are out for the same reason — nothing about their shape says "value".
+    _SALVAGEABLE_SLOT_TYPES: frozenset = frozenset(
+        {
+            "dob",
+            "member_id",
+            "zip_code",
+            "phone_number",
+            "email",
+            "fax",
+            "claim_number",
+            "reference_number",
+        }
+    )
+
+    def salvage_slot_value(self, config: "_InternalSlotConfig", messages: list) -> str:
+        """This slot's own normalizer, applied to what the caller actually said.
+
+        The extraction LLM decides whether there is a value, and the normalizer
+        only ever runs on what the LLM hands over. So when the LLM declines, a
+        value Python can parse perfectly is never parsed:
+
+            AI      …and your date of birth?
+            Caller  April twelvee nineteen eighty-eight
+            AI      Sorry, I didn't catch that — could you repeat your date of
+                    birth?
+
+        normalize_dob reads that to 04/12/1988, ASR typo included. Nothing was
+        wrong with normalization; it was never called. The extraction header
+        tells the model to return nothing when speech "sounds garbled", and
+        "twelvee" looks garbled to a model that cannot try parsing it.
+
+        Returns "" when there is nothing to salvage, which is the common case.
+        Restricted to _SALVAGEABLE_SLOT_TYPES: on a format-gated slot the
+        validator is what makes this safe, and on a name slot there is no format
+        to gate on.
+        """
+        slot_type = getattr(config.slot_type, "value", config.slot_type)
+        if str(slot_type or "") not in self._SALVAGEABLE_SLOT_TYPES:
+            return ""
+        last_user = _last_user_msg(messages)
+        if not last_user or detect_cannot_provide(last_user):
+            return ""
+        for attempt in self._value_readings(last_user):
+            try:
+                candidate = config.normalizer(attempt)
+                if not candidate:
+                    continue
+                check = config.validator(candidate)
+            except Exception:
+                continue
+            if not (check.valid if hasattr(check, "valid") else bool(check)):
+                continue
+            self.logger.info(
+                "salvage_slot_value: read the value out of the caller's own words",
+                extra={"agent": self.AGENT_NAME, "slot": config.slot_name, "value": candidate[:24]},
+            )
+            return candidate
+        return ""
+
+    @staticmethod
+    def _value_readings(utterance: str) -> list[str]:
+        """The utterance, then what follows its lead-in, for the normalizer to try.
+
+        The normalizers expect the bare value the extractor hands them, so they
+        read "April twelve nineteen eighty-eight" and not "my date of birth is
+        April twelve nineteen eighty-eight" — and a caller saying the latter is
+        the ordinary case, not the exception. Splitting after the copula gives
+        the normalizer the same bare value it would have got from extraction.
+
+        Only the tail after the LAST copula is tried, so "the number is M451982"
+        and "I think it's 04/12/1988" both reduce to the value. The slot's own
+        validator is what makes this safe to guess at: a reading that does not
+        parse is simply skipped.
+        """
+        text = (utterance or "").strip()
+        readings = [text]
+        for match in reversed(list(_VALUE_LEAD_IN_RE.finditer(text))):
+            tail = text[match.end() :].strip(" ,:;.")
+            if tail and tail != text:
+                readings.append(tail)
+                break
+        return readings
 
     def note_side_question(self, result: Any, *utterances: str) -> None:
         """Record a question the caller asked alongside this turn's answer.
@@ -1920,6 +2020,22 @@ class SlotManagerMixin:
                                 self._park_action_item(parked, foreign)
                         interrupt["parked_followups"] = parked
                     return None, interrupt
+
+            # ── Salvage: the value is in the caller's words, unparsed ────
+            # Placed after WAIT (a caller asking for time has no value to
+            # salvage) and after CORRECTED (a correction keeps its own path),
+            # but before AMBIGUOUS and the default non-answer — both of which
+            # re-ask for something this slot's own normalizer can already read.
+            # "April twelvee nineteen eighty-eight" is 04/12/1988 to
+            # normalize_dob; the extractor returned nothing and the normalizer
+            # was never called. See salvage_slot_value.
+            if salvaged := self.salvage_slot_value(config, messages):
+                self.slot_ok(slot_name, salvaged)
+                ctx.record_slot_success(slot_name)
+                self._pending_ambiguous_resets.add(slot_name)
+                if collected is not None:
+                    collected[slot_name] = salvaged
+                return salvaged, None
 
             # ── AMBIGUOUS: caller signalled correction intent with no value ─
             if event_value == EventType.AMBIGUOUS.value:
