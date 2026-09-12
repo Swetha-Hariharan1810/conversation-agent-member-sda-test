@@ -129,33 +129,57 @@ def _extraction(name: str) -> str:
     return " ".join(Path(f"src/agent/prompts/extraction/{name}.md").read_text().lower().split())
 
 
-@pytest.mark.parametrize("name", ["header", "header_extraction"])
+@pytest.mark.parametrize("name", ["header", "header_core", "header_extraction", "_followup_contract"])
 def test_park_is_not_offered_as_a_disposition(name):
+    """The three headers used to describe followup_disposition in their own
+    words, each offering a different menu. The shared contract now says the one
+    true thing — the system decides — and none of them offers "park"."""
     body = _extraction(name)
-    assert '"answer" | "none"' in body
     assert "park —" not in body  # the option line, whitespace collapsed
+    assert '"park"' not in body
 
 
-@pytest.mark.parametrize(
-    "question",
-    [
-        "will I get a text/notification when it's sent?",
-        "how long will delivery take?",
-        "when will I hear back about this?",
-    ],
-)
-def test_the_delivery_questions_are_answered_not_parked(question):
-    """These three were the whole case for parking. Read the disposition out of
-    the quick-example row rather than scanning the file for the word."""
-    rows = [
-        line
-        for line in Path("src/agent/prompts/extraction/header.md").read_text().split("\n")
-        if question in line and line.strip().startswith("|")
+def test_the_contract_tells_the_model_disposition_never_varies():
+    body = _extraction("_followup_contract")
+    assert 'leave it `"none"`' in body
+    assert "the system decides what happens to a side question" in body
+
+
+def test_a_question_about_a_step_still_ahead_is_reported_not_parked():
+    """ "will I get a text when it's sent?" was the whole case for parking: a
+    question about a step the call had not reached yet. The contract lists it
+    as an ordinary side question, so it is reported and answered where it is
+    asked."""
+    body = _extraction("_followup_contract")
+    assert "a question about a step still ahead" in body
+    assert "will i get a text when it's sent?" in body
+
+
+def test_the_contract_reaches_every_extraction_tier():
+    """The bug this replaced: the rules lived in three headers written three
+    ways, so whether a caller's question was heard depended on which header the
+    slot they were on happened to use."""
+    from agent.utils import (
+        build_extraction_prompt,
+        build_extraction_prompt_core,
+        build_extraction_prompt_extraction,
+    )
+
+    contract = Path("src/agent/prompts/extraction/_followup_contract.md").read_text()
+    # The comment block at the top is documentation for us, not the model; the
+    # contract proper starts at its heading.
+    contract_body = contract[contract.index("## THE FOLLOW-UP CONTRACT") :].strip()
+
+    assembled = [
+        build_extraction_prompt("extraction/verification_provider.md"),
+        build_extraction_prompt_core("extraction/intake.md"),
+        build_extraction_prompt_core("extraction/benefits.md"),
+        build_extraction_prompt_extraction("extraction/delivery_management.md"),
+        build_extraction_prompt_extraction("extraction/provider_search.md"),
     ]
-    assert rows, f"quick-example row for {question!r} is gone"
-    for row in rows:
-        disposition = row.strip().strip("|").split("|")[-1].strip()
-        assert disposition == "answer", f"{question!r} still says {disposition!r}"
+    for prompt in assembled:
+        assert contract_body in prompt, "an extraction tier is missing the shared contract"
+        assert prompt.count("## THE FOLLOW-UP CONTRACT") == 1, "the contract appears more than once"
 
 
 def test_provider_search_no_longer_forces_park_for_delivery_questions():

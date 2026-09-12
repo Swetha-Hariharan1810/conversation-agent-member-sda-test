@@ -206,15 +206,22 @@ class DeliveryManagementAgent(BaseAgent):
             recent_messages=messages[-4:],
         )
 
+        # ── DETERMINISTIC RECONCILE (Phase 1) ────────────────────────────────
+        # llm.py already reconciles on success, but extraction fallbacks (and
+        # monkeypatched results) bypass it — re-running here is idempotent.
+        #
+        # It runs BEFORE the guards, not after. run_conversation_guards is where
+        # note_side_question records the turn's side question, and reconcile is
+        # what recovers a question the extractor dropped and clears one it
+        # invented. Reconciling afterwards left those corrections invisible to
+        # the side-question net on exactly the path this call exists for — the
+        # one where llm.py's reconcile did not run.
+        # It also guarantees update_target/request_kind before any branch logic.
+        result = reconcile_worker_result(result, last_user)
+
         # Conversation guards
         if interrupt := await self.run_conversation_guards(state, user_text=last_user, result=result):
             return interrupt
-
-        # ── DETERMINISTIC RECONCILE (Phase 1) ────────────────────────────────
-        # llm.py already reconciles on success, but extraction fallbacks (and
-        # monkeypatched results) bypass it — re-running here is idempotent and
-        # guarantees update_target/request_kind before any branch logic.
-        result = reconcile_worker_result(result, last_user)
 
         # ── ROUTED SLOT UPDATE (Phase 4, Bug C) ──────────────────────────────
         # "Actually my ZIP changed" mid-delivery: zip_code is owned by

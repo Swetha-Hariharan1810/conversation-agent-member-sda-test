@@ -266,6 +266,13 @@ class ClaimAdjustmentAgent(BaseAgent):
                     recent_messages=messages[-6:],
                 )
 
+                # ── DETERMINISTIC RECONCILE (Phase 1) ────────────────────
+                # Before the guards, not after: run_conversation_guards is
+                # where note_side_question records the turn's side question,
+                # and reconcile is what recovers one the extractor dropped and
+                # clears one it invented.
+                result = reconcile_worker_result(result, last_user)
+
                 if interrupt := await self.run_conversation_guards(state, user_text=last_user, result=result):
                     self.slot_fail("reference_number")
                     interrupt["slot_attempts"] = self.slots_dict()
@@ -276,8 +283,6 @@ class ClaimAdjustmentAgent(BaseAgent):
                             reason="reference_number_exhausted",
                         )
                     return interrupt
-
-                result = reconcile_worker_result(result, last_user)
 
                 update_target = (getattr(result, "update_target", None) or "").strip()
                 if update_target:

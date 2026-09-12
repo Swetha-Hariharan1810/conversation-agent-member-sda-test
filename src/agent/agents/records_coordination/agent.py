@@ -113,13 +113,20 @@ class RecordsCoordinationAgent(BaseAgent):
             recent_messages=messages[-4:],
         )
 
-        if interrupt := await self.run_conversation_guards(state, user_text=last_user, result=result):
-            return interrupt
-
         # ── DETERMINISTIC RECONCILE (Phase 1) ────────────────────────────────
         # llm.py already reconciles on success, but extraction fallbacks (and
         # monkeypatched results) bypass it — re-running here is idempotent.
+        #
+        # It runs BEFORE the guards, not after. run_conversation_guards is where
+        # note_side_question records the turn's side question, and reconcile is
+        # what recovers a question the extractor dropped and clears one it
+        # invented. Reconciling afterwards left those corrections invisible to
+        # the side-question net on exactly the path this call exists for — the
+        # one where llm.py's reconcile did not run.
         result = reconcile_worker_result(result, last_user)
+
+        if interrupt := await self.run_conversation_guards(state, user_text=last_user, result=result):
+            return interrupt
 
         # ── ROUTED SLOT UPDATE (Phase 7, mirrors delivery's Phase 4 block) ───
         # A ZIP or identity update voiced mid-records routes to its owner and
