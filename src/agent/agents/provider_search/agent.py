@@ -279,6 +279,11 @@ class ProviderSearchAgent(BaseAgent):
         provider_type: str,
     ) -> dict:
         """Re-ask the ZIP confirmation, or escalate once the retries are spent."""
+        # Waiting is not a failed attempt — see wait_ack. A caller read their
+        # ZIP back and asked for a second is not a caller we failed to hear.
+        if wait := self.wait_ack(state, "zip_confirmed", slot_label="ZIP code"):
+            return wait
+
         self.slot_fail("zip_confirmed")
         slot = self.get_slot("zip_confirmed")
         if slot.is_exhausted():

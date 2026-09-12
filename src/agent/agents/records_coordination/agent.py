@@ -177,6 +177,9 @@ class RecordsCoordinationAgent(BaseAgent):
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "upload_method", decision=result):
+                return wait
             self.slot_fail("upload_method")
             if self.get_slot("upload_method").is_exhausted():
                 return self.signal_escalate(
@@ -243,6 +246,9 @@ class RecordsCoordinationAgent(BaseAgent):
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "upload_consent", decision=result):
+                return wait
             self.slot_fail("upload_consent")
             if self.get_slot("upload_consent").is_exhausted():
                 return await self._handle_guide_consent_ask(state)
@@ -350,6 +356,11 @@ class RecordsCoordinationAgent(BaseAgent):
                 ask_result["pending_email"] = ""
                 return ask_result
 
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "email_confirmed", decision=result):
+                wait["pending_email"] = pending_email
+                return wait
+
             self.slot_fail("email_confirmed")
             if self.get_slot("email_confirmed").is_exhausted():
                 # FIX: escalate on exhaustion instead of silently pivoting to email collection.
@@ -402,6 +413,9 @@ class RecordsCoordinationAgent(BaseAgent):
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "email", decision=result):
+                return wait
             self.slot_fail("email")
             if self.get_slot("email").is_exhausted():
                 return self.signal_escalate(
@@ -452,6 +466,9 @@ class RecordsCoordinationAgent(BaseAgent):
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "personal_guide_consent", decision=result):
+                return wait
             self.slot_fail("personal_guide_consent")
             if self.get_slot("personal_guide_consent").is_exhausted():
                 return self.signal_escalate(

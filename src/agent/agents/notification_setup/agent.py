@@ -233,6 +233,9 @@ class NotificationSetupAgent(BaseAgent):
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
             # Ambiguous — proper slot retry pattern
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "timeline_question", decision=result):
+                return wait
             self.slot_fail("timeline_question")
             if self.get_slot("timeline_question").is_exhausted():
                 return self.signal_escalate(
@@ -267,6 +270,9 @@ class NotificationSetupAgent(BaseAgent):
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "notification_method", decision=result):
+                return wait
             self.slot_fail("notification_method")
             if self.get_slot("notification_method").is_exhausted():
                 return self.signal_escalate(
@@ -358,6 +364,9 @@ class NotificationSetupAgent(BaseAgent):
             # Not an answer to the read-back — uncertain, holding, or raising
             # something else. Re-ask it.
             if is_not_an_answer(result, last_user, owned_slots=("phone", "phone_confirmed")):
+                # Waiting is not a failed attempt — see wait_ack.
+                if wait := self.wait_ack(state, "phone_confirmed", decision=result):
+                    return wait
                 self.slot_fail("phone_confirmed")
                 if self.get_slot("phone_confirmed").is_exhausted():
                     return self.signal_escalate(
@@ -407,6 +416,9 @@ class NotificationSetupAgent(BaseAgent):
                     confirm["pending_phone"] = normalized
                     confirm["notification_channel"] = "sms"
                     return confirm
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "phone", decision=result):
+                return wait
             self.slot_fail("phone")
             if self.get_slot("phone").is_exhausted():
                 return self.signal_escalate(
@@ -555,6 +567,9 @@ class NotificationSetupAgent(BaseAgent):
                     confirm["pending_email"] = normalized
                     confirm["notification_channel"] = "email"
                     return confirm
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "email", decision=result):
+                return wait
             self.slot_fail("email")
             if self.get_slot("email").is_exhausted():
                 return self.signal_escalate(
@@ -634,6 +649,9 @@ class NotificationSetupAgent(BaseAgent):
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
+            # Waiting is not a failed attempt — see wait_ack.
+            if wait := self.wait_ack(state, "n2_notification_method", decision=result):
+                return wait
             self.slot_fail("n2_notification_method")
             if self.get_slot("n2_notification_method").is_exhausted():
                 return self.signal_escalate(

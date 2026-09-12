@@ -706,6 +706,55 @@ class SlotManagerMixin:
             )
         return parked
 
+    def wait_ack(
+        self,
+        state: State,
+        slot_name: str,
+        *,
+        decision: Any = None,
+        slot_label: str | None = None,
+    ) -> Optional[dict]:
+        """Acknowledge a caller who asked for time, or None if they did not.
+
+        _collect_slot has always done this; every slot collected by a
+        hand-written handler had to remember to, and most did not:
+
+            AI      May I have the reference number of the adjustment request?
+            Caller  hold on, let me find the letter...
+            AI      Could you say that reference number once more?
+
+        The caller was reading us their paperwork and was told we had not heard
+        them — and it cost them one of three retry attempts. Waiting is not a
+        failed attempt: no slot_fail, no generation call, stay on the same slot.
+
+        Call it immediately before the slot_fail of a hand-rolled retry, and
+        only there — i.e. AFTER extraction, inside the branch where no usable
+        value was found. That ordering is what makes it safe: a turn that
+        carried a value never reaches it, so "hold on… it's M451982" is taken
+        as the answer it is. detect_wait_request guards the same thing again for
+        the numeric slots, but ordering is the guarantee.
+        """
+        last_user = _last_user_msg(list(state.get("messages") or []))
+        event = getattr(decision, "event_type", None)
+        is_wait = str(getattr(event, "value", event) or "") == "wait" or detect_wait_request(last_user)
+        if not is_wait or detect_cannot_provide(last_user):
+            return None
+        wait_count = int(state.get("wait_count") or 0) + 1
+        label = slot_label or slot_name.replace("_", " ")
+        msg = (
+            pick(MSG_WAIT_ACK)
+            if wait_count < MAX_WAIT_TURNS
+            else pick(MSG_WAIT_NUDGE).format(slot_label=label)
+        )
+        self.logger.info(
+            "wait_ack: caller asked for time",
+            extra={"agent": self.AGENT_NAME, "slot": slot_name, "wait_count": wait_count},
+        )
+        interrupt = self.ask_member(state, msg)
+        interrupt["awaiting_slot"] = slot_name
+        interrupt["wait_count"] = wait_count
+        return interrupt
+
     def note_side_question(self, result: Any, *utterances: str) -> None:
         """Record a question the caller asked alongside this turn's answer.
 

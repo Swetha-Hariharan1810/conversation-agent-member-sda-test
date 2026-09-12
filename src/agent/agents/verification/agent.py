@@ -1477,6 +1477,11 @@ class VerificationAgent(BaseAgent):
         # Nothing extractable — retry the "what is the correct name?" question.
         from agent.slots.types import SlotType
 
+        # Waiting is not a failed attempt — see wait_ack. A caller asked to
+        # spell their name back often needs a moment to check it.
+        if wait := self.wait_ack(state, _NAME_CORRECTION_SLOT, decision=result, slot_label="correct name"):
+            return wait
+
         self.slot_fail(_NAME_CORRECTION_SLOT)
         if self.get_slot(_NAME_CORRECTION_SLOT).is_exhausted():
             logger.warning(LOG_NAME_CONFIRM_EXHAUST)
