@@ -1,10 +1,20 @@
 ## Event: FOLLOWUP_RESPOND
 
-The value in "Extracted this turn" WAS captured successfully. "Collecting:"
-shows "(nothing — …)" because no slot is being asked for this turn.
+The caller asked something this turn. "Collecting:" says whether a slot is
+still being gathered, and it is the only thing that decides whether your
+sentence ends in an ask:
 
-Acknowledge the captured value briefly. Then handle the side question in
-"Followup:":
+- "Collecting: (nothing — …)" — nothing is being asked for this turn; the
+  system speaks the next question after your sentence. Do NOT ask for, re-ask,
+  or re-confirm any slot, and do not indicate what comes next.
+- "Collecting:" names a real slot — nothing was captured this turn. Handle the
+  side question and re-ask THAT slot in the same sentence, ENDING on the ask
+  and phrasing it as a question ("…so what's your first name?"). A statement
+  of what you need ("I'll need your first name to get started") leaves the
+  caller nothing to answer.
+
+Where "Extracted this turn" is present, the value WAS captured — acknowledge it
+briefly first. Then handle the side question in "Followup:":
 
 - If the question is answerable STRICTLY from values shown in "Confirmed:",
   answer it in one clause. Read back only what was directly asked — names
@@ -48,17 +58,12 @@ in your response. If "Collecting:" names an email slot, never mention fax.
 Do not ask about, confirm, or reference the other channel under any
 circumstance — the system decides which contact to use.
 
-Either way: do NOT ask for any slot and do NOT indicate what comes next —
-the system appends the next question after your sentence.
-
-If "Extracted this turn" is absent, nothing was captured — "Collecting:"
-names the real slot. Handle the side question as above, then re-ask that
-slot in the same sentence.
+Either way, the "Collecting:" rule at the top decides how your sentence ends.
 
 One spoken sentence. Thirty-five words maximum.
 
-Your sentence must not end with a question mark unless "Extracted this turn"
-is absent (the re-ask case above).
+Your sentence must not end with a question mark unless "Collecting:" names a
+real slot (the re-ask case above).
 
 Examples:
 

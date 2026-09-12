@@ -21,7 +21,7 @@ from typing import Any, Callable, Optional, Tuple
 
 from agent.conversation.context import ConversationContext
 from agent.core.call_stages import remaining_call_stages
-from agent.core.constants import MAX_WAIT_TURNS
+from agent.core.constants import MAX_FREE_FOLLOWUP_TURNS, MAX_WAIT_TURNS
 from agent.core.models import SlotAttempt
 from agent.llm.config import Config
 from agent.responses.builder import (
@@ -241,17 +241,41 @@ class SlotManagerMixin:
         fallback_slot_label: str | None = None,
         decision: Any = None,
         slot_type: Optional["SlotType"] = None,
+        allow_empty: bool = False,
     ) -> str:
         # Lazy import: core.slot_manager → llm.response_generator → llm.config → core (via schema);
         # importing at module level would create a core → llm → core cycle.
         from agent.llm.response_generator import (
+            _POST_CAPTURE_GUARDS,
             generate_recovery_message,
             needs_freeform_response,
             sanitize_generated,
         )
 
         slot_state = self.get_slot(slot_name)
-        sc = session_context or {}
+        sc = dict(session_context or {})
+        # One turn, one generation, one answer. A call site that threads the
+        # caller's side question through session_context has always claimed it
+        # here; a call site that does not used to leave it for the safety net in
+        # BaseAgent.execute, which generates a SECOND sentence for the same turn
+        # and puts it in front of this one. Two calls for one turn is the cheap
+        # half of the cost: the net's sentence is generated without knowing what
+        # this one already said, so it re-asks the slot, the sanitizer strips
+        # the ask, and what reaches the caller is a canned fallback in front of
+        # a sentence that had already answered them —
+        #     "Got it — I'll keep that in mind. Sure — I was asking for your
+        #      first name."
+        # The sentence generated HERE is what the caller hears, so it is the
+        # sentence that carries the question, whatever guard this turn is on.
+        if not sc.get("followup_query"):
+            claimed = (getattr(self, "_side_question", {}) or {}).get("query", "")
+            if claimed:
+                sc["followup_query"] = claimed
+                self.logger.info(
+                    "_generate_slot_retry_response: folding this turn's side question "
+                    "into the sentence being generated",
+                    extra={"agent": self.AGENT_NAME, "slot": slot_name, "guard": guard},
+                )
         if sc.get("followup_query"):
             # This turn is addressing the side question, so the safety net in
             # BaseAgent.execute must not address it again. Every path that
@@ -337,6 +361,13 @@ class SlotManagerMixin:
         # question so the appended ask is the only one. slot_name itself is
         # exempt — it is the slot being collected (RETRY/CLARIFY re-ask it) or
         # the value just captured (FOLLOWUP acks mention it).
+        # A FOLLOWUP_* turn with nothing captured is a re-ask turn too: the
+        # payload names the real slot (the post-capture relabel needs a value),
+        # and the prompt tells the model to answer the question and re-ask that
+        # slot in the same sentence. Any OTHER slot it asks for is the same
+        # cross-slot hallucination RETRY/CLARIFY strip.
+        captured = extracted_this_turn if extracted_this_turn is not None else sc.get("extracted_val")
+        re_asking = guard in ("RETRY", "CLARIFY") or (guard in _POST_CAPTURE_GUARDS and not captured)
         return sanitize_generated(
             text,
             guard=guard,
@@ -346,7 +377,8 @@ class SlotManagerMixin:
             fallback_slot_label=fallback_slot_label or slot_name.replace("_", " "),
             # Re-ask turns must ask for slot_name and nothing else — strip any
             # other slot the generation LLM decided to ask for instead.
-            collecting_slot=slot_name if guard in ("RETRY", "CLARIFY") else None,
+            collecting_slot=slot_name if re_asking else None,
+            allow_empty=allow_empty,
         )
 
     async def _generate_correction_ack(
@@ -395,6 +427,13 @@ class SlotManagerMixin:
                 f"caller corrected {corrected_label}" + f" — now re-ask for {awaiting_slot.replace('_', ' ')}"
             )
 
+        # This helper generates the whole turn without going through
+        # _generate_slot_retry_response, so it claims the turn's side question
+        # itself — otherwise an acknowledged correction that arrived with a
+        # question ("...and when do I get my card?") costs a second generation
+        # and a canned prefix. See _generate_slot_retry_response.
+        followup_query = (self.consume_side_question() or {}).get("query", "")
+
         text = await generate_recovery_message(
             slot_name=awaiting_slot,
             attempt=0,
@@ -404,6 +443,7 @@ class SlotManagerMixin:
             caller_name=ctx.caller_first_name,
             confirmed_slots=dict.fromkeys(ctx.confirmed_slots, "confirmed"),
             user_utterance=_last_user_msg(messages[-6:]),
+            followup_query=followup_query or None,
         )
         # The ack's own re-ask targets awaiting_slot (not confirmed) and it is
         # explicitly told to read corrected fields back — exempt those; any
@@ -763,6 +803,12 @@ class SlotManagerMixin:
             extracted_this_turn=extracted_value,
             # The handler speaks next, or hands off to an agent that does.
             will_append_ask=True,
+            # This sentence is only ever PREFIXED to a turn that already
+            # speaks. If sanitizing empties it — the model answered and
+            # re-asked in one breath, and the ask had to go — the turn is
+            # better off with nothing in front of it than with a canned
+            # "Got it — I'll keep that in mind." the model never generated.
+            allow_empty=True,
         )
 
     @staticmethod
@@ -1891,6 +1937,97 @@ class SlotManagerMixin:
                     initiator="Agent",
                 )
             # ── END CHANGE 2 ──────────────────────────────────────────────
+
+            # ── A question asked INSTEAD of answering ─────────────────────
+            # "Can you repeat?", "why do you need that?", "is this going to
+            # take long?" — the caller said something real and asked for
+            # something back. It is not a failed attempt, and it is not the
+            # blind re-ask the default path below gives it: that path burns a
+            # retry, generates a RETRY sentence that was never told a question
+            # was asked, and leaves the question to the safety net in
+            # BaseAgent.execute — a second generation for the same turn whose
+            # sentence is usually sanitized away, so the caller hears a canned
+            # line in front of a re-ask.
+            #
+            # FOLLOWUP_RESPOND with no captured value is the shape the prompt
+            # already documents: answer the question, re-ask this slot, one
+            # sentence. It is also the only path with the context to answer
+            # honestly — Confirmed: for what is already known, Coming up: for
+            # the rest of the call.
+            #
+            # Every slot pipeline in the codebase collects through here, so
+            # this holds for every agent, not the one where it was noticed.
+            followup_query = (getattr(decision, "followup_query", None) or "").strip()
+            if followup_query:
+                asked = f"{slot_name}_followup"
+                self.slot_fail(asked)
+                if self.get_slot(asked).attempt_count <= MAX_FREE_FOLLOWUP_TURNS:
+                    self.logger.info(
+                        "_collect_slot: side question with no value — answering it and re-asking",
+                        extra={"slot": slot_name, "query": followup_query},
+                    )
+                    remaining = [s for s in (pending_slots or []) if s != slot_name]
+                    msg = await self._generate_slot_retry_response(
+                        state,
+                        slot_name,
+                        ctx,
+                        messages,
+                        guard="FOLLOWUP_RESPOND",
+                        session_context=_mk_session_ctx(
+                            followup_query=followup_query,
+                            confirmed_values=self._confirmed_slot_values(ctx, state, collected),
+                            coming_up=self.build_coming_up(
+                                state, ctx=ctx, remaining=remaining, slot_name=slot_name
+                            ),
+                        ),
+                        decision=decision,
+                        slot_type=slot_type,
+                    )
+                    # Lazy import (core → llm → core cycle at module level).
+                    from agent.llm.response_generator import guard_fallback
+
+                    # Nothing is appended to what comes back. No value was
+                    # captured, so "Collecting:" named the real slot and the
+                    # prompt had the sentence end on the ask — and a sentence
+                    # that names the slot has asked for it whether or not it
+                    # ends in a question mark. Python adding its own re-ask
+                    # behind that says the same thing twice:
+                    #     "…I'll need your first name to get started. I want to
+                    #      make sure I get this right — what's your first name?"
+                    #
+                    # The one turn Python still speaks for is the one with
+                    # nothing in it: the generation failed, or sanitizing
+                    # emptied it, and the guard's canned line came back — "Got
+                    # it, I'll keep that in mind." answers nothing and asks
+                    # nothing. The static ask REPLACES it (never trails it),
+                    # and comes from the first-ask pool rather than the retry
+                    # pool: nothing failed here — the caller was heard and
+                    # answered — so "Sorry, I didn't catch that" would be
+                    # untrue as well as graceless.
+                    if msg.strip() in ("", guard_fallback("FOLLOWUP_RESPOND", slot_label)):
+                        msg = (
+                            build_initial_prompt(slot_type)
+                            if slot_type is not None
+                            else self._next_slot_ask(slot_name, slot_configs, ctx)
+                        )
+                    interrupt = self.ask_member_with_context(state, msg, ctx)
+                    interrupt["awaiting_slot"] = slot_name
+                    interrupt["ambiguous_counts"] = {
+                        **(state.get("ambiguous_counts") or {}),
+                        slot_name: 0,
+                    }
+                    interrupt["wait_count"] = 0  # non-WAIT turn resets the wait streak
+                    return None, interrupt
+                # Nothing but questions for this many turns running: the slot
+                # is no closer than when it was first asked, so the turn counts
+                # as a non-answer again and the retry budget below decides when
+                # a representative takes over. The question still gets answered
+                # — _generate_slot_retry_response folds it into the re-ask.
+                self.logger.info(
+                    "_collect_slot: question-only turns exhausted for this slot — "
+                    "counting this one as a non-answer",
+                    extra={"slot": slot_name, "query": followup_query},
+                )
 
             ambiguous_counts = dict(state.get("ambiguous_counts") or {})
             ambiguous_counts[slot_name] = 0

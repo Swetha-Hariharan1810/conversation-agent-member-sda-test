@@ -266,6 +266,92 @@ SLOT_ASK_SYNONYMS: dict[str, tuple[str, ...]] = {
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
+# ── Clause-level trimming (an answer and an ask in ONE sentence) ─────────────
+# The strips below drop a sentence whole. That is right when the sentence is
+# nothing but an ask this turn may not make, and wrong when the model packed
+# the answer the caller is owed into the same sentence:
+#
+#   "Of course, I can repeat that — I can only ask for your information,
+#    not look it up, so could you tell me your first name?"
+#
+# One sentence, so dropping it loses the answer as well as the ask, the text
+# empties, and a canned fallback goes out in its place — "Got it, I'll keep
+# that in mind." in front of a re-ask that already said it better. Cutting at
+# the clause boundary keeps the answer and drops only the ask.
+_ASK_CLAUSE_SPLIT_RE = re.compile(r"\s*[—–]\s*|\s*;\s*|,?\s+\b(?:so|but|and then|then)\b\s+|,\s+")
+
+# What makes a trailing clause an ASK rather than the rest of the answer.
+_ASK_TAIL_RE = re.compile(
+    r"\b(?:could|can|would|will|may|shall)\s+(?:you|i|we)\b"
+    r"|\b(?:what|which|who|when|where|how)\b"
+    r"|\b(?:tell|give|say|repeat|confirm|provide)\s+(?:me|it|that|us)\b"
+    r"|\bis\s+that\s+(?:right|correct)\b",
+    re.IGNORECASE,
+)
+
+# What disqualifies a LEAD — deliberately tighter than the tail test, since a
+# lead is kept and a false positive there throws the answer away. Only
+# second-person request forms and an opening interrogative count; an ordinary
+# statement that happens to contain "can" or "repeat" ("I can repeat that",
+# "I can only ask for your information") is answer, not ask.
+_ASK_LEAD_RE = re.compile(
+    r"\b(?:could|can|would|will|may|shall)\s+(?:you|i|we)\b"
+    r"|^(?:what|which|who|when|where|how)\b"
+    r"|\bplease\s+(?:tell|give|say|repeat|confirm|provide)\b",
+    re.IGNORECASE,
+)
+
+# Below this, the lead is a filler opener ("Of course", "Sure thing") and
+# keeping it alone says nothing — drop the sentence as before.
+_MIN_LEAD_WORDS = 4
+
+
+def _declarative_lead(sentence: str) -> str:
+    """The answer half of a one-sentence "answer + ask", or "" if there is none.
+
+    Cuts at the LAST clause boundary that still leaves a substantial,
+    question-free lead, so as much of the answer survives as possible.
+    """
+    text = (sentence or "").strip()
+    for match in reversed(list(_ASK_CLAUSE_SPLIT_RE.finditer(text))):
+        lead = text[: match.start()].strip(" ,;—–")
+        tail = text[match.end() :].strip()
+        if not tail.endswith("?") or "?" in lead:
+            continue
+        if len(lead.split()) < _MIN_LEAD_WORDS:
+            continue
+        if not _ASK_TAIL_RE.search(tail) or _ASK_LEAD_RE.search(lead):
+            continue
+        return lead if lead.endswith((".", "!")) else lead + "."
+    return ""
+
+
+def _strip_ask(
+    sentence: str, *, guard: str, what: str, warn: bool = False, keep_lead: bool = True
+) -> list[str]:
+    """Drop an ask this turn may not make, keeping any answer in front of it.
+
+    Returns the sentences to keep in place of ``sentence`` — the declarative
+    lead when there is one, nothing when the sentence was only an ask.
+
+    ``keep_lead`` is False where the turn has no other ask coming: a trimmed
+    lead would leave the caller with a statement and no question, and the
+    guard's fallback — which always ends in one — is the better substitute.
+    """
+    log = logger.warning if warn else logger.info
+    lead = _declarative_lead(sentence) if keep_lead else ""
+    if lead:
+        log(
+            "sanitize_generated: trimmed %s, kept the answer [guard=%s]: %r -> %r",
+            what,
+            guard,
+            sentence,
+            lead,
+        )
+        return [lead]
+    log("sanitize_generated: stripped %s [guard=%s]: %r", what, guard, sentence)
+    return []
+
 
 def _slot_match_terms(name_or_label: str) -> tuple[str, ...]:
     """Fuzzy-match terms for a slot: its name with _ → space (label qualifiers
@@ -280,6 +366,16 @@ def _slot_match_terms(name_or_label: str) -> tuple[str, ...]:
 def _mentions(sentence: str, terms: Sequence[str]) -> bool:
     lowered = sentence.lower()
     return any(t in lowered for t in terms)
+
+
+def guard_fallback(guard: str, slot_label: str = "") -> str:
+    """The canned line this guard falls back to when there is nothing else.
+
+    Public so a caller can recognise its own fallback coming back — a turn
+    that got the canned line got nothing from the model, whatever the reason
+    (the call failed, or sanitizing emptied the text).
+    """
+    return _FALLBACKS.get(guard, "Got it.").format(slot_label=slot_label or "that")
 
 
 def _foreign_slot_terms(
@@ -328,6 +424,7 @@ def sanitize_generated(
     collecting_slot: str | None = None,
     exempt_slots: Sequence[str] = (),
     fallback_text: str = "",
+    allow_empty: bool = False,
 ) -> str:
     """Enforce the single-ask invariant on LLM-2 output (Bug A).
 
@@ -347,10 +444,19 @@ def sanitize_generated(
       this text), sentences mentioning ``next_slot_label`` and any trailing
       question sentences are also stripped, so the appended ask is the one
       and only ask in the combined utterance.
+    - When ``will_append_ask`` is True the turn's question is guaranteed to
+      come from Python, so a stripped sentence that also carried the caller's
+      answer is trimmed at the clause boundary instead of dropped (see
+      ``_declarative_lead``) and the answer survives the ask. Without an
+      appended ask a trimmed lead would leave the caller with no question at
+      all, so the sentence is dropped whole and the fallback speaks.
     - If sanitization empties the text, ``fallback_text`` is substituted when
       given, otherwise the guard's _FALLBACKS entry (formatted with
       ``fallback_slot_label``). A caller with no askable slot passes its own
-      text — the _FALLBACKS templates all end in an ask.
+      text — the _FALLBACKS templates all end in an ask. ``allow_empty``
+      returns "" instead: a caller whose text is only ever PREFIXED to a turn
+      that already speaks (BaseAgent's side-question net) must contribute
+      nothing rather than a canned line the model never generated.
 
     Every strip is logged at INFO with the guard and dropped sentence for
     eval visibility.
@@ -362,14 +468,24 @@ def sanitize_generated(
     kept: list[str] = []
     for sentence in sentences:
         if "?" in sentence and any(_mentions(sentence, terms) for terms in confirmed_terms):
-            logger.info("sanitize_generated: stripped confirmed-slot re-ask [guard=%s]: %r", guard, sentence)
+            kept.extend(
+                _strip_ask(
+                    sentence,
+                    guard=guard,
+                    what="confirmed-slot re-ask",
+                    keep_lead=will_append_ask,
+                )
+            )
             continue
         if "?" in sentence and any(_mentions(sentence, terms) for terms in foreign_terms):
-            logger.warning(
-                "sanitize_generated: stripped foreign-slot ask [guard=%s collecting=%s]: %r",
-                guard,
-                collecting_slot,
-                sentence,
+            kept.extend(
+                _strip_ask(
+                    sentence,
+                    guard=guard,
+                    what=f"foreign-slot ask (collecting={collecting_slot!r})",
+                    warn=True,
+                    keep_lead=will_append_ask,
+                )
             )
             continue
         # FOLLOWUP_DECLINE post-capture: also strip statement-form slot
@@ -415,16 +531,21 @@ def sanitize_generated(
                 remaining.append(sentence)
             kept = remaining
         while kept and kept[-1].rstrip().endswith("?"):
-            logger.info("sanitize_generated: stripped trailing question [guard=%s]: %r", guard, kept[-1])
+            trimmed = _strip_ask(kept[-1], guard=guard, what="trailing question")
             kept.pop()
+            kept.extend(trimmed)
+            if trimmed:
+                break
 
     result = " ".join(s.strip() for s in kept).strip()
     if not result:
+        if allow_empty:
+            logger.info("sanitize_generated: text emptied — contributing nothing [guard=%s]", guard)
+            return ""
         if fallback_text:
             result = fallback_text
         else:
-            template = _FALLBACKS.get(guard, "Got it.")
-            result = template.format(slot_label=fallback_slot_label or "that")
+            result = guard_fallback(guard, fallback_slot_label)
         logger.info("sanitize_generated: text emptied — substituting %s fallback", guard)
     return result
 
@@ -479,7 +600,12 @@ def _render_payload(
         content_lines.append(f"Confirmed:  {filled}")
     elif confirmed_slots is not None:
         content_lines.append("Confirmed:  nothing yet")
-    if extracted_value is not None:
+    # Only when there is a value to name. An empty string rendered the line
+    # with nothing after it, which reads as "nothing was captured" to a model
+    # that is also being told "Collecting: (nothing — this turn's value was
+    # captured)" — and the contradiction came back as a re-ask on a turn whose
+    # whole contract was to ask for nothing.
+    if extracted_value:
         content_lines.append(f"Extracted this turn: {extracted_value}")
     if followup_query:
         content_lines.append(f"Followup: {followup_query}")

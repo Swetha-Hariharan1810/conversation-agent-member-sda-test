@@ -154,3 +154,13 @@ WAIT_PATTERNS: list[str] = [
     r"\bhang on\b",
 ]
 MAX_WAIT_TURNS = 3  # consecutive waits before a gentle nudge/escalation check
+
+# ---------------------------------------------------------------------------
+# Side questions asked INSTEAD of answering ("can you repeat?", "why do you
+# need that?"). Answering one is not a failed attempt, so the slot's retry
+# budget is not charged for it — but a caller who only ever asks must still
+# reach a representative, so after this many question-only turns on the same
+# slot the turn is counted as a non-answer and the normal retry budget (and
+# its escalation) applies again.
+# ---------------------------------------------------------------------------
+MAX_FREE_FOLLOWUP_TURNS = 2
