@@ -112,6 +112,52 @@ def _is_appeal_or_grievance(text: str) -> bool:
     return bool(_APPEAL_GRIEVANCE_RE.search(text))
 
 
+# ── "Anything else?" — asked once per turn, never twice ───────────────────────
+# The answer the classifier generates usually ends by handing the call back
+# ("...is there anything else I can help you with?"), and MSG_CONTINUATION says
+# the same thing. Whether the continuation gets appended used to be decided by
+# testing the answer against the exact strings in the pool, so a phrasing one
+# word off the pool was not recognised and the caller heard the question twice
+# running:
+#
+#     AI  Your deductible is $750 for the year. Is there anything else I can
+#         help you with? Is there anything else from our call today I can help
+#         with?
+#
+# The pool has three entries and the model has thousands of ways to say it, so
+# the test is on the shape rather than the wording: the final sentence puts
+# something open-ended back to the member.
+_CONTINUATION_RE = re.compile(
+    r"\b(?:anything|something)\s+(?:else|further|more)\b"
+    r"|\bwhat\s+else\s+can\s+i\b"
+    r"|\b(?:any|other)\s+(?:other\s+)?questions?\b"
+    r"|\ball\s+set\b"
+    r"|\bhow\s+else\s+can\s+i\b",
+    re.IGNORECASE,
+)
+
+# A hand-back that needs no question mark — "let me know if you have any other
+# questions" leaves the member something to do just as a question does.
+_HANDBACK_RE = re.compile(r"\b(?:let\s+me\s+know|feel\s+free\s+to\s+ask)\b", re.IGNORECASE)
+
+
+def _ends_with_continuation(answer: str) -> bool:
+    """Does ``answer`` already hand the call back to the member?
+
+    Only the last sentence counts, and it has to actually put something to
+    them: a declarative that merely mentions their other questions ("I covered
+    your other questions earlier in the call.") leaves the caller with nothing
+    to respond to, so the continuation is still owed.
+    """
+    text = (answer or "").strip()
+    if not text:
+        return False
+    last = [s for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()][-1].rstrip()
+    if not _CONTINUATION_RE.search(last):
+        return False
+    return last.endswith("?") or bool(_HANDBACK_RE.search(last))
+
+
 def _last_user_is_question(last_user: str) -> bool:
     """
     Return True only when the last user message is a genuine question or
@@ -514,10 +560,8 @@ class FollowUpAgent(BaseAgent):
         # Real answer — reset cannot-answer streak.
         # Append a continuation prompt if the answer doesn't already end with one.
         logger.info(LOG_ANSWERED)
-        _continuation = pick(MSG_CONTINUATION)
-        _answer_stripped = answer.lower().rstrip("? ")
-        if not any(_answer_stripped.endswith(phrase.lower().rstrip("? ")) for phrase in MSG_CONTINUATION):
-            answer = f"{answer} {_continuation}"
+        if not _ends_with_continuation(answer):
+            answer = f"{answer} {pick(MSG_CONTINUATION)}"
         result = self.ask_member(state, answer)
         result["follow_up_turn_count"] = turn_count
         result["follow_up_last_question"] = last_user
