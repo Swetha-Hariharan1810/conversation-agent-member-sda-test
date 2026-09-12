@@ -23,6 +23,31 @@ MAX_SLOT_ATTEMPTS = 3
 MAX_TOOL_ITERATIONS = 5
 MAX_ROUTER_LOOPS = 25
 
+# ---------------------------------------------------------------------------
+# Deflected turns before a representative takes over (guards.py).
+#
+# A deflection is a turn the agent answers without the call advancing: an
+# interruption acknowledged, an off-topic request declined, a redirect back to
+# the question already on the table. Each of those was individually bounded or
+# not bounded at all — INTERRUPTION had no counter, and the off-topic counter
+# is keyed on the caller's phrasing (_normalize_request_key), so a caller who
+# rephrases gets a fresh budget every turn and the escalation never fires:
+#
+#     Caller  I need to add my son to the plan.
+#     AI      That's not something I can help with on this call. Back to where
+#             we were — could I get your date of birth?
+#     Caller  How do I get my son covered?
+#     AI      That's not something I can help with on this call. …
+#     Caller  Who do I talk to about adding a dependent?
+#     AI      That's not something I can help with on this call. …
+#
+# This is the budget across all of them, for the whole call: the call has to
+# get somewhere, and when it has not after this many deflections the honest
+# move is a representative, not another decline. Deliberately above
+# MAX_SLOT_ATTEMPTS so the per-guard limits still fire first where they apply.
+# ---------------------------------------------------------------------------
+MAX_DEFLECTED_TURNS = 4
+
 HISTORY_WINDOW_SIZE = 6
 
 # ---------------------------------------------------------------------------

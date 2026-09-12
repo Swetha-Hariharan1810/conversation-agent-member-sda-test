@@ -22,7 +22,13 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Optional
 
-from agent.core.constants import ABUSE_PATTERNS, INTERRUPTION_PATTERNS, MAX_SLOT_ATTEMPTS, SELF_HARM_PATTERNS
+from agent.core.constants import (
+    ABUSE_PATTERNS,
+    INTERRUPTION_PATTERNS,
+    MAX_DEFLECTED_TURNS,
+    MAX_SLOT_ATTEMPTS,
+    SELF_HARM_PATTERNS,
+)
 from agent.responses.static import (
     MSG_ABUSE_ESCALATION,
     MSG_OFFTOPIC_GLOBAL,
@@ -257,6 +263,8 @@ class ConversationGuardsMixin:
                     initiator="Agent",
                 )
             if guard == "INTERRUPTION":
+                if escalation := self._deflection_budget(state):
+                    return escalation
                 msg = await self._generate_guard_response(state, "INTERRUPTION")
                 return self.ask_member(state, msg)
             if guard == "OFFTOPIC_GLOBAL":
@@ -287,6 +295,8 @@ class ConversationGuardsMixin:
                                     f"{awaiting}_exhausted_offtopic",
                                     initiator="Agent",
                                 )
+                        if escalation := self._deflection_budget(state):
+                            return escalation
                         msg = await self._generate_guard_response(state, "OFFTOPIC_AGENT")
                         result = self.ask_member(state, msg)
                         result["offtopic_global_count"] = offtopic_count
@@ -297,6 +307,8 @@ class ConversationGuardsMixin:
                 return result
             if guard == "OFFTOPIC_AGENT":
                 if escalation := self._repeated_ignored_request(state, user_text):
+                    return escalation
+                if escalation := self._deflection_budget(state):
                     return escalation
                 msg = await self._generate_guard_response(state, "OFFTOPIC_AGENT")
                 return self.ask_member(state, msg)
@@ -329,9 +341,34 @@ class ConversationGuardsMixin:
                 initiator="Agent",
             )
         if self._detect_interruption(user_text):
+            if escalation := self._deflection_budget(state):
+                return escalation
             msg = await self._generate_guard_response(state, "INTERRUPTION")
             return self.ask_member(state, msg)
         return None
+
+    def _deflection_budget(self, state: State) -> Optional[dict]:
+        """Escalate once the call has been deflected MAX_DEFLECTED_TURNS times.
+
+        A deflection is a turn that says something and moves nothing: an
+        interruption acknowledged, an off-topic request declined, a redirect
+        back to the question already on the table. Every one of those paths
+        re-asks and waits, so on its own each is a loop with no exit —
+        INTERRUPTION carried no counter at all, and the off-topic counter is
+        keyed on the caller's exact phrasing, so rephrasing the same request
+        resets it (see MAX_DEFLECTED_TURNS).
+
+        One counter, shared by all three, for the whole call. It is checked
+        BEFORE the response is generated: there is no point spending a
+        generation call on a decline the caller is not going to be given.
+        """
+        return self.guard_loop_limit(
+            state,
+            "deflected_turns",
+            MAX_DEFLECTED_TURNS,
+            escalate_message=pick(MSG_REPEATED_REQUEST_ESCALATE),
+            escalate_reason="deflection_budget_exhausted",
+        )
 
     def _repeated_ignored_request(self, state: State, user_text: str) -> Optional[dict]:
         """Repeated-ignored-request guard (Phase 4): the second time the caller
