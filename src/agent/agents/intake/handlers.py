@@ -83,6 +83,73 @@ async def handle_unclear_intent(agent, state: State, result=None) -> dict:
     return agent.ask_member(state, msg)
 
 
+# ── Deterministic screens, applied before the classification is trusted ──────
+# Both of the tables these read have always known the answer; they were just
+# consulted AFTER the extraction LLM had already decided the intent, so they
+# only rescued the one misclassification each was gated on. Two calls that
+# should have ended in a static handoff instead got a generated question:
+#
+#     Caller  Hi, I'm trying to find a neurologist covered under my plan.
+#     AI      Of course — and what type of provider are you looking for today?
+#
+#     Caller  I want to appeal my claim denial
+#     AI      Claim appeals are handled on a different line. How can I help
+#             you today?
+#
+# The first was classified "unclear" rather than "provider_services", so the
+# neurologist keyword check — gated on provider_services — never ran, and
+# handle_unclear_intent generated an open re-ask. Asking a caller what type of
+# provider they want one turn after they said "neurologist" is the worst
+# sentence available. The second was not classified out_of_scope, so the
+# appeals routing entry never ran either, and the call carried on instead of
+# transferring.
+#
+# Neither needed a model to be right. A named specialty and a named appeal are
+# facts about the words, so they are read from the words.
+
+
+def screen_unsupported_provider_type(intent_value: str, utterance: str) -> str:
+    """The unsupported specialty named in ``utterance``, or "".
+
+    Runs for provider_services AND unclear: a misclassified specialty is still
+    a specialty. Deliberately NOT for claim_services or out_of_scope — "check
+    my claim for the neurologist visit" and "appeal my neurologist's denial"
+    name a specialty without asking us to search for one.
+    """
+    from agent.agents.intake.models import IntentTag
+
+    if intent_value not in (IntentTag.PROVIDER_SERVICES.value, IntentTag.UNCLEAR.value):
+        return ""
+    from agent.agents.intake.constants import PROVIDER_TYPE_UNKNOWN
+
+    named = _extract_provider_type_from_utterance(utterance)
+    return "" if named == PROVIDER_TYPE_UNKNOWN else named
+
+
+def screen_out_of_scope(intent_value: str, utterance: str) -> bool:
+    """Is this plainly an appeal or grievance, whatever the classifier said?
+
+    APPEAL_GRIEVANCE_KEYWORDS is the repo's existing definition of the topic —
+    follow_up already screens on it and reroutes such a caller back through
+    intake precisely so intake can hand them to the appeals team. Intake not
+    recognising them closed that loop onto itself.
+
+    Only appeals are screened here. The rest of OUT_OF_SCOPE_KEYWORD_ROUTING is
+    a routing table, not a classifier: "coverage", "payment" and "drug" all
+    appear in ordinary claims and provider calls, and screening on them would
+    take real work away from the flows that handle it.
+    """
+    import re
+
+    from agent.agents.follow_up.constants import APPEAL_GRIEVANCE_KEYWORDS
+    from agent.agents.intake.models import IntentTag
+
+    if intent_value == IntentTag.OUT_OF_SCOPE.value:
+        return False  # already going to the right handler
+    pattern = r"\b(?:" + "|".join(re.escape(k) for k in sorted(APPEAL_GRIEVANCE_KEYWORDS)) + r")\b"
+    return bool(re.search(pattern, utterance or "", re.IGNORECASE))
+
+
 def _match_out_of_scope_routing(utterance: str) -> tuple[str, str, str]:
     """
     Match the caller's utterance against the keyword routing table.
@@ -152,6 +219,15 @@ async def handle_out_of_scope_intent(agent, state: State, result=None) -> dict:
     return result
 
 
+# The five supported types, as the single words the suffix rule below would
+# otherwise catch. Cardiologist and Dermatologist both end in "ologist" and
+# Pediatrician in "iatrician", so without these the rule would escalate the
+# calls this system exists to serve.
+_SUPPORTED_SPECIALTIES: frozenset[str] = frozenset(
+    {"cardiologist", "dermatologist", "pediatrician", "orthopedist", "physician"}
+)
+
+
 def _extract_provider_type_from_utterance(utterance: str) -> str:
     """
     Extract a readable provider type label from the caller's raw utterance
@@ -206,6 +282,18 @@ def _extract_provider_type_from_utterance(utterance: str) -> str:
     for keyword, label in _UNSUPPORTED_KEYWORDS:
         if re.search(r"\b" + re.escape(keyword) + r"\b", t):
             return label
+
+    # A hand-written list of specialties is never finished — "proctologist" was
+    # not on it, so a caller asking for one fell through to the ordinary flow
+    # and got put through identity verification for a search that cannot serve
+    # them. English names most specialities with a handful of suffixes, so any
+    # word ending in one is a specialty, and any specialty that is not one of
+    # the five supported ones is unsupported. That inverts the list: it no
+    # longer has to anticipate the caller, only the exceptions.
+    for match in re.finditer(r"\b([a-z]+(?:ologist|iatrist|iatrician|opedist|ontist|ometrist))\b", t):
+        word = match.group(1)
+        if word not in _SUPPORTED_SPECIALTIES:
+            return word.capitalize()
     return "this provider type"
 
 
@@ -225,8 +313,10 @@ async def handle_unsupported_provider_type(agent, state: State, result=None) -> 
 
     from agent.agents.intake.constants import (
         LOG_PROVIDER_TYPE_UNSUPPORTED,
+        PROVIDER_TYPE_UNKNOWN,
         PROVIDER_TYPE_UNSUPPORTED_ESCALATION,
         PROVIDER_TYPE_UNSUPPORTED_REASON,
+        PROVIDER_TYPE_UNSUPPORTED_UNNAMED_ESCALATION,
     )
     from agent.utils import _last_user_msg
 
@@ -236,7 +326,14 @@ async def handle_unsupported_provider_type(agent, state: State, result=None) -> 
     last_user = _last_user_msg(messages)
 
     provider_type = _extract_provider_type_from_utterance(last_user)
-    msg = random.choice(PROVIDER_TYPE_UNSUPPORTED_ESCALATION).format(provider_type=provider_type)
+    if provider_type == PROVIDER_TYPE_UNKNOWN:
+        # The classifier says unsupported but the words name nothing we can read
+        # back ("I need a proctologist"). Naming it anyway produced "looking for
+        # a this provider type" — the decision is still right, so escalate with
+        # a message that does not try to name what it does not know.
+        msg = random.choice(PROVIDER_TYPE_UNSUPPORTED_UNNAMED_ESCALATION)
+    else:
+        msg = random.choice(PROVIDER_TYPE_UNSUPPORTED_ESCALATION).format(provider_type=provider_type)
 
     return agent.signal_escalate(
         state=state,
