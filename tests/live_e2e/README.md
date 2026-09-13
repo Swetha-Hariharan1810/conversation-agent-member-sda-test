@@ -141,7 +141,7 @@ LLM phrasing varies between runs, so assertions never compare exact sentences:
   reducer; agents carry the turn's events forward and `human_node` clears them
   once the pause has delivered them — see `core/metadata_events.py`, which also
   reports each captured field as `CallAgentField` and the call's end as
-  `AgentCallEnded`),
+  `AgentCallEnded`, and replays the whole record on the turn that ends the call),
 - **END / interrupt flags** — including hard-END paths (phone-not-confirmed,
   out-of-scope) where `is_interrupt=False` and `next_node=END` with **no**
   transfer event,

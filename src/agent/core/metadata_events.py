@@ -41,6 +41,11 @@ lose fields:
 is reported once per distinct value: re-confirming a slot on a later turn emits
 nothing, changing it (fax → email) emits the new value.
 
+Delivery is per turn: the pause hands over what that turn captured and the list
+clears. The turn that ends the call is the exception — it replays every field
+the call captured (replay_field_events) alongside the AgentCallEvent, so the
+end-of-call payload is the whole record rather than the last turn's leftovers.
+
 Sources, in the order their events are appended:
   1. slots confirmed on this turn (``SlotManagerMixin.slot_ok``), which is the
      only place a value that never reaches a state key shows up;
@@ -151,6 +156,19 @@ def transfer_event(detail: str, *, initiator: str = "Agent", reference_number: s
 def call_ended_event(detail: str = CALL_COMPLETE) -> dict:
     """The call finished with the agent."""
     return agent_call_event(CALL_ENDED, detail)
+
+
+def replay_field_events(emitted: Optional[Mapping[str, str]]) -> list[dict]:
+    """Every field the call captured, as CallAgentField events.
+
+    Built from emitted_fields, so it is the whole call in the order the fields
+    were first captured, each at the value that ended up sticking. Stamped on
+    the turn that ends the call: the per-turn events were delivered at their own
+    pauses and cleared, so without this the final payload would carry only the
+    last turn's fields, and whatever reads the call once it is over would see a
+    handful of them instead of the record.
+    """
+    return [field_event(field, value) for field, value in (emitted or {}).items() if value]
 
 
 def find_agent_call_event(events: Optional[Iterable[dict]], event_name: str) -> Optional[dict]:

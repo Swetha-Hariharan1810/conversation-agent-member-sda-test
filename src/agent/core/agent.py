@@ -30,6 +30,7 @@ from agent.core.metadata_events import (
     find_agent_call_event,
     is_call_ending,
     merge_events,
+    replay_field_events,
 )
 from agent.core.models import SlotAttempt
 from agent.core.signals import SignalsMixin
@@ -115,13 +116,20 @@ class BaseAgent(ConversationGuardsMixin, SlotManagerMixin, SignalsMixin, ABC):
             )
         carried = state.get("metadata_events") if isinstance(state, dict) else None
         stamped = merge_events(carried, result.get("metadata_events"), events)
-        # A transferred call did not end — it was handed to a representative,
-        # and escalation_agent routes to END on the way. Its AgentCallTransfer
-        # is the disposition, so AgentCallEnded is not reported alongside it.
-        if is_call_ending(result) and not find_agent_call_event(stamped, CALL_TRANSFER):
-            detail = call_ended_detail(merged)
-            stamped = merge_events(stamped, [call_ended_event(detail)])
-            self.logger.info("AgentCallEnded reported", extra={"agent": self.AGENT_NAME, "detail": detail})
+        if is_call_ending(result):
+            # Every earlier turn's events were delivered at their own pause and
+            # cleared, so the call ends by replaying the whole record — what the
+            # call captured, and how it finished — in one payload.
+            stamped = merge_events(replay_field_events(emitted), stamped)
+            # A transferred call did not end: it was handed to a representative,
+            # and escalation_agent routes to END on the way. Its AgentCallTransfer
+            # is the disposition, so AgentCallEnded is not reported alongside it.
+            if not find_agent_call_event(stamped, CALL_TRANSFER):
+                detail = call_ended_detail(merged)
+                stamped = merge_events(stamped, [call_ended_event(detail)])
+                self.logger.info(
+                    "AgentCallEnded reported", extra={"agent": self.AGENT_NAME, "detail": detail}
+                )
         result["metadata_events"] = stamped
         result["emitted_fields"] = emitted
         self._confirmed_this_turn = {}

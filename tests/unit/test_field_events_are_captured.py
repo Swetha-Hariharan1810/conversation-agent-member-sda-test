@@ -238,3 +238,41 @@ def test_a_transferred_call_does_not_also_report_that_it_ended():
     escalation = _escalate({})
     assert escalation["next_node"] == "END"
     assert _lifecycle(escalation) == ["AgentCallTransfer"]
+
+
+# ── The end of a call carries the whole call ─────────────────────────────────
+#
+# Delivery is per turn: a pause hands the platform what that turn captured and
+# human_node clears the list. That leaves the end of the call — the one payload
+# something reading the call afterwards actually looks at — holding the last
+# turn's leftovers. The ending turn replays the record instead.
+
+
+def test_the_ending_turn_replays_every_field_the_call_captured():
+    captured = {}
+    for turn in ({"call_intent": "claim_services"}, {"first_name": "Emily"}, {"member_id": "M123456"}):
+        update = _turn({"emitted_fields": captured, "metadata_events": []}, turn)
+        captured = update["emitted_fields"]  # each pause delivered and cleared
+
+    goodbye = _turn({"emitted_fields": captured, "metadata_events": []}, {"next_node": "END"})
+    assert _fields(goodbye) == [
+        ("intent", "claim_services"),
+        ("first_name", "Emily"),
+        ("member_id", "M123456"),
+    ]
+    assert _lifecycle(goodbye) == ["AgentCallEnded"]
+
+
+def test_a_replayed_field_is_not_reported_twice():
+    """The ending turn's own captures are already in the replay."""
+    update = _turn({}, {"call_intent": "claim_services", "next_node": "END"})
+    assert _fields(update) == [("intent", "claim_services")]
+
+
+def test_a_transferred_call_also_ends_with_the_whole_record():
+    staged = _turn({}, _Agent({}).signal_escalate({}, "", "requested", initiator="Caller"))
+    escalation = _escalate(
+        {"metadata_events": staged["metadata_events"], "emitted_fields": {"intent": "claim_services"}}
+    )
+    assert ("intent", "claim_services") in _fields(escalation)
+    assert _lifecycle(escalation) == ["AgentCallTransfer"]
