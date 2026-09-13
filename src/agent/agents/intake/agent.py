@@ -277,12 +277,8 @@ class IntakeAgent(BaseAgent):
         bridge["app_run_id"] = app_run_id
         bridge["resolved_intents"] = ["intake"]
         bridge["next_node"] = AgentNode.VERIFICATION.value
-        # bridge["metadata_events"] = [
-        #     {
-        #         "eventType": "CallAgentField",
-        #         "data": {"field": "call_intent", "value": intent_value},
-        #     }
-        # ]
+        # The intent field is reported by BaseAgent.stamp_field_events, which
+        # reads call_intent off this dict — see core/metadata_events.py.
         bridge["metadata_events"] = []
         if provider_type:
             bridge["provider_type"] = provider_type

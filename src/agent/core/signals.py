@@ -4,7 +4,11 @@ signals.py — SignalsMixin: all agent-to-LangGraph communication.
 Every method here returns a dict that LangGraph reads to:
   - resume at the right node (next_node)
   - pause for human input (is_interrupt)
-  - emit metadata events (slot confirmations, transfers)
+
+The dicts start metadata_events empty; the CallAgentField events for whatever
+the turn captured are stamped onto the finished dict by
+BaseAgent.stamp_field_events (see core/metadata_events.py), which runs after
+the handler has added its own keys on top of these.
 
 Rules:
   ask_member()      → is_interrupt=True,  next_node=AGENT_NAME
@@ -17,7 +21,7 @@ All return dicts include slot_attempts so LangGraph persists slot state.
 from __future__ import annotations
 
 import random
-from typing import List, Optional
+from typing import Optional
 
 from agent.core.signal import AgentSignal, AgentStatus
 from agent.orchestration.orchestration import AgentNode
@@ -97,7 +101,7 @@ class SignalsMixin:
         return self._build(state, message, sig, is_interrupt=is_interrupt)
 
     def signal_escalate(self, state: State, message: str, reason: str, *, initiator: str = "Agent") -> dict:
-        """Escalate to a human agent. Emits AgentCallTransfer metadata event."""
+        """Escalate to a human agent."""
         sig = AgentSignal(
             status=AgentStatus.ESCALATE,
             escalation_reason=reason,
@@ -133,7 +137,6 @@ class SignalsMixin:
             "is_interrupt": is_interrupt,
             "active_agent": self.AGENT_NAME,
             "slot_attempts": self.slots_dict(),
-            # "metadata_events": self._build_slot_events(),
             "metadata_events": [],
             "app_run_id": state.get("app_run_id", ""),
             "awaiting_slot": "",
@@ -157,16 +160,6 @@ class SignalsMixin:
             self._pending_ambiguous_resets = set()
         self._newly_confirmed = set()
         return result
-
-    def _build_slot_events(self) -> List[dict]:
-        events = []
-        for slot_name in self._newly_confirmed:
-            slot = self._slots.get(slot_name)
-            value = str(slot.last_value) if slot and slot.last_value is not None else ""
-            if value:
-                events.append({"eventType": "CallAgentField", "data": {"field": slot_name, "value": value}})
-                self.logger.info("Slot event emitted", extra={"field": slot_name, "value": value[:20]})
-        return events
 
     def _emergency(self, state: State, reason: str) -> dict:
         """Last-resort fallback for unhandled exceptions. Escalates with a reference number."""

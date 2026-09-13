@@ -126,7 +126,15 @@ def human_node(state: State) -> Command:
     logger.info(f"human_node: collected → {next_node}", extra={"len": len(value)})
     return Command(
         goto=next_node,
-        update={"is_interrupt": False, "messages": [{"role": "user", "content": value}]},
+        update={
+            "is_interrupt": False,
+            "messages": [{"role": "user", "content": value}],
+            # The pause delivered this turn's CallAgentField events, so the next
+            # turn starts with an empty list. metadata_events has no reducer and
+            # agents carry unflushed events forward (BaseAgent.stamp_field_events),
+            # so without this clear every later turn would repeat them all.
+            "metadata_events": [],
+        },
     )
 
 

@@ -18,9 +18,10 @@ No agent-specific logic lives here. This class is infrastructure only.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, Set
+from typing import Any, Dict, Set
 
 from agent.core.guards import ConversationGuardsMixin
+from agent.core.metadata_events import FIELD_EVENT_NAMES, build_field_events, merge_events
 from agent.core.models import SlotAttempt
 from agent.core.signals import SignalsMixin
 from agent.core.slot_manager import SlotManagerMixin
@@ -38,6 +39,9 @@ class BaseAgent(ConversationGuardsMixin, SlotManagerMixin, SignalsMixin, ABC):
         self.logger = get_logger(self.__class__.__name__)
         self._slots: Dict[str, SlotAttempt] = {}
         self._newly_confirmed: Set[str] = set()
+        # slot name → value confirmed on this turn, kept for the CallAgentField
+        # stamp in execute(); _newly_confirmed is cleared by the signal builders.
+        self._confirmed_this_turn: Dict[str, Any] = {}
         self._pending_ambiguous_resets: Set[str] = set()
         # A question the caller asked alongside this turn's answer, recorded by
         # the guard layer and cleared by whoever answers it. See execute().
@@ -73,7 +77,38 @@ class BaseAgent(ConversationGuardsMixin, SlotManagerMixin, SignalsMixin, ABC):
         drop a question, because no handler has to do anything to keep it.
         """
         result = await self.run(state)
-        return await self._answer_unanswered_side_question(state, result)
+        result = await self._answer_unanswered_side_question(state, result)
+        return self.stamp_field_events(state, result)
+
+    def stamp_field_events(self, state: State, result: dict) -> dict:
+        """Report every field this turn captured as a CallAgentField event.
+
+        Runs after run() and after the side-question pass, so it sees the update
+        dict as the graph will: the signal builders' keys plus everything the
+        handlers set on top of them (intake's call_intent, the claim fallback
+        values, the escalation reference — none of which are slots).
+
+        Events staged by earlier nodes of the same turn are carried forward.
+        metadata_events has no reducer, so an agent that completes and hands off
+        mid-turn would otherwise have its events overwritten by the next agent
+        before the pause delivers them; human_node clears the list once it has.
+        """
+        if not isinstance(result, dict):
+            return result
+        merged = {**(state or {}), **result}
+        captured = list(self._confirmed_this_turn.items())
+        captured += [(key, merged.get(key)) for key in FIELD_EVENT_NAMES if key in merged]
+        events, emitted = build_field_events(merged.get("emitted_fields"), captured)
+        if events:
+            self.logger.info(
+                "CallAgentField events emitted",
+                extra={"agent": self.AGENT_NAME, "fields": [e["data"]["field"] for e in events]},
+            )
+        carried = state.get("metadata_events") if isinstance(state, dict) else None
+        result["metadata_events"] = merge_events(carried, result.get("metadata_events"), events)
+        result["emitted_fields"] = emitted
+        self._confirmed_this_turn = {}
+        return result
 
     async def _answer_unanswered_side_question(self, state: State, result: dict) -> dict:
         """Put an unanswered side question's answer in front of this turn."""

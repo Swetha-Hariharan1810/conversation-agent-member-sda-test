@@ -53,6 +53,11 @@ class State(TypedDict):
     pending_intent: Optional[str]  # new intent staged by reset_for_new_intent (mid-call switch)
     ref_no: str
     slot_attempts: dict[str, SlotState]
+    # Field name → the value last reported as a CallAgentField metadata event.
+    # Keyed by the REPORTED field name (call_intent and intake's "intent" slot
+    # both report as "intent"), so a field is reported once per distinct value.
+    # See core/metadata_events.py.
+    emitted_fields: dict[str, str]
     conversation_context: Optional[ConversationContextDict]
 
     # ── Caller identity (set by verification) ────────────────────────────────
