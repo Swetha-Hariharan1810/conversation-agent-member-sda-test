@@ -138,10 +138,10 @@ LLM phrasing varies between runs, so assertions never compare exact sentences:
   the `AgentCallTransfer` event `detail`),
 - **metadata events** — `AgentCallTransfer` presence + `transferInitiator`,
   accumulated across the whole run (the `metadata_events` state key has no
-  reducer; agents carry the turn's events forward and `human_node` clears them
-  once the pause has delivered them — see `core/metadata_events.py`, which also
+  reducer, but agents carry the list forward and nothing clears it, so every
+  pause carries the call so far — see `core/metadata_events.py`, which also
   reports each captured field as `CallAgentField` and the call's end as
-  `AgentCallEnded`, and replays the whole record on the turn that ends the call),
+  `AgentCallEnded`),
 - **END / interrupt flags** — including hard-END paths (phone-not-confirmed,
   out-of-scope) where `is_interrupt=False` and `next_node=END` with **no**
   transfer event,

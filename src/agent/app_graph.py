@@ -124,17 +124,14 @@ def human_node(state: State) -> Command:
     if next_node in ("END", END):
         next_node = END
     logger.info(f"human_node: collected → {next_node}", extra={"len": len(value)})
+    # The pause does NOT clear metadata_events: every turn hands over the call so
+    # far, not just what it captured, so whatever reads the state at any pause
+    # sees the whole record. Agents carry the list forward and add to it
+    # (BaseAgent.stamp_metadata_events), and emitted_fields keeps a field from
+    # being reported twice at the same value, so the list grows once per capture.
     return Command(
         goto=next_node,
-        update={
-            "is_interrupt": False,
-            "messages": [{"role": "user", "content": value}],
-            # The pause delivered this turn's CallAgentField events, so the next
-            # turn starts with an empty list. metadata_events has no reducer and
-            # agents carry unflushed events forward (BaseAgent.stamp_metadata_events),
-            # so without this clear every later turn would repeat them all.
-            "metadata_events": [],
-        },
+        update={"is_interrupt": False, "messages": [{"role": "user", "content": value}]},
     )
 
 

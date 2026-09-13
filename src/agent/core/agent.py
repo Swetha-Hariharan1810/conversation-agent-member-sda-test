@@ -117,10 +117,11 @@ class BaseAgent(ConversationGuardsMixin, SlotManagerMixin, SignalsMixin, ABC):
         carried = state.get("metadata_events") if isinstance(state, dict) else None
         stamped = merge_events(carried, result.get("metadata_events"), events)
         if is_call_ending(result):
-            # Every earlier turn's events were delivered at their own pause and
-            # cleared, so the call ends by replaying the whole record — what the
-            # call captured, and how it finished — in one payload.
-            stamped = merge_events(replay_field_events(emitted), stamped)
+            # The record is what the call accumulated, in the order it happened;
+            # the replay only fills a gap, for a caller that cleared the list
+            # mid-call or read the fields out of emitted_fields instead. Either
+            # way the call ends carrying every field it captured.
+            stamped = merge_events(stamped, replay_field_events(emitted))
             # A transferred call did not end: it was handed to a representative,
             # and escalation_agent routes to END on the way. Its AgentCallTransfer
             # is the disposition, so AgentCallEnded is not reported alongside it.

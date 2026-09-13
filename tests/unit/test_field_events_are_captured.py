@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from agent.agents.escalation.agent import EscalationAgent
 from agent.core.agent import BaseAgent
 from agent.core.metadata_events import build_field_events, field_event
@@ -242,10 +244,10 @@ def test_a_transferred_call_does_not_also_report_that_it_ended():
 
 # ── The end of a call carries the whole call ─────────────────────────────────
 #
-# Delivery is per turn: a pause hands the platform what that turn captured and
-# human_node clears the list. That leaves the end of the call — the one payload
-# something reading the call afterwards actually looks at — holding the last
-# turn's leftovers. The ending turn replays the record instead.
+# The list is cumulative — agents carry it forward and the pause does not clear
+# it — so every pause hands over the call so far and the ending turn hands over
+# the whole call. The replay backs that up for anything that cleared the list
+# mid-call, which is what the first test here does.
 
 
 def test_the_ending_turn_replays_every_field_the_call_captured():
@@ -276,3 +278,26 @@ def test_a_transferred_call_also_ends_with_the_whole_record():
     )
     assert ("intent", "claim_services") in _fields(escalation)
     assert _lifecycle(escalation) == ["AgentCallTransfer"]
+
+
+def test_the_pause_does_not_clear_what_the_call_has_reported():
+    """Every pause hands over the call so far, not just the turn that just ran."""
+    import agent.app_graph as app_graph
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(app_graph, "interrupt", lambda _message: "yes")
+    try:
+        command = app_graph.human_node(
+            {
+                "messages": [{"role": "assistant", "content": "And your date of birth?"}],
+                "metadata_events": [field_event("first_name", "Emily")],
+                "next_node": "verification_agent",
+            }
+        )
+    finally:
+        monkey.undo()
+    assert "metadata_events" not in command.update
+
+    # So the next turn adds to the list rather than starting a new one.
+    turn = _turn({"metadata_events": [field_event("first_name", "Emily")]}, {"dob": "10/18/1990"})
+    assert _fields(turn) == [("first_name", "Emily"), ("dob", "10/18/1990")]

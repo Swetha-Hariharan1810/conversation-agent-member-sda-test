@@ -201,7 +201,10 @@ class RunRecorder:
         """Accumulate metadata events + escalation reasons at each graph pause.
 
         metadata_events has no reducer in State (each node overwrites it), so
-        events must be collected at every pause or they are lost.
+        agents carry the list forward themselves (core/metadata_events.py) and
+        every pause carries the call so far. Harvesting at each pause costs
+        nothing — events already seen are skipped — and keeps the recorder
+        correct if a run ends somewhere that does not carry the full list.
         """
         self.final_state = state
         for e in state.get("metadata_events") or []:

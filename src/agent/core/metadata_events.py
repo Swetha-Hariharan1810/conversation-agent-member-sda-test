@@ -41,10 +41,12 @@ lose fields:
 is reported once per distinct value: re-confirming a slot on a later turn emits
 nothing, changing it (fax → email) emits the new value.
 
-Delivery is per turn: the pause hands over what that turn captured and the list
-clears. The turn that ends the call is the exception — it replays every field
-the call captured (replay_field_events) alongside the AgentCallEvent, so the
-end-of-call payload is the whole record rather than the last turn's leftovers.
+The list is cumulative: agents carry it forward, the pause does not clear it,
+and emitted_fields keeps a field from being reported twice at the same value. So
+every pause hands over the call so far, and the turn that ends the call hands
+over the whole call — every field it captured, then the AgentCallEvent saying
+how it finished. replay_field_events backs that guarantee for a caller that
+cleared the list mid-call.
 
 Sources, in the order their events are appended:
   1. slots confirmed on this turn (``SlotManagerMixin.slot_ok``), which is the
@@ -162,11 +164,10 @@ def replay_field_events(emitted: Optional[Mapping[str, str]]) -> list[dict]:
     """Every field the call captured, as CallAgentField events.
 
     Built from emitted_fields, so it is the whole call in the order the fields
-    were first captured, each at the value that ended up sticking. Stamped on
-    the turn that ends the call: the per-turn events were delivered at their own
-    pauses and cleared, so without this the final payload would carry only the
-    last turn's fields, and whatever reads the call once it is over would see a
-    handful of them instead of the record.
+    were first captured, each at the value that ended up sticking. Stamped on the
+    turn that ends the call, where it is normally a no-op — the list is
+    cumulative — and where it is the whole record for anything that cleared the
+    list mid-call.
     """
     return [field_event(field, value) for field, value in (emitted or {}).items() if value]
 
