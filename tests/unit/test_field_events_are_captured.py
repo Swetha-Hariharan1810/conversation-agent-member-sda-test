@@ -21,8 +21,11 @@ from __future__ import annotations
 
 import asyncio
 
+from agent.agents.escalation.agent import EscalationAgent
 from agent.core.agent import BaseAgent
 from agent.core.metadata_events import build_field_events, field_event
+
+REF = "REF123456789"
 
 
 class _Agent(BaseAgent):
@@ -45,7 +48,20 @@ def _turn(state: dict, result: dict, confirmed: dict | None = None) -> dict:
 
 
 def _fields(update: dict) -> list[tuple[str, str]]:
-    return [(e["data"]["field"], e["data"]["value"]) for e in update["metadata_events"]]
+    return [
+        (e["data"]["field"], e["data"]["value"])
+        for e in update["metadata_events"]
+        if e["eventType"] == "CallAgentField"
+    ]
+
+
+def _lifecycle(update: dict) -> list[str]:
+    return [e["data"]["eventName"] for e in update["metadata_events"] if e["eventType"] == "AgentCallEvent"]
+
+
+def _escalate(state: dict) -> dict:
+    """One escalation_agent turn, on a call whose reference number is pinned."""
+    return asyncio.run(EscalationAgent.from_state(state).execute({"ref_no": REF, **state}))
 
 
 def test_slot_and_state_written_fields_are_both_reported():
@@ -143,3 +159,82 @@ def test_build_field_events_keys_dedupe_by_reported_name():
     )
     assert events == [field_event("intent", "provider_services")]
     assert emitted == {"intent": "provider_services"}
+
+
+# ── AgentCallEvent — how the call finished ───────────────────────────────────
+#
+# The transfer event was written and then commented out, on both halves: the
+# escalating agent's (reason + initiator) and escalation_agent's (the reference
+# number it mints). AgentCallEnded was never raised at all, so a call that ran
+# to its goodbye reported nothing about having ended.
+
+
+def test_a_goodbye_reports_the_call_ended_complete():
+    update = _turn({}, {"next_node": "END"})
+    assert update["metadata_events"] == [
+        {"eventType": "AgentCallEvent", "data": {"eventName": "AgentCallEnded", "detail": "complete"}}
+    ]
+
+
+def test_a_hard_end_reports_what_cut_the_call_short():
+    out_of_scope = _turn({}, {"next_node": "END", "escalation_reason": "out_of_scope"})
+    assert out_of_scope["metadata_events"][-1]["data"] == {
+        "eventName": "AgentCallEnded",
+        "detail": "out_of_scope",
+    }
+
+    non_member = _turn({}, {"next_node": "END", "caller_type": "provider", "caller_type_handled": True})
+    assert non_member["metadata_events"][-1]["data"] == {
+        "eventName": "AgentCallEnded",
+        "detail": "non-member caller: provider",
+    }
+
+    # A handler that ends the call for a reason of its own says so directly.
+    declined = _turn({}, {"next_node": "END", "call_end_detail": "phone_not_confirmed"})
+    assert declined["metadata_events"][-1]["data"] == {
+        "eventName": "AgentCallEnded",
+        "detail": "phone_not_confirmed",
+    }
+
+
+def test_escalating_reports_a_transfer_with_its_reason_and_initiator():
+    agent = _Agent({})
+    escalation = agent.signal_escalate({}, "One moment.", "abuse_detected", initiator="Caller")
+    assert escalation["metadata_events"] == [
+        {
+            "eventType": "AgentCallEvent",
+            "data": {
+                "eventName": "AgentCallTransfer",
+                "detail": "abuse_detected",
+                "transferInitiator": "Caller",
+            },
+        }
+    ]
+
+
+def test_the_reference_number_joins_the_transfer_already_reported():
+    """One transfer event per call — escalation_agent re-reports the same one."""
+    staged = _turn({}, _Agent({}).signal_escalate({}, "", "requested", initiator="Caller"))
+
+    escalation = _escalate({"metadata_events": staged["metadata_events"]})
+    transfers = [
+        e for e in escalation["metadata_events"] if e["data"].get("eventName") == "AgentCallTransfer"
+    ]
+    assert transfers == [
+        {
+            "eventType": "AgentCallEvent",
+            "data": {
+                "eventName": "AgentCallTransfer",
+                "detail": "requested",
+                "transferInitiator": "Caller",
+                "referenceNumber": REF,
+            },
+        }
+    ]
+
+
+def test_a_transferred_call_does_not_also_report_that_it_ended():
+    """It did not end — it was handed to a representative."""
+    escalation = _escalate({})
+    assert escalation["next_node"] == "END"
+    assert _lifecycle(escalation) == ["AgentCallTransfer"]

@@ -7,7 +7,7 @@ Every method here returns a dict that LangGraph reads to:
 
 The dicts start metadata_events empty; the CallAgentField events for whatever
 the turn captured are stamped onto the finished dict by
-BaseAgent.stamp_field_events (see core/metadata_events.py), which runs after
+BaseAgent.stamp_metadata_events (see core/metadata_events.py), which runs after
 the handler has added its own keys on top of these.
 
 Rules:
@@ -23,6 +23,7 @@ from __future__ import annotations
 import random
 from typing import Optional
 
+from agent.core.metadata_events import merge_events, transfer_event
 from agent.core.signal import AgentSignal, AgentStatus
 from agent.orchestration.orchestration import AgentNode
 from agent.state import State
@@ -101,7 +102,13 @@ class SignalsMixin:
         return self._build(state, message, sig, is_interrupt=is_interrupt)
 
     def signal_escalate(self, state: State, message: str, reason: str, *, initiator: str = "Agent") -> dict:
-        """Escalate to a human agent."""
+        """Escalate to a human agent. Reports the AgentCallTransfer event.
+
+        The event is raised here, where the reason and the initiator are known —
+        "Caller" when the caller asked for a representative, "Agent" when this
+        agent gave up the call. escalation_agent re-reports it with the reference
+        number it mints; merge_events keeps the two as one event.
+        """
         sig = AgentSignal(
             status=AgentStatus.ESCALATE,
             escalation_reason=reason,
@@ -111,18 +118,10 @@ class SignalsMixin:
         result = self._build(state, "", sig)
         result["next_node"] = AgentNode.ESCALATION.value
         result["escalation_pre_message"] = message.strip() if message else ""
-        # result["metadata_events"] = result.get("metadata_events", []) + [
-        #     {
-        #         "eventType": "AgentCallEvent",
-        #         "data": {
-        #             "eventName": "AgentCallTransfer",
-        #             "transferInitiator": initiator,
-        #             "detail": reason,
-        #         },
-        #     }
-        # ]
-
-        result["metadata_events"] = []
+        result["metadata_events"] = merge_events(
+            result.get("metadata_events"),
+            [transfer_event(reason, initiator=initiator)],
+        )
         return result
 
     # -------------------------------------------------------------------------

@@ -131,7 +131,7 @@ def human_node(state: State) -> Command:
             "messages": [{"role": "user", "content": value}],
             # The pause delivered this turn's CallAgentField events, so the next
             # turn starts with an empty list. metadata_events has no reducer and
-            # agents carry unflushed events forward (BaseAgent.stamp_field_events),
+            # agents carry unflushed events forward (BaseAgent.stamp_metadata_events),
             # so without this clear every later turn would repeat them all.
             "metadata_events": [],
         },

@@ -21,7 +21,16 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Set
 
 from agent.core.guards import ConversationGuardsMixin
-from agent.core.metadata_events import FIELD_EVENT_NAMES, build_field_events, merge_events
+from agent.core.metadata_events import (
+    CALL_TRANSFER,
+    FIELD_EVENT_NAMES,
+    build_field_events,
+    call_ended_detail,
+    call_ended_event,
+    find_agent_call_event,
+    is_call_ending,
+    merge_events,
+)
 from agent.core.models import SlotAttempt
 from agent.core.signals import SignalsMixin
 from agent.core.slot_manager import SlotManagerMixin
@@ -78,10 +87,10 @@ class BaseAgent(ConversationGuardsMixin, SlotManagerMixin, SignalsMixin, ABC):
         """
         result = await self.run(state)
         result = await self._answer_unanswered_side_question(state, result)
-        return self.stamp_field_events(state, result)
+        return self.stamp_metadata_events(state, result)
 
-    def stamp_field_events(self, state: State, result: dict) -> dict:
-        """Report every field this turn captured as a CallAgentField event.
+    def stamp_metadata_events(self, state: State, result: dict) -> dict:
+        """Report what this turn captured, and how the call finished.
 
         Runs after run() and after the side-question pass, so it sees the update
         dict as the graph will: the signal builders' keys plus everything the
@@ -105,7 +114,15 @@ class BaseAgent(ConversationGuardsMixin, SlotManagerMixin, SignalsMixin, ABC):
                 extra={"agent": self.AGENT_NAME, "fields": [e["data"]["field"] for e in events]},
             )
         carried = state.get("metadata_events") if isinstance(state, dict) else None
-        result["metadata_events"] = merge_events(carried, result.get("metadata_events"), events)
+        stamped = merge_events(carried, result.get("metadata_events"), events)
+        # A transferred call did not end — it was handed to a representative,
+        # and escalation_agent routes to END on the way. Its AgentCallTransfer
+        # is the disposition, so AgentCallEnded is not reported alongside it.
+        if is_call_ending(result) and not find_agent_call_event(stamped, CALL_TRANSFER):
+            detail = call_ended_detail(merged)
+            stamped = merge_events(stamped, [call_ended_event(detail)])
+            self.logger.info("AgentCallEnded reported", extra={"agent": self.AGENT_NAME, "detail": detail})
+        result["metadata_events"] = stamped
         result["emitted_fields"] = emitted
         self._confirmed_this_turn = {}
         return result
