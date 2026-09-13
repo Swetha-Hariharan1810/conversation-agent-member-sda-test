@@ -110,6 +110,12 @@ CALL_TRANSFER = "AgentCallTransfer"
 # AgentCallEnded's detail when nothing cut the call short.
 CALL_COMPLETE = "complete"
 
+# The placeholders this codebase writes for "no value here yet" — the
+# notification channels start "not_set" (reset_for_new_intent puts them back),
+# an unclassified caller is "unknown". A placeholder is not a capture, so it is
+# not reported; the field simply stays absent until something real fills it.
+SENTINEL_VALUES: frozenset[str] = frozenset({"not_set", "unknown"})
+
 # next_node values that mean the graph is done. "__end__" is langgraph's own END
 # sentinel; the agents write the plain string.
 _END_NODES = frozenset({"END", "__end__"})
@@ -118,15 +124,17 @@ _END_NODES = frozenset({"END", "__end__"})
 def _format_value(value: Any) -> str:
     """Render a state value as the event's string value, "" when not reportable.
 
-    Falsy values (unset slots, flags still False) are not a capture, and the
-    containers state uses for its own bookkeeping (slot_attempts, the parked
-    follow-ups, saved member context) are not fields.
+    Falsy values (unset slots, flags still False) are not a capture, nor are the
+    placeholders that stand in for one (SENTINEL_VALUES), and the containers
+    state uses for its own bookkeeping (slot_attempts, the parked follow-ups,
+    saved member context) are not fields.
     """
     if value is None or isinstance(value, (dict, list, tuple, set)):
         return ""
     if isinstance(value, bool):
         return "true" if value else ""
-    return str(value).strip()
+    text = str(value).strip()
+    return "" if text.lower() in SENTINEL_VALUES else text
 
 
 def field_event(field: str, value: str) -> dict:

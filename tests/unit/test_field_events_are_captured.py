@@ -301,3 +301,12 @@ def test_the_pause_does_not_clear_what_the_call_has_reported():
     # So the next turn adds to the list rather than starting a new one.
     turn = _turn({"metadata_events": [field_event("first_name", "Emily")]}, {"dob": "10/18/1990"})
     assert _fields(turn) == [("first_name", "Emily"), ("dob", "10/18/1990")]
+
+
+def test_a_placeholder_is_not_a_capture():
+    """ "not_set" is what the notification channels hold before anything is asked."""
+    unset = _turn({}, {"notification_channel": "not_set", "caller_type": "unknown"})
+    assert unset["metadata_events"] == []
+
+    chosen = _turn({}, {"notification_channel": "sms", "claim_notification_contact": "5551234567"})
+    assert _fields(chosen) == [("notification_channel", "sms"), ("notification_contact", "5551234567")]
