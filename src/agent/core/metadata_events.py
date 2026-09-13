@@ -79,19 +79,7 @@ FIELD_EVENT_NAMES: dict[str, str] = {
     "escalation_reference_number": "escalation_reference_number",
 }
 
-# Reported as a field, but never with the raw value in it. The platform gets
-# enough to match the record without the call metadata carrying a full SSN.
-MASKED_FIELDS: frozenset[str] = frozenset({"ssn"})
-
 EVENT_TYPE = "CallAgentField"
-
-
-def _mask(field: str, value: str) -> str:
-    """Mask a sensitive field's value, keeping the last four characters."""
-    if field not in MASKED_FIELDS:
-        return value
-    digits = "".join(c for c in value if c.isalnum())
-    return f"****{digits[-4:]}" if len(digits) > 4 else "****"
 
 
 def _format_value(value: Any) -> str:
@@ -128,7 +116,7 @@ def build_field_events(
     events: list[dict] = []
     for key, raw in captured:
         field = FIELD_EVENT_NAMES.get(key, key)
-        value = _mask(field, _format_value(raw))
+        value = _format_value(raw)
         if not value or emitted.get(field) == value:
             continue
         emitted[field] = value

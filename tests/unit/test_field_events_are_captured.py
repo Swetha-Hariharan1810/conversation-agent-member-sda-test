@@ -117,9 +117,9 @@ def test_events_survive_a_hand_off_inside_one_turn():
     assert _fields(verification) == [("intent", "provider_services"), ("first_name", "Emily")]
 
 
-def test_ssn_is_reported_without_its_value():
+def test_ssn_is_reported_with_the_value_the_lookup_used():
     update = _turn({}, {"ssn": "123-45-6789"})
-    assert _fields(update) == [("ssn", "****6789")]
+    assert _fields(update) == [("ssn", "123-45-6789")]
 
 
 def test_unset_and_non_field_state_is_not_reported():
