@@ -56,7 +56,9 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
 
     owned_slots: the slot names this read-back is about (e.g. ("fax",
     "fax_confirmed")). An update aimed at one of these is the caller declining
-    the value, not a request to route elsewhere.
+    the value, not a request to route elsewhere — and so is a VALUE extracted
+    for one of them, which answers the read-back outright and beats every case
+    below it.
     """
     if result is None or not (last_user or "").strip():
         return True
@@ -78,6 +80,37 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
     # is not a position on the value, whoever labelled the turn.
     if detect_wait_request(last_user):
         return True
+
+    # A position on the value beats anything else riding the turn.
+    #
+    #     AI      The fax number we have on file is 4155553211. Is this correct?
+    #     Caller  Yeah. That's kind of an old fax number. I'll give you a new
+    #             number if you can do that?
+    #     AI      No worries at all, I can update that for you. I'll send it to
+    #             4155553211 — is that the right fax number?
+    #
+    # The caller declined the number and offered a replacement in one breath.
+    # The extractor heard the decline — fax_confirmed "no" — and the tail was
+    # read as a side question, which used to be enough on its own to call the
+    # turn a non-answer. So the number the caller had just rejected was read
+    # back to them again, and the decline branch that would have asked for the
+    # new one was never reached.
+    #
+    # owned_slots was already the answer to this and only guarded the
+    # update_target test at the bottom, so the same intent put as a QUESTION
+    # rather than an update walked past it. A value extracted for one of these
+    # slots is the caller answering the read-back; the side question rides
+    # along in pending_side_answer and is answered in front of whatever is
+    # asked next.
+    #
+    # AMBIGUOUS and WAIT stay ahead of this deliberately: "I'm not sure" and
+    # "hold on" are not positions, whatever else the extractor filled in.
+    owned = {s.strip().lower() for s in owned_slots}
+    extracted = getattr(result, "extracted", None) or {}
+    if owned and any(
+        str(value or "").strip() for key, value in extracted.items() if str(key).strip().lower() in owned
+    ):
+        return False
 
     if getattr(result, "followup_disposition", None) in (
         FollowupDisposition.ANSWER,
