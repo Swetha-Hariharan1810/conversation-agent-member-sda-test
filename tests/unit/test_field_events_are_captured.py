@@ -35,18 +35,20 @@ class _Agent(BaseAgent):
 
     AGENT_NAME = "test_agent"
 
-    def __init__(self, result: dict, confirmed: dict | None = None) -> None:
+    def __init__(self, result: dict, confirmed: dict | None = None, captured: dict | None = None) -> None:
         super().__init__()
         self._result = result
         for name, value in (confirmed or {}).items():
             self.slot_ok(name, value)
+        for name, value in (captured or {}).items():
+            self.field_captured(name, value)
 
     async def run(self, state):  # noqa: D102 — the turn under test
         return dict(self._result)
 
 
-def _turn(state: dict, result: dict, confirmed: dict | None = None) -> dict:
-    return asyncio.run(_Agent(result, confirmed).execute(state))
+def _turn(state: dict, result: dict, confirmed: dict | None = None, captured: dict | None = None) -> dict:
+    return asyncio.run(_Agent(result, confirmed, captured).execute(state))
 
 
 def _fields(update: dict) -> list[tuple[str, str]]:
@@ -310,3 +312,57 @@ def test_a_placeholder_is_not_a_capture():
 
     chosen = _turn({}, {"notification_channel": "sms", "claim_notification_contact": "5551234567"})
     assert _fields(chosen) == [("notification_channel", "sms"), ("notification_contact", "5551234567")]
+
+
+# ── On file is not a capture ─────────────────────────────────────────────────
+# The member lookup hydrates the contact fields so the agents downstream have
+# them without a second Salesforce call, and the sweep reported every one: a
+# claim call that asked for a name, a member ID, a date of birth and a phone
+# confirmation reported a ZIP, a fax and an email it never mentioned — the
+# email while its own flow was still several turns short of asking for one.
+
+
+def test_a_field_the_record_carried_is_not_reported_until_the_call_asks():
+    update = _turn(
+        {"fields_on_file": ["zip_code", "fax", "email"]},
+        {
+            "call_intent": "claim_services",
+            "first_name": "James",
+            "zip_code": "78701",
+            "fax": "512-555-6199",
+            "email": "james.wilson@gmail.com",
+        },
+    )
+    assert _fields(update) == [("intent", "claim_services"), ("first_name", "James")]
+    # Still on file — the next turn must not report them either.
+    assert update["fields_on_file"] == ["zip_code", "fax", "email"]
+
+
+def test_capturing_an_on_file_field_reports_it_and_releases_the_mark():
+    """The fax the list actually went to is the call's, whoever supplied it."""
+    on_file = {"fields_on_file": ["zip_code", "fax", "email"]}
+
+    update = _turn(on_file, {"fax": "512-555-6199"}, captured={"fax": "512-555-6199"})
+    assert _fields(update) == [("fax", "512-555-6199")]
+    assert update["fields_on_file"] == ["zip_code", "email"]
+
+    # A slot the caller filled says the same thing.
+    confirmed = _turn(on_file, {"zip_code": "78701"}, confirmed={"zip_code": "78701"})
+    assert _fields(confirmed) == [("zip_code", "78701")]
+    assert confirmed["fields_on_file"] == ["fax", "email"]
+
+
+def test_the_call_that_ends_does_not_replay_what_was_only_on_file():
+    """The end-of-call replay is built from what was reported, not from state."""
+    update = _turn(
+        {"fields_on_file": ["zip_code", "fax", "email"]},
+        {
+            "first_name": "James",
+            "zip_code": "78701",
+            "fax": "512-555-6199",
+            "email": "james.wilson@gmail.com",
+            "next_node": "END",
+        },
+    )
+    assert _fields(update) == [("first_name", "James")]
+    assert _lifecycle(update) == ["AgentCallEnded"]

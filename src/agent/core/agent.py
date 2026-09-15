@@ -23,14 +23,15 @@ from typing import Any, Dict, Set
 from agent.core.guards import ConversationGuardsMixin
 from agent.core.metadata_events import (
     CALL_TRANSFER,
-    FIELD_EVENT_NAMES,
     build_field_events,
     call_ended_detail,
     call_ended_event,
     find_agent_call_event,
     is_call_ending,
     merge_events,
+    release_on_file,
     replay_field_events,
+    sweep_captured,
 )
 from agent.core.models import SlotAttempt
 from agent.core.signals import SignalsMixin
@@ -106,8 +107,12 @@ class BaseAgent(ConversationGuardsMixin, SlotManagerMixin, SignalsMixin, ABC):
         if not isinstance(result, dict):
             return result
         merged = {**(state or {}), **result}
+        # A field the member record put in state is on file, not captured, until
+        # the call actually asks about it — the sweep passes over those, and this
+        # turn's captures release the ones it asked about. See metadata_events.
+        on_file = merged.get("fields_on_file")
         captured = list(self._confirmed_this_turn.items())
-        captured += [(key, merged.get(key)) for key in FIELD_EVENT_NAMES if key in merged]
+        captured += sweep_captured(merged, on_file)
         events, emitted = build_field_events(merged.get("emitted_fields"), captured)
         if events:
             self.logger.info(
@@ -133,6 +138,7 @@ class BaseAgent(ConversationGuardsMixin, SlotManagerMixin, SignalsMixin, ABC):
                 )
         result["metadata_events"] = stamped
         result["emitted_fields"] = emitted
+        result["fields_on_file"] = release_on_file(on_file, self._confirmed_this_turn)
         self._confirmed_this_turn = {}
         return result
 

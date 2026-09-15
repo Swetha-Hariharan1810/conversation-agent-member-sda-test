@@ -152,6 +152,21 @@ class SlotManagerMixin:
         # keep the turn's captures for the CallAgentField stamp in execute().
         self._confirmed_this_turn[name] = value
 
+    def field_captured(self, name: str, value: Any) -> None:
+        """Report a value the call captured without collecting it as a slot.
+
+        A value the member record put in state is on file, not captured, and is
+        not reported until the call asks about it (core/metadata_events). Most
+        of those asks are slots and report through slot_ok; these are the ones
+        that are not — the phone read-back the caller confirms, the fax the
+        provider list actually went to, the email that got the upload link. The
+        value is stamped as a CallAgentField and its on-file mark released.
+
+        Unlike slot_ok this touches no slot bookkeeping: there is no slot being
+        filled, so there is no attempt to record and nothing to confirm.
+        """
+        self._confirmed_this_turn[name] = value
+
     def slot_fail(self, name: str, value: Any = None, is_asr: bool = False) -> None:
         """Record a failed slot attempt."""
         self.get_slot(name).record_attempt(value, success=False, is_asr=is_asr)

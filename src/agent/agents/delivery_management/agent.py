@@ -1027,6 +1027,11 @@ class DeliveryManagementAgent(BaseAgent):
         if fail := await dispatch_provider_list(self, state, delivery_method, confirmed_destination):
             return fail
 
+        # The list went to this address because the caller confirmed it or gave
+        # it — either way the call captured it, so it is reported even when the
+        # value is the one the member record had on file (core/metadata_events).
+        self.field_captured("fax" if delivery_method == "fax" else "email", confirmed_destination)
+
         logger.info(
             LOG_LIST_DISPATCHED,
             extra={"method": delivery_method, "dest_tail": confirmed_destination[-4:]},

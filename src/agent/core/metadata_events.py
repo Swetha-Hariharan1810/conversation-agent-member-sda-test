@@ -49,10 +49,12 @@ how it finished. replay_field_events backs that guarantee for a caller that
 cleared the list mid-call.
 
 Sources, in the order their events are appended:
-  1. slots confirmed on this turn (``SlotManagerMixin.slot_ok``), which is the
-     only place a value that never reaches a state key shows up;
+  1. what this turn captured — slots confirmed on it (``SlotManagerMixin.slot_ok``),
+     which is the only place a value that never reaches a state key shows up,
+     plus whatever an agent recorded by hand (``BaseAgent.field_captured``);
   2. a sweep of the merged call view (``{**state, **result}``) over
-     FIELD_EVENT_NAMES, which catches every direct state write.
+     FIELD_EVENT_NAMES, which catches every direct state write, minus the fields
+     standing at what the member record had on file (see "On file vs captured").
 """
 
 from __future__ import annotations
@@ -216,6 +218,85 @@ def call_ended_detail(merged: Mapping[str, Any]) -> str:
     if merged.get("caller_type_handled") and caller_type and caller_type != "member":
         return f"non-member caller: {caller_type}"
     return CALL_COMPLETE
+
+
+# ── On file vs captured ──────────────────────────────────────────────────────
+# The member record carries contact fields the call may never ask about. The
+# lookup hydrates them into state so an agent that needs one has it without a
+# second Salesforce call — delivery reads the fax on file to read it back, the
+# provider search starts from the ZIP on file, care coach reuses the email —
+# and the sweep above then reported every one of them, because a state key with
+# a value is indistinguishable from a capture. A claim call that asked for a
+# name, a member ID, a date of birth and a phone confirmation reported a ZIP, a
+# fax and an email it never mentioned, the email while its own flow was still
+# several turns short of asking for one.
+#
+# A value read off the record is what the plan has on file, not something this
+# call captured. So the hydrating agent marks those fields in
+# ``State["fields_on_file"]`` and the sweep passes them over. The mark is
+# released — and the field reported — the moment the call actually captures the
+# value: the caller supplies or confirms it through a slot (``slot_ok``), or the
+# agent that puts it to use records it (``BaseAgent.field_captured``) — the
+# phone read-back the caller confirms, the fax the provider list actually went
+# to, the email the upload link was sent to. Nothing else changes: a field the
+# call writes to state on its own is still reported by the sweep, marked or not,
+# because capture is what the mark is about, not the state key.
+#
+# Marks are keyed by reported field name, like emitted_fields.
+
+# What the member lookup hydrates from the record. relationship is not here:
+# the record's Relationship__c is the list of relationships the account allows
+# ("plan holder, subscriber, spouse"), not this caller's — only the caller's own
+# answer to "are you the subscriber or dependent?" belongs in that field.
+ON_FILE_FIELDS: tuple[str, ...] = ("phone_number", "zip_code", "fax", "email")
+
+
+def reported_field(key: str) -> str:
+    """The field name a state key or slot reports under."""
+    return FIELD_EVENT_NAMES.get(key, key)
+
+
+def mark_on_file(
+    existing: Optional[Iterable[str]],
+    keys: Iterable[str],
+    *,
+    emitted: Optional[Mapping[str, str]] = None,
+) -> list[str]:
+    """Add ``keys`` to the on-file marks, keeping order and dropping repeats.
+
+    A field the call has already reported (``emitted``) is never marked back on
+    file. A verified call re-enters verification with its record rebuilt out of
+    state, so the fax the caller gave would come back round as record data and
+    be filed away as something the call never said.
+    """
+    reported = set(emitted or {})
+    marks = list(existing or [])
+    for key in keys:
+        field = reported_field(key)
+        if field in reported or field in marks:
+            continue
+        marks.append(field)
+    return marks
+
+
+def release_on_file(existing: Optional[Iterable[str]], captured: Iterable[str]) -> list[str]:
+    """The marks that survive a turn — every field it captured is now the call's."""
+    taken = {reported_field(key) for key in captured}
+    return [field for field in (existing or []) if field not in taken]
+
+
+def sweep_captured(merged: Mapping[str, Any], on_file: Optional[Iterable[str]]) -> list[Tuple[str, Any]]:
+    """The reportable (key, value) pairs of the merged call view.
+
+    Every field event name present in the call, minus the ones standing at the
+    value the member record supplied and not yet captured by this call.
+    """
+    skip = set(on_file or [])
+    return [
+        (key, merged.get(key))
+        for key in FIELD_EVENT_NAMES
+        if key in merged and reported_field(key) not in skip
+    ]
 
 
 def build_field_events(

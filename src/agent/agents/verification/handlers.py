@@ -16,6 +16,7 @@ from agent.agents.verification.constants import (
     MSG_REASK_LAST_NAME,
 )
 from agent.conversation.context import ConversationContext
+from agent.core.metadata_events import ON_FILE_FIELDS, mark_on_file
 
 if TYPE_CHECKING:
     from agent.llm.schema import WorkerResult
@@ -358,9 +359,18 @@ async def collect_post_lookup(
         # that must not be stomped back to True here.
         interrupt.setdefault("member_status_verify", True)
         if member_record:
-            for field in ("phone_number", "zip_code", "fax", "email", "relationship"):
-                if val := member_record.get(field):
-                    interrupt[field] = val
+            # The record's contact fields are carried so the agents downstream
+            # have them without a second lookup — on file, not captured, so
+            # they are marked and stay unreported until the call asks (see
+            # core/metadata_events). relationship is not carried at all: the
+            # record's value is the account's list of allowed relationships,
+            # not this caller's, and the field holds the caller's own answer.
+            hydrated = [f for f in ON_FILE_FIELDS if member_record.get(f)]
+            for field in hydrated:
+                interrupt[field] = member_record[field]
+            interrupt["fields_on_file"] = mark_on_file(
+                state.get("fields_on_file"), hydrated, emitted=state.get("emitted_fields")
+            )
         return interrupt
 
     collected.update(post_collected)
@@ -392,6 +402,15 @@ async def collect_post_lookup(
     if "phone_confirmed" in post_collected:
         collected["phone_confirmed"] = True
         collected["phone_update_requested"] = post_collected["phone_confirmed"] == "no"
+        # The caller heard the number on file read back and said it was theirs.
+        # That is this call capturing the phone number, not merely carrying it,
+        # so it is reported now — a decline never reaches here (the branch
+        # above ends the call), and the claims pipeline is the only one that
+        # asks, so a flow that never puts the number to the caller still
+        # reports nothing.
+        phone_on_file = (member_record or {}).get("phone_number") or state.get("phone_number") or ""
+        if phone_on_file:
+            agent.field_captured("phone_number", phone_on_file)
 
     return None
 
