@@ -48,7 +48,7 @@ from agent.agents.notification_setup.handlers import (
 from agent.agents.notification_setup.llm import extract_notification_decision
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import carried_contact, is_not_an_answer, is_read_back_echo
+from agent.core.confirmation import carried_contact, confirms_value, is_not_an_answer, is_read_back_echo
 from agent.core.request_detection import reconcile_worker_result
 from agent.llm.config import get_extraction_llm
 from agent.llm.extractor import remaining_slots
@@ -356,7 +356,7 @@ class NotificationSetupAgent(BaseAgent):
                 ask_result["pending_phone"] = ""
                 return ask_result
 
-            if contact_conf == "yes":
+            if confirms_value(contact_conf, last_user, owned_slots=("phone", "phone_confirmed")):
                 done = await self._save_and_complete(state, "sms", pending_phone or phone_on_file)
                 done["pending_phone"] = ""
                 return done
@@ -500,7 +500,7 @@ class NotificationSetupAgent(BaseAgent):
                 ask_result["pending_email"] = ""
                 return ask_result
 
-            if contact_conf == "yes":
+            if confirms_value(contact_conf, last_user, owned_slots=("email", "email_confirmed")):
                 done = await self._save_and_complete(state, "email", pending_email or email_on_file)
                 done["pending_email"] = ""
                 return done

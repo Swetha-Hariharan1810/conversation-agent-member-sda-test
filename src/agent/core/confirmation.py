@@ -33,11 +33,27 @@ told us is wrong.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
 from agent.llm.schema import EventType, FollowupDisposition
 from agent.utils import detect_wait_request
+
+# Words that say "not this value" on a turn that reads one back. Not a list of
+# DECLINE PHRASINGS — that list is the one that never finishes, and the reason
+# _STALE_CONTACT_RE was deleted from delivery_management. This is the far
+# smaller set of words that name the ACT of changing a value, and it is
+# consulted only when the extractor reported no position at all (see below),
+# so a turn the model classified is never overruled by vocabulary.
+_CHANGE_INTENT_RE = re.compile(
+    r"\b(?:new|newer|change|changed|changing|update|updated|updating|"
+    r"different|another|old|older|outdated|obsolete|wrong|incorrect|"
+    r"switch|switched|replace|replaced|stale|moved|moving|relocated)\b"
+    r"|\bno\s+longer\b"
+    r"|\bnot\s+(?:right|correct|valid|current)\b",
+    re.IGNORECASE,
+)
 
 
 def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] = ()) -> bool:
@@ -56,7 +72,9 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
 
     owned_slots: the slot names this read-back is about (e.g. ("fax",
     "fax_confirmed")). An update aimed at one of these is the caller declining
-    the value, not a request to route elsewhere.
+    the value, not a request to route elsewhere — and so is a VALUE extracted
+    for one of them, which answers the read-back outright and beats every case
+    below it.
     """
     if result is None or not (last_user or "").strip():
         return True
@@ -79,17 +97,133 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
     if detect_wait_request(last_user):
         return True
 
+    # A position on the value beats anything else riding the turn.
+    #
+    #     AI      The fax number we have on file is 4155553211. Is this correct?
+    #     Caller  Yeah. That's kind of an old fax number. I'll give you a new
+    #             number if you can do that?
+    #     AI      No worries at all, I can update that for you. I'll send it to
+    #             4155553211 — is that the right fax number?
+    #
+    # The caller declined the number and offered a replacement in one breath.
+    # The extractor heard the decline — fax_confirmed "no" — and the tail was
+    # read as a side question, which used to be enough on its own to call the
+    # turn a non-answer. So the number the caller had just rejected was read
+    # back to them again, and the decline branch that would have asked for the
+    # new one was never reached.
+    #
+    # owned_slots was already the answer to this and only guarded the
+    # update_target test at the bottom, so the same intent put as a QUESTION
+    # rather than an update walked past it. A value extracted for one of these
+    # slots is the caller answering the read-back; the side question rides
+    # along in pending_side_answer and is answered in front of whatever is
+    # asked next.
+    #
+    # AMBIGUOUS and WAIT stay ahead of this deliberately: "I'm not sure" and
+    # "hold on" are not positions, whatever else the extractor filled in.
+    owned = {s.strip().lower() for s in owned_slots}
+    extracted = getattr(result, "extracted", None) or {}
+    if owned and any(
+        str(value or "").strip() for key, value in extracted.items() if str(key).strip().lower() in owned
+    ):
+        return False
+
+    # The same position, when the extractor reported no position at all.
+    #
+    #     AI      The fax number we have on file is 4155553211. Is this correct?
+    #     Caller  Yeah. That's kind of an old fax number. I'll give you a new
+    #             number if you can do that.
+    #     →       extracted {}, update_target null,
+    #             followup_query "I'll give you a new number if you can do that"
+    #
+    # The caller declined and offered a replacement, and the extractor reported
+    # the whole turn as a side question — no fax_confirmed, no update_target.
+    # Both of the outs the prompt gives it were unused, so the checks below saw
+    # a bare question and re-read the number the caller had just called old.
+    #
+    # This runs only after the two above have found nothing: a value for an
+    # owned slot returns before it, and AMBIGUOUS/WAIT return before that. So
+    # the words are consulted only when the model's classification gives the
+    # branch nothing to act on — the same exception, and the same reasoning, as
+    # detect_wait_request above.
+    #
+    # Reaching it wrongly costs a question that was coming anyway ("what fax
+    # number should we use?"). Not reaching it costs the caller being read back
+    # a value they rejected, and a provider list sent to it. The module
+    # docstring's asymmetry decides which way to lean.
+    # A request the extractor DID place decides on its own, and it decides
+    # both ways: aimed at an owned slot it is the caller declining the value
+    # (so an answer), aimed at anything else it routes to that owner (so not
+    # one). This moved above the follow-up checks with the same reasoning as
+    # the value test above — "can you use a different fax?" is a position on
+    # the fax, however the extractor labelled the sentence carrying it.
+    target = str(getattr(result, "update_target", "") or "").strip().lower()
+    if target:
+        return target not in owned
+
+    # Last, the caller's own words — and only here, where the extractor has
+    # placed nothing at all: no value, no target, no usable label.
+    #
+    #     AI      The fax number we have on file is 4155553211. Is this correct?
+    #     Caller  Yeah. That's kind of an old fax number. I'll give you a new
+    #             number if you can do that.
+    #     →       extracted {}, update_target null,
+    #             followup_query "I'll give you a new number if you can do that"
+    #
+    # The caller declined and offered a replacement, and the extractor reported
+    # the whole turn as a side question. Both outs the prompt gives it went
+    # unused, so the checks below saw a bare question and re-read the number
+    # the caller had just called old.
+    #
+    # Reaching this wrongly costs a question that was coming anyway ("what fax
+    # number should we use?"). Not reaching it reads a rejected value back and
+    # can send a provider list to it. The module docstring's asymmetry decides
+    # which way to lean.
+    if owned and _CHANGE_INTENT_RE.search(last_user or ""):
+        return False
+
     if getattr(result, "followup_disposition", None) in (
         FollowupDisposition.ANSWER,
         FollowupDisposition.PARK,
     ):
         return True
 
-    if str(getattr(result, "followup_query", "") or "").strip():
-        return True
+    return bool(str(getattr(result, "followup_query", "") or "").strip())
 
-    target = str(getattr(result, "update_target", "") or "").strip().lower()
-    return bool(target) and target not in {s.strip().lower() for s in owned_slots}
+
+def confirms_value(verdict: str, last_user: str, *, owned_slots: Sequence[str] = ()) -> bool:
+    """Is this normalized "yes" actually a confirmation of the value read back?
+
+    A caller who opens with the affirmative and then asks to change the value
+    has not confirmed it:
+
+        AI      Just to confirm — your ZIP code is 16783?
+        Caller  yeah. Actually, you know what? I want to update the ZIP code
+                because I moved to a new address. So can I do that now?
+        →       zip_confirmed "yes"
+
+    The leading affirmative acknowledges the question; the rest answers it. Six
+    branches read a bare "yes" and act on it immediately — dispatching a
+    provider list, writing a contact to Salesforce — BEFORE is_not_an_answer
+    is ever consulted, so nothing downstream of them can undo it. The caller's
+    update request is dropped without a word, and the list goes to the value
+    they were in the middle of replacing.
+
+    The extraction prompts are where this belongs and where it is now stated
+    for every slot (extraction/_confirmation_contract.md). This is the backstop
+    for when the model reads the first word and stops, which is what the
+    reported calls show: the cost of missing it is silent and lands on the
+    caller, and a prompt rule cannot be regression-tested.
+
+    Same narrow vocabulary as is_not_an_answer, and the same asymmetry behind
+    it: a "yes" wrongly rejected here costs the question the branch was about
+    to ask anyway, because the caller falls through to the decline path that
+    asks for the current value. A "yes" wrongly accepted sends the list
+    somewhere the caller has just told us not to.
+    """
+    if verdict != "yes":
+        return False
+    return not (owned_slots and _CHANGE_INTENT_RE.search(last_user or ""))
 
 
 def is_read_back_echo(new_value: Any, read_back: str, normalizer: Callable[[str], str]) -> bool:

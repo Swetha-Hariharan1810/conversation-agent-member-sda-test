@@ -1029,6 +1029,57 @@ class SlotManagerMixin:
         }
         return result
 
+    @staticmethod
+    def awaits_nothing(result: dict) -> bool:
+        """Did this interrupt finish its pipeline without asking anything?
+
+        ``awaiting_slot`` present and empty is the signature, and only one place
+        writes it: the tail of _handle_answered_followup, where it is set to
+        next_slot — "" once the pipeline has no slot left. Every retry, detour
+        and route path sets a real slot name there, and an escalation does not
+        set the key at all, so neither is mistaken for this.
+
+        That turn has already spoken (the follow-up answer, the correction
+        acknowledgement) but carries no question, because the static ask it
+        would have appended belongs to a slot this pipeline does not own. See
+        carry_unasked_turn for what the caller does about it.
+        """
+        return "awaiting_slot" in (result or {}) and not str(result.get("awaiting_slot") or "").strip()
+
+    def carry_unasked_turn(self, state: State, interrupt: dict) -> tuple[State, dict]:
+        """Carry a spoken-but-questionless interrupt into the agent's next ask.
+
+        A pipeline that is a strict subset of its agent's slot order cannot
+        append the ask that comes next: _handle_answered_followup picks the next
+        slot out of ``pending_slots``, which holds only this pipeline's slots.
+        A one-slot pipeline therefore always returns a turn that says something
+        and asks nothing, and the agent that returns it hands the caller a
+        statement — they have to say "okay" to get the question that should have
+        come in the same breath.
+
+        The answer is not to teach the pipeline about slots it does not own, but
+        to let the agent finish the turn: the interrupt's speech rides in
+        ``pending_side_answer``, which ask_member drains in front of whatever is
+        said next, and its state changes come back as a dict to merge under the
+        result. One turn, answer first, then the ask.
+
+        Returns (state, carry). The caller must merge ``carry`` UNDER the result
+        it returns, so the new ask owns messages and awaiting_slot.
+        """
+        spoken = ""
+        if self.speaks(interrupt):
+            spoken = str((interrupt.get("messages") or {}).get("content") or "")
+        state = {
+            **state,
+            "pending_side_answer": self.join_side_answer(str(state.get("pending_side_answer") or ""), spoken),
+        }
+        carry = {k: v for k, v in interrupt.items() if k not in ("messages", "awaiting_slot")}
+        self.logger.info(
+            "carry_unasked_turn: pipeline spoke without asking — finishing the turn in the agent",
+            extra={"agent": self.AGENT_NAME, "spoken": spoken},
+        )
+        return state, carry
+
     def build_coming_up(
         self,
         state: State,

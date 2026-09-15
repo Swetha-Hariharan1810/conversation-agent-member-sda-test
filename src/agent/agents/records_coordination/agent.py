@@ -47,7 +47,7 @@ from agent.agents.records_coordination.handlers import (
 from agent.agents.records_coordination.llm import extract_records_decision
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import carried_contact, is_not_an_answer, is_read_back_echo
+from agent.core.confirmation import carried_contact, confirms_value, is_not_an_answer, is_read_back_echo
 from agent.core.request_detection import reconcile_worker_result
 from agent.llm.config import get_extraction_llm
 from agent.llm.extractor import remaining_slots
@@ -350,7 +350,7 @@ class RecordsCoordinationAgent(BaseAgent):
                 return ask_result
 
             # Explicit yes → proceed
-            if contact_conf == "yes":
+            if confirms_value(contact_conf, last_user, owned_slots=("email", "email_confirmed")):
                 done = await self._send_link_and_proceed(state, pending_email or email_on_file)
                 done["pending_email"] = ""
                 return done

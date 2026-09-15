@@ -194,6 +194,16 @@ def detect_transfer_request(state: Any) -> bool:
 # from one place and every builder below composes the same copy.
 _FOLLOWUP_CONTRACT = "extraction/_followup_contract.md"
 
+# The read-back rules, composed into every extraction prompt from ONE file.
+#
+# Same story as the follow-up contract above, one layer over: the rules were
+# written inside delivery_management.md after a caller was read their own stale
+# fax back, and the six other prompts that collect a confirmation slot never got
+# them. So "yeah, but actually I want to change it" was a decline on the fax and
+# a confirmation on the ZIP, and the ZIP turn carried on to delivery with the
+# value the caller was replacing still on file.
+_CONFIRMATION_CONTRACT = "extraction/_confirmation_contract.md"
+
 
 @lru_cache(maxsize=36)
 def build_extraction_prompt(agent_prompt_file: str) -> str:
@@ -205,8 +215,10 @@ def build_extraction_prompt(agent_prompt_file: str) -> str:
     global_prompt = read_prompt("system/global_extraction.md")
     header = read_prompt("extraction/header.md")
     followup = read_prompt(_FOLLOWUP_CONTRACT)
+    confirmation = read_prompt(_CONFIRMATION_CONTRACT)
     agent = read_prompt(agent_prompt_file)
-    return f"{global_prompt}\n\n---\n\n{header}\n\n---\n\n{followup}\n\n---\n\n{agent}\n\n"
+    parts = (global_prompt, header, followup, confirmation, agent)
+    return "\n\n---\n\n".join(parts) + "\n\n"
 
 
 @lru_cache(maxsize=36)
@@ -225,8 +237,10 @@ def build_extraction_prompt_core(agent_prompt_file: str) -> str:
     global_prompt = read_prompt("system/global_extraction.md")
     core_header = read_prompt("extraction/header_core.md")
     followup = read_prompt(_FOLLOWUP_CONTRACT)
+    confirmation = read_prompt(_CONFIRMATION_CONTRACT)
     agent = read_prompt(agent_prompt_file)
-    return f"{global_prompt}\n\n---\n\n{core_header}\n\n---\n\n{followup}\n\n---\n\n{agent}\n\n"
+    parts = (global_prompt, core_header, followup, confirmation, agent)
+    return "\n\n---\n\n".join(parts) + "\n\n"
 
 
 @lru_cache(maxsize=36)
@@ -242,8 +256,10 @@ def build_extraction_prompt_extraction(agent_prompt_file: str) -> str:
     global_prompt = read_prompt("system/global_extraction.md")
     extraction_header = read_prompt("extraction/header_extraction.md")
     followup = read_prompt(_FOLLOWUP_CONTRACT)
+    confirmation = read_prompt(_CONFIRMATION_CONTRACT)
     agent = read_prompt(agent_prompt_file)
-    return f"{global_prompt}\n\n---\n\n{extraction_header}\n\n---\n\n{followup}\n\n---\n\n{agent}\n\n"
+    parts = (global_prompt, extraction_header, followup, confirmation, agent)
+    return "\n\n---\n\n".join(parts) + "\n\n"
 
 
 @lru_cache(maxsize=36)

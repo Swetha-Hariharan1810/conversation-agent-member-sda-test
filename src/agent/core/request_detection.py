@@ -348,7 +348,7 @@ def _recover_missed_followup(result: Any, last_user: str | None) -> Any:
     event = str(getattr(event_raw, "value", event_raw) or "").strip().lower()
     if event not in ("answered", "answered_with_followup"):
         return result
-    recovered = recover_side_question(last_user)
+    recovered = recover_side_question(last_user, getattr(result, "extracted", None))
     if not recovered:
         return result
     # The LLM stays primary: a question it reported that is about what the

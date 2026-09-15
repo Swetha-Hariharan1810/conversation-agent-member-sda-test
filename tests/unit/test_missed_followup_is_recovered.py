@@ -168,6 +168,114 @@ def test_the_veto_and_the_recovery_do_not_fight():
     assert result.event_type == EventType.ANSWERED_WITH_FOLLOWUP
 
 
+# ── a question about the answer just given is not a side question ────────────
+
+# The live turn this check was written for. The caller picked fax and then
+# asked, in the domain's own verb, for the thing they had just picked. The
+# extractor got it right — ANSWERED, followup_query null, exactly as
+# _followup_contract.md prescribes for "Fax please. Can you do that for me
+# today?" — and recovery overrode it, because _COURTESY_QUESTION_RE only knows
+# the pro-verb phrasings ("do/handle that") and this one says "just fax it".
+#
+# The cost is not a wasted call. FOLLOWUP_RESPOND's contract is to answer the
+# Followup: line, and the only honest answer to "can you fax it to me?" is a
+# confirmation — so the turn ships as a statement with no question in it.
+FAX_COURTESY = (
+    "two. I know fax and email is probably easier, but I might have to send it "
+    "to a couple of my people. So can you just fax it to me?"
+)
+
+
+@pytest.mark.parametrize(
+    "utterance, captured",
+    [
+        (FAX_COURTESY, "fax"),
+        # The same move, phrasings _COURTESY_QUESTION_RE does not list.
+        ("Fax. So can you just fax it to me?", "fax"),
+        ("Fax. Can you just fax it?", "fax"),
+        ("Email. Can you just email it to me?", "email"),
+    ],
+)
+def test_a_question_about_the_captured_value_is_not_recovered(utterance, captured):
+    assert recover_side_question(utterance, {"delivery_method": captured}) == ""
+
+
+@pytest.mark.parametrize(
+    "utterance, captured",
+    [
+        # Bare word-set membership, so a morphological variant is a different
+        # word: "faxing" is not "fax".
+        ("Fax. Would you mind faxing that?", "fax"),
+        # Any filler that survives the stopword list reads as a second topic.
+        ("Email. Could you email it over then?", "email"),
+        ("Fax. Send it by fax then?", "fax"),
+    ],
+)
+def test_the_gap_between_this_check_and_the_courtesy_list(utterance, captured):
+    """Pinned because it is a real gap, not because it is correct behaviour.
+
+    The subset test fires only when the question reduces to the captured value
+    and nothing else. These are the same courtesy move and they get through:
+    the check does no stemming, and one surviving filler word ("mind", "over",
+    "send") is indistinguishable from a second topic.
+
+    They are left through deliberately. Closing them means either stemming —
+    which widens the suppressed set for every slot at once — or adding words to
+    _STOPWORDS one production transcript at a time, which is the maintenance
+    burden this check exists to avoid. A recovered question costs a generation
+    call; a wrongly suppressed one is never heard again. The asymmetry says to
+    stay strict and leave the gap visible here.
+    """
+    assert recover_side_question(utterance, {"delivery_method": captured}) != ""
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        # Each brings a word the answer did not: a second topic, so a real side
+        # question even though it is about the same channel.
+        "Fax. How long does a fax take?",
+        "Fax. Is my fax number still on file?",
+        "Fax. Will I get a text when it is sent?",
+        "Fax. Can you send it by fax instead of email?",
+    ],
+)
+def test_a_real_question_near_the_captured_value_survives(utterance):
+    assert recover_side_question(utterance, {"delivery_method": "fax"}) != ""
+
+
+def test_the_check_is_skipped_when_nothing_was_captured():
+    """Subset against an empty set would suppress every recovery. Without the
+    turn's extracted values the gate must not fire at all."""
+    assert recover_side_question(FAX_COURTESY) != ""
+    assert recover_side_question(FAX_COURTESY, {}) != ""
+    assert recover_side_question(FAX_COURTESY, {"delivery_method": ""}) != ""
+
+
+def test_a_topic_introducing_statement_still_recovers():
+    """The gate gives way to the multi-segment rule: a recovery that carries a
+    statement in front of its question has a topic of its own by construction,
+    so it is never suppressed on the strength of the question alone."""
+    assert (
+        recover_side_question(
+            "Fax. I lost my ID card. Can you help me with a new one?",
+            {"delivery_method": "fax"},
+        )
+        != ""
+    )
+
+
+def test_the_live_fax_turn_stays_a_clean_answer():
+    """End to end: the extractor's correct ANSWERED survives reconcile, so the
+    turn takes the deterministic confirm path instead of FOLLOWUP_RESPOND."""
+    result = reconcile_worker_result(_answered("delivery_method", "fax"), FAX_COURTESY)
+
+    assert result.event_type == EventType.ANSWERED
+    assert result.followup_query is None
+    assert result.followup_disposition == FollowupDisposition.NONE
+    assert result.extracted == {"delivery_method": "fax"}
+
+
 # ── schema keys the model writes into extracted{} ────────────────────────────
 
 
