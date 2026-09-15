@@ -38,6 +38,7 @@ Keep this module dependency-free (core ↔ agents import safety).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -145,6 +146,24 @@ _CAPABILITY_TOPIC_ALIASES: dict[str, str] = {
     "benefits": "benefits",
     "benefit": "benefits",
     "my_benefits": "benefits",
+    # The parts a caller names instead of the word "benefits". Each one is
+    # answered by the same replay — _replay_benefits re-states the deductibles,
+    # the coinsurance and the out-of-pocket maximums together — so they are
+    # genuine vocabulary for this topic, not qualifiers of it.
+    "deductible": "benefits",
+    "deductibles": "benefits",
+    "coinsurance": "benefits",
+    "co insurance": "benefits",
+    "copay": "benefits",
+    "copays": "benefits",
+    "copayment": "benefits",
+    "co pay": "benefits",
+    "cost share": "benefits",
+    "out of pocket": "benefits",
+    "out of pocket max": "benefits",
+    "out of pocket maximum": "benefits",
+    "office visit": "benefits",
+    "office visits": "benefits",
     # Claims-path topics (Phase 7). notification_method canonicalizes to the
     # notification capability topic for redo/replay routing; slot-ownership
     # lookups (get_ownership) are unaffected — they key on the slot name.
@@ -159,10 +178,44 @@ _CAPABILITY_TOPIC_ALIASES: dict[str, str] = {
 }
 
 
+def _contained_topic(phrase: str) -> str:
+    """Topic of the longest alias appearing as whole words inside ``phrase``.
+
+    Callers qualify a topic far more often than they name it bare — "the PCP
+    benefits", "my office visit benefits", "that claim status" — and an exact
+    table cannot hold the qualifiers, because they are not a closed set. The
+    alias is what carries the meaning, so finding it inside the phrase is
+    enough; everything around it is the caller pointing at it.
+
+    Longest alias wins, so "claim status" beats "claim" and "provider list"
+    beats "list". Whole words only: "list" must not match inside "specialist".
+    Equal-length aliases resolve in table order, which is arbitrary but fixed —
+    no realistic target contains two topics at once.
+    """
+    best_alias = ""
+    best_topic = ""
+    for alias, topic in _CAPABILITY_TOPIC_ALIASES.items():
+        spelled = alias.replace("_", " ")
+        if len(spelled) <= len(best_alias):
+            continue
+        if re.search(rf"(?<!\w){re.escape(spelled)}(?!\w)", phrase):
+            best_alias, best_topic = spelled, topic
+    return best_topic
+
+
 def capability_topic(target: str) -> str:
-    """Canonical capability topic for an extraction-level target, or ""."""
+    """Canonical capability topic for an extraction-level target, or "".
+
+    Exact match first, so every target that resolved before resolves the same
+    way. Only a target that used to return "" — not routable, so parked or
+    degraded — can now resolve, and it resolves to a topic it literally names.
+    """
     key = (target or "").strip().lower().replace("-", "_")
-    return _CAPABILITY_TOPIC_ALIASES.get(key) or _CAPABILITY_TOPIC_ALIASES.get(key.replace("_", " "), "")
+    if not key:
+        return ""
+    spaced = key.replace("_", " ")
+    exact = _CAPABILITY_TOPIC_ALIASES.get(key) or _CAPABILITY_TOPIC_ALIASES.get(spaced)
+    return exact or _contained_topic(spaced)
 
 
 # Redo-topic equivalences: re-sending the provider list IS a delivery redo —
