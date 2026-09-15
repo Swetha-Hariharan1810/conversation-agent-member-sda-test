@@ -341,6 +341,11 @@ class ProviderSearchAgent(BaseAgent):
         """
         from agent.state import normalize_cross_agent_request
 
+        # The ZIP the search ran on is one the caller gave or confirmed — the
+        # one on file is never used unread. That makes it this call's capture
+        # rather than a value carried from the member record, so report it.
+        self.field_captured("zip_code", zip_code_used)
+
         pending = normalize_cross_agent_request(state)
         if pending.get("return_to_agent"):
             result = self.signal_complete(

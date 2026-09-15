@@ -263,6 +263,13 @@ class BenefitsAgent(BaseAgent):
                 )
                 return hop
 
+        if normalized in ("yes", "no"):
+            # The Care Coach answer decides what care_wellness does next —
+            # dispatch the program details or send the no-offer message — and
+            # survives in state only as flags, where a decline reads as False
+            # and never reports. Report the decision itself.
+            self.field_captured(_CARE_COACH_SLOT, normalized)
+
         if normalized == "yes":
             return self.signal_complete(
                 state,

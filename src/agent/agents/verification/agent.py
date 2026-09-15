@@ -68,6 +68,7 @@ from agent.agents.verification.pipelines import (
 )
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
+from agent.core.metadata_events import ON_FILE_FIELDS, mark_on_file
 from agent.core.request_detection import reconcile_worker_result
 from agent.llm.config import get_extraction_llm
 from agent.logger import get_logger
@@ -822,17 +823,7 @@ class VerificationAgent(BaseAgent):
         # raw storage format. E.g. state["dob"] = "04/12/1988" (MM/DD/YYYY from
         # normalize_dob) must NOT be overwritten by SF's ISO "1988-04-12", which
         # would cause validate_dob to fail on the next pipeline pass.
-        for key in (
-            "first_name",
-            "last_name",
-            "member_id",
-            "dob",
-            "relationship",
-            "zip_code",
-            "phone_number",
-            "fax",
-            "email",
-        ):
+        for key in ("first_name", "last_name", "member_id", "dob"):
             sf_val = record.get(key)
             if not sf_val:
                 continue
@@ -840,6 +831,25 @@ class VerificationAgent(BaseAgent):
             value_to_use = existing if existing else sf_val
             state[key] = value_to_use
             self.slot_ok(key, value_to_use)
+
+        # The contact fields ride along for the agents downstream, but the
+        # caller gave this lookup a name, a date of birth and an SSN — not a
+        # ZIP, a fax or an email. They are on file until the call asks about
+        # them (core/metadata_events); a value the caller did supply earlier
+        # keeps its own capture, since the mark is released, never re-applied.
+        # relationship is not carried: the record's value lists the
+        # relationships the account allows, not this caller's.
+        hydrated = []
+        for key in ON_FILE_FIELDS:
+            sf_val = record.get(key)
+            if not sf_val:
+                continue
+            if not state.get(key):
+                state[key] = sf_val
+                hydrated.append(key)
+        state["fields_on_file"] = mark_on_file(
+            state.get("fields_on_file"), hydrated, emitted=state.get("emitted_fields")
+        )
 
         state["member_status_verify"] = True
         state["ssn_fallback_stage"] = ""
@@ -1258,7 +1268,6 @@ class VerificationAgent(BaseAgent):
             state = {
                 **state,
                 "phone_number": member_record.get("phone_number") or state.get("phone_number", ""),
-                "relationship": member_record.get("relationship") or state.get("relationship", ""),
             }
 
         # Phone confirmation (claims) or relationship (provider)
@@ -1644,16 +1653,31 @@ class VerificationAgent(BaseAgent):
     # -------------------------------------------------------------------------
 
     def _member_record_from_state(self, state: State) -> dict:
-        """Reconstruct a minimal member record from already-verified state fields."""
-        return {k: state.get(k, "") for k in ["phone_number", "zip_code", "fax", "email", "relationship"]}
+        """Reconstruct a minimal member record from already-verified state fields.
+
+        relationship is not part of it: the record's value is the account's list
+        of allowed relationships, which nothing reads any more, and the state
+        field holds what the caller answered — putting that back through
+        _signal_verified as record data would mark a capture as on file.
+        """
+        return {k: state.get(k, "") for k in ON_FILE_FIELDS}
 
     def _signal_verified(self, state: State, collected: dict, member_record: dict | None) -> dict:
         """Emit COMPLETE signal with all verified identity fields as context updates."""
         context_updates = {"member_status_verify": True, "verification_restart_index": 0, **collected}
         if member_record:
-            for field in ["zip_code", "phone_number", "fax", "email", "relationship"]:
-                if val := member_record.get(field):
-                    context_updates[field] = val
+            # Contact fields the record carried, marked on file so they are not
+            # reported as things this call captured — the agents downstream read
+            # them, the platform hears about them once the call asks. A field
+            # this call already reported keeps its report (mark_on_file skips
+            # it), which matters on re-entry: a verified call rebuilds its
+            # record out of state, captures and all.
+            hydrated = [f for f in ON_FILE_FIELDS if member_record.get(f)]
+            for field in hydrated:
+                context_updates[field] = member_record[field]
+            context_updates["fields_on_file"] = mark_on_file(
+                state.get("fields_on_file"), hydrated, emitted=state.get("emitted_fields")
+            )
             # Pass prefetched benefits fields into state so benefits_agent can skip
             # its own Salesforce call. Fields are only written if non-empty strings
             # to avoid overwriting existing state values with empty placeholders.
