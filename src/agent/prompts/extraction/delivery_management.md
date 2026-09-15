@@ -30,6 +30,16 @@ does not change the intent:
   "Is it possible to send it to another number?" → fax_confirmed "no"
   "Can you send it to a different email?"    → email_confirmed "no"
 
+This includes OFFER-FORM declines — the caller proposing to supply a new value
+rather than stating that the old one is wrong:
+  "I'll give you a new number if you can do that." → fax_confirmed "no"
+  "I can give you a better one."                   → fax_confirmed "no"
+  "Let me give you the current one."               → fax_confirmed "no"
+A proposal to change the value being confirmed IS the answer to the read-back.
+Never report such an utterance only as followup_query with fax_confirmed/
+email_confirmed omitted: reported that way it reads as a caller who took no
+position, and the same number gets read back to them a second time.
+
 Key distinction: "that's my old email" is a DECLINE (the caller knows it
     is wrong). "I'm not sure if that's still active" is AMBIGUOUS (the caller
     does not know). Only use ambiguous when the caller genuinely cannot

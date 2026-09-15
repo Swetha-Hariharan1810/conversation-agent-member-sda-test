@@ -58,6 +58,13 @@ Two mistakes to avoid, both seen in production:
 - Do NOT turn a topic the AI raised into a follow-up. If the AI said "I can help
   with your claim status" two turns ago, "help with claim status" is not
   something the caller asked — it is something you read in your own history.
+- Do NOT turn a caller's decline into a follow-up. When the AI has just read a
+  value back for confirmation, anything that proposes changing that value —
+  "can you use a different one?", "I'll give you a new number if you can do
+  that" — is the ANSWER to the read-back, not a question riding alongside it.
+  Answer the confirmation field; leave `followup_query` null. Reported as a
+  side question it reads as a caller who took no position, and the value they
+  just rejected is read back to them again.
 
 | Caller just said                        | event_type | followup_query |
 |-----------------------------------------|------------|----------------|
@@ -67,6 +74,7 @@ Two mistakes to avoid, both seen in production:
 | "November 5th, 1992."                   | answered   | null           |
 | "Smith — sorry, bad line."              | answered   | null           |
 | "Fax please. Can you do that for me today?" | answered | null — the question is about the answer just given |
+| "Yeah, that's my old fax. I'll give you a new number if you can do that." | answered | null — offering a replacement IS the answer to the read-back |
 | "90210, and when will I get the list?"  | answered_with_followup | "when will the list arrive" |
 | "No. But I lost my ID card. Can you help me with a new one?" | answered_with_followup | "I lost my ID card, can you help me get a new one" |
 

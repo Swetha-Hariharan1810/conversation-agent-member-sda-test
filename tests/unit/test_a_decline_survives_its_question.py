@@ -42,6 +42,9 @@ from agent.core.confirmation import is_not_an_answer
 from agent.llm.schema import EventType, FollowupDisposition, WorkerResult
 
 SAID = "Yeah. That's kind of an old fax number. I'll give you a new number if you can do that?"
+# A side question with no change-intent word in it: the caller took no position
+# on the number, in the extractor's labels OR in their own words.
+NEUTRAL = "Will I get this by email?"
 OWNED = ("fax", "fax_confirmed")
 
 
@@ -69,9 +72,31 @@ def test_a_replacement_value_is_a_position_too():
 
 
 def test_the_side_question_alone_is_still_not_an_answer():
-    """Nothing extracted for an owned slot, so the caller took no position and
-    the read-back is still owed one."""
-    assert is_not_an_answer(_result(extracted={}), SAID, owned_slots=OWNED) is True
+    """Nothing extracted for an owned slot and nothing in the words, so the
+    caller took no position and the read-back is still owed one."""
+    assert is_not_an_answer(_result(extracted={}), NEUTRAL, owned_slots=OWNED) is True
+
+
+def test_the_words_carry_the_position_when_the_extractor_reports_none():
+    """The reported shape: no fax_confirmed, no update_target, the whole turn
+    labelled a side question. Both outs the prompt gives the extractor went
+    unused, so the caller's own words are the last thing left."""
+    assert is_not_an_answer(_result(extracted={}), SAID, owned_slots=OWNED) is False
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "That's my old one.",
+        "That number has changed.",
+        "Can you use a different fax?",
+        "That's not right anymore.",
+        "We switched providers last spring.",
+        "I'll give you a new number if you can do that.",
+    ],
+)
+def test_change_intent_in_the_callers_words_is_a_position(said):
+    assert is_not_an_answer(_result(extracted={}), said, owned_slots=OWNED) is False
 
 
 # ── what must not change ─────────────────────────────────────────────────────
@@ -104,17 +129,27 @@ def test_an_update_aimed_elsewhere_still_routes():
 def test_a_value_for_an_unowned_slot_is_not_a_position():
     """Only the slots this read-back is about count."""
     result = _result(extracted={"zip_code": "78701"})
-    assert is_not_an_answer(result, SAID, owned_slots=OWNED) is True
+    assert is_not_an_answer(result, NEUTRAL, owned_slots=OWNED) is True
 
 
 def test_an_empty_value_is_not_a_position():
     result = _result(extracted={"fax_confirmed": "", "fax": "   "})
-    assert is_not_an_answer(result, SAID, owned_slots=OWNED) is True
+    assert is_not_an_answer(result, NEUTRAL, owned_slots=OWNED) is True
 
 
 def test_no_owned_slots_is_unchanged():
-    """Callers that pass no owned_slots keep the old behaviour exactly."""
+    """Callers that pass no owned_slots keep the old behaviour exactly — the
+    words are never consulted without them."""
     assert is_not_an_answer(_result(extracted={"fax_confirmed": "no"}), SAID) is True
+    assert is_not_an_answer(_result(extracted={}), SAID) is True
+
+
+def test_a_request_for_another_slot_still_routes():
+    """The change-intent words must not swallow a request aimed elsewhere:
+    "Actually my last name is wrong" during a fax read-back is last_name's,
+    and carries "wrong". The extractor placed a target, so it decides."""
+    result = _result(extracted={}, update_target="last_name")
+    assert is_not_an_answer(result, "Actually my last name is wrong.", owned_slots=OWNED) is True
 
 
 def test_a_missing_result_is_still_not_an_answer():

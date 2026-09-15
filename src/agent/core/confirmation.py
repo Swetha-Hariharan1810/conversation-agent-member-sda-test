@@ -33,11 +33,27 @@ told us is wrong.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
 from agent.llm.schema import EventType, FollowupDisposition
 from agent.utils import detect_wait_request
+
+# Words that say "not this value" on a turn that reads one back. Not a list of
+# DECLINE PHRASINGS — that list is the one that never finishes, and the reason
+# _STALE_CONTACT_RE was deleted from delivery_management. This is the far
+# smaller set of words that name the ACT of changing a value, and it is
+# consulted only when the extractor reported no position at all (see below),
+# so a turn the model classified is never overruled by vocabulary.
+_CHANGE_INTENT_RE = re.compile(
+    r"\b(?:new|newer|change|changed|changing|update|updated|updating|"
+    r"different|another|old|older|outdated|obsolete|wrong|incorrect|"
+    r"switch|switched|replace|replaced|stale)\b"
+    r"|\bno\s+longer\b"
+    r"|\bnot\s+(?:right|correct|valid|current)\b",
+    re.IGNORECASE,
+)
 
 
 def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] = ()) -> bool:
@@ -112,17 +128,67 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
     ):
         return False
 
+    # The same position, when the extractor reported no position at all.
+    #
+    #     AI      The fax number we have on file is 4155553211. Is this correct?
+    #     Caller  Yeah. That's kind of an old fax number. I'll give you a new
+    #             number if you can do that.
+    #     →       extracted {}, update_target null,
+    #             followup_query "I'll give you a new number if you can do that"
+    #
+    # The caller declined and offered a replacement, and the extractor reported
+    # the whole turn as a side question — no fax_confirmed, no update_target.
+    # Both of the outs the prompt gives it were unused, so the checks below saw
+    # a bare question and re-read the number the caller had just called old.
+    #
+    # This runs only after the two above have found nothing: a value for an
+    # owned slot returns before it, and AMBIGUOUS/WAIT return before that. So
+    # the words are consulted only when the model's classification gives the
+    # branch nothing to act on — the same exception, and the same reasoning, as
+    # detect_wait_request above.
+    #
+    # Reaching it wrongly costs a question that was coming anyway ("what fax
+    # number should we use?"). Not reaching it costs the caller being read back
+    # a value they rejected, and a provider list sent to it. The module
+    # docstring's asymmetry decides which way to lean.
+    # A request the extractor DID place decides on its own, and it decides
+    # both ways: aimed at an owned slot it is the caller declining the value
+    # (so an answer), aimed at anything else it routes to that owner (so not
+    # one). This moved above the follow-up checks with the same reasoning as
+    # the value test above — "can you use a different fax?" is a position on
+    # the fax, however the extractor labelled the sentence carrying it.
+    target = str(getattr(result, "update_target", "") or "").strip().lower()
+    if target:
+        return target not in owned
+
+    # Last, the caller's own words — and only here, where the extractor has
+    # placed nothing at all: no value, no target, no usable label.
+    #
+    #     AI      The fax number we have on file is 4155553211. Is this correct?
+    #     Caller  Yeah. That's kind of an old fax number. I'll give you a new
+    #             number if you can do that.
+    #     →       extracted {}, update_target null,
+    #             followup_query "I'll give you a new number if you can do that"
+    #
+    # The caller declined and offered a replacement, and the extractor reported
+    # the whole turn as a side question. Both outs the prompt gives it went
+    # unused, so the checks below saw a bare question and re-read the number
+    # the caller had just called old.
+    #
+    # Reaching this wrongly costs a question that was coming anyway ("what fax
+    # number should we use?"). Not reaching it reads a rejected value back and
+    # can send a provider list to it. The module docstring's asymmetry decides
+    # which way to lean.
+    if owned and _CHANGE_INTENT_RE.search(last_user or ""):
+        return False
+
     if getattr(result, "followup_disposition", None) in (
         FollowupDisposition.ANSWER,
         FollowupDisposition.PARK,
     ):
         return True
 
-    if str(getattr(result, "followup_query", "") or "").strip():
-        return True
-
-    target = str(getattr(result, "update_target", "") or "").strip().lower()
-    return bool(target) and target not in {s.strip().lower() for s in owned_slots}
+    return bool(str(getattr(result, "followup_query", "") or "").strip())
 
 
 def is_read_back_echo(new_value: Any, read_back: str, normalizer: Callable[[str], str]) -> bool:
