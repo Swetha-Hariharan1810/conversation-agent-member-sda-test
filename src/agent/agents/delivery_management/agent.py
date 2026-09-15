@@ -939,6 +939,12 @@ class DeliveryManagementAgent(BaseAgent):
         benefits_conf = normalize_yes_no(benefits_raw) if benefits_raw else ""
 
         if benefits_conf in ("yes", "no"):
+            # The answer to "would you like me to go over your benefits?" is a
+            # decision the call captured. It reaches state only as the flags it
+            # sets (benefits_offer_made, proactive_offer_available), and a flag
+            # that is False is not reportable — a decline would be silence. So
+            # the yes/no itself is reported, under the slot the flow asks it as.
+            self.field_captured("benefits_response", benefits_conf)
             return self.signal_complete(
                 state,
                 message="",
