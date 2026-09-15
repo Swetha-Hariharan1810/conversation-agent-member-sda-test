@@ -332,6 +332,7 @@ class DeliveryManagementAgent(BaseAgent):
         # ── COLLECT DELIVERY METHOD ──────────────────────────────────────────
         if not delivery_method:
             collected: dict = {"delivery_method": ""}
+            resumed: dict = {}
             if interrupt := await self._delivery_method_pipeline.collect(
                 state, messages, collected, decision=result
             ):
@@ -341,6 +342,11 @@ class DeliveryManagementAgent(BaseAgent):
                 # delivery_method answer it is. When redo is active and the slot
                 # was nonetheless confirmed (collected dict is populated), bypass
                 # the decline and proceed to contact confirmation.
+                #
+                # This guard goes first and DISCARDS what the interrupt said:
+                # the decline text is about a change the caller never asked for,
+                # so it must not be carried forward the way carry_unasked_turn
+                # carries a genuine answer below.
                 if redo_active and collected.get("delivery_method"):
                     delivery_method = collected["delivery_method"]
                     logger.info(
@@ -348,6 +354,8 @@ class DeliveryManagementAgent(BaseAgent):
                         extra={"delivery_method": delivery_method},
                     )
                     # Fall through to _ask_contact_confirmation below
+                elif collected.get("delivery_method") and self.awaits_nothing(interrupt):
+                    state, resumed = self.carry_unasked_turn(state, interrupt)
                 else:
                     return interrupt
             delivery_method = collected["delivery_method"]
@@ -362,11 +370,17 @@ class DeliveryManagementAgent(BaseAgent):
                     LOG_CONTACT_UPDATED,
                     extra={"method": delivery_method, "source": "given with the channel"},
                 )
-                return self._confirm_carried_contact(
-                    state, delivery_method, carried, fax_on_file, email_on_file
-                )
+                return {
+                    **resumed,
+                    **self._confirm_carried_contact(
+                        state, delivery_method, carried, fax_on_file, email_on_file
+                    ),
+                }
             # Otherwise confirm what is on file.
-            return self._ask_contact_confirmation(state, delivery_method, fax_on_file, email_on_file)
+            return {
+                **resumed,
+                **self._ask_contact_confirmation(state, delivery_method, fax_on_file, email_on_file),
+            }
 
         # ── FAX CONFIRMATION ─────────────────────────────────────────────────
         if current_awaiting == "fax_confirmed":
