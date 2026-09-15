@@ -294,6 +294,48 @@ def _content_words(text: str | None) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]+", (text or "").lower()) if w not in _STOPWORDS and len(w) > 2}
 
 
+def _restates_the_answer(recovered: str, extracted: dict | None) -> bool:
+    """Does the recovered question talk about nothing but the answer just given?
+
+    The courtesy list above is a closed set of PHRASINGS — "can you do that",
+    "does that work". It cannot cover the same move made with the domain's own
+    verb, and production found that gap:
+
+        AI      Would you prefer to receive it by fax or email?
+        Caller  Two. I know fax and email is probably easier, but I might have
+                to send it to a couple of my people. So can you just fax it to
+                me?
+        →       delivery_method=fax, and "So can you just fax it to me?"
+                recovered as a side question
+
+    The caller asked about the very thing they had just chosen. Answering it
+    costs a generation call whose only honest output is a confirmation, so the
+    turn ships as a statement and the next slot never gets asked.
+
+    Read the shape instead of the wording: a side question earns its name by
+    introducing something the answer did not. When every content word in the
+    recovered question already describes what was captured this turn — its
+    value or the slot it filled — there is no second topic, whatever verb the
+    caller reached for.
+
+    Deliberately strict. Subset, not overlap: "How long does a fax take?" keeps
+    "long" and stays a side question, and so does anything else that brings a
+    word of its own.
+    """
+    if not extracted:
+        return False
+    topic = _content_words(recovered)
+    if not topic:
+        return False
+    answered: set[str] = set()
+    for slot, value in extracted.items():
+        if not value:
+            continue
+        answered |= _content_words(str(slot).replace("_", " "))
+        answered |= _content_words(str(value))
+    return bool(answered) and topic <= answered
+
+
 def quotes_the_caller(query: str | None, utterance: str | None) -> bool:
     """Is the reported question about the same thing the caller talked about?
 
@@ -316,7 +358,7 @@ def quotes_the_caller(query: str | None, utterance: str | None) -> bool:
     return bool(asked & said)
 
 
-def recover_side_question(utterance: str | None) -> str:
+def recover_side_question(utterance: str | None, extracted: dict | None = None) -> str:
     """The side question in ``utterance`` that the extractor did not report.
 
     Returns "" unless the utterance has the clean two-part shape: an answer
@@ -331,6 +373,11 @@ def recover_side_question(utterance: str | None) -> str:
     classification of such a turn is left alone. So does a lone courtesy
     question — "Fax please. Can you do that for me today?" asks about the thing
     just answered, and is part of the answer, not a second topic.
+
+    ``extracted`` is what the extractor captured from this same turn. Given it,
+    a lone question that introduces no topic beyond that value is dropped for
+    the same reason as the courtesy question, without having to be a phrasing
+    anyone listed in advance — see _restates_the_answer.
 
     The recovered text is the caller's own words from the first asking segment
     onward — not a paraphrase. "I lost my credit ID card" is kept in front of
@@ -352,7 +399,10 @@ def recover_side_question(utterance: str | None) -> str:
         recovered = _LEADING_CONJUNCTION_RE.sub("", " ".join(tail)).strip()
         if not recovered or len(recovered.split()) > _MAX_RECOVERED_WORDS:
             return ""
-        if len(tail) == 1 and _COURTESY_QUESTION_RE.match(recovered):
-            return ""
+        if len(tail) == 1:
+            if _COURTESY_QUESTION_RE.match(recovered):
+                return ""
+            if _restates_the_answer(recovered, extracted):
+                return ""
         return recovered
     return ""
