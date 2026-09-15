@@ -35,7 +35,7 @@ from agent.agents.provider_search.pipelines import (
 )
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import is_not_an_answer
+from agent.core.confirmation import confirms_value, is_not_an_answer
 from agent.llm.config import get_extraction_llm
 from agent.logger import get_logger
 from agent.slots.normalizers import normalize_provider_type, normalize_yes_no, normalize_zip_code
@@ -225,7 +225,7 @@ class ProviderSearchAgent(BaseAgent):
                 ask_result["zip_code"] = zip_on_file
                 return ask_result
 
-            if zip_conf == "yes":
+            if confirms_value(zip_conf, last_user, owned_slots=("zip_code", "zip_confirmed")):
                 logger.info(LOG_ZIP_CONFIRMED, extra={"zip_code": zip_on_file})
                 return self._signal_done(state, provider_type, zip_on_file)
 

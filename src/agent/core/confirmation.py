@@ -49,7 +49,7 @@ from agent.utils import detect_wait_request
 _CHANGE_INTENT_RE = re.compile(
     r"\b(?:new|newer|change|changed|changing|update|updated|updating|"
     r"different|another|old|older|outdated|obsolete|wrong|incorrect|"
-    r"switch|switched|replace|replaced|stale)\b"
+    r"switch|switched|replace|replaced|stale|moved|moving|relocated)\b"
     r"|\bno\s+longer\b"
     r"|\bnot\s+(?:right|correct|valid|current)\b",
     re.IGNORECASE,
@@ -189,6 +189,41 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
         return True
 
     return bool(str(getattr(result, "followup_query", "") or "").strip())
+
+
+def confirms_value(verdict: str, last_user: str, *, owned_slots: Sequence[str] = ()) -> bool:
+    """Is this normalized "yes" actually a confirmation of the value read back?
+
+    A caller who opens with the affirmative and then asks to change the value
+    has not confirmed it:
+
+        AI      Just to confirm — your ZIP code is 16783?
+        Caller  yeah. Actually, you know what? I want to update the ZIP code
+                because I moved to a new address. So can I do that now?
+        →       zip_confirmed "yes"
+
+    The leading affirmative acknowledges the question; the rest answers it. Six
+    branches read a bare "yes" and act on it immediately — dispatching a
+    provider list, writing a contact to Salesforce — BEFORE is_not_an_answer
+    is ever consulted, so nothing downstream of them can undo it. The caller's
+    update request is dropped without a word, and the list goes to the value
+    they were in the middle of replacing.
+
+    The extraction prompts are where this belongs and where it is now stated
+    for every slot (extraction/_confirmation_contract.md). This is the backstop
+    for when the model reads the first word and stops, which is what the
+    reported calls show: the cost of missing it is silent and lands on the
+    caller, and a prompt rule cannot be regression-tested.
+
+    Same narrow vocabulary as is_not_an_answer, and the same asymmetry behind
+    it: a "yes" wrongly rejected here costs the question the branch was about
+    to ask anyway, because the caller falls through to the decline path that
+    asks for the current value. A "yes" wrongly accepted sends the list
+    somewhere the caller has just told us not to.
+    """
+    if verdict != "yes":
+        return False
+    return not (owned_slots and _CHANGE_INTENT_RE.search(last_user or ""))
 
 
 def is_read_back_echo(new_value: Any, read_back: str, normalizer: Callable[[str], str]) -> bool:

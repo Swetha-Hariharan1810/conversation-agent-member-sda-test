@@ -39,7 +39,7 @@ from agent.agents.delivery_management.pipelines import (
     build_fax_pipeline,
 )
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import carried_contact, is_not_an_answer, is_read_back_echo
+from agent.core.confirmation import carried_contact, confirms_value, is_not_an_answer, is_read_back_echo
 from agent.core.request_detection import detect_request, reconcile_worker_result
 from agent.core.slot_ownership import canonical_capability_topic
 from agent.llm.config import get_extraction_llm
@@ -461,7 +461,7 @@ class DeliveryManagementAgent(BaseAgent):
                 ask_result["fax"] = fax_on_file
                 return ask_result
 
-            if contact_conf == "yes":
+            if confirms_value(contact_conf, last_user, owned_slots=("fax", "fax_confirmed")):
                 if pending_fax:
                     if fail := await update_fax_in_salesforce(self, state, pending_fax):
                         return fail
@@ -625,7 +625,7 @@ class DeliveryManagementAgent(BaseAgent):
                 ask_result["email"] = email_on_file
                 return ask_result
 
-            if contact_conf == "yes":
+            if confirms_value(contact_conf, last_user, owned_slots=("email", "email_confirmed")):
                 if pending_email:
                     if fail := await update_email_in_salesforce(self, state, pending_email):
                         return fail
