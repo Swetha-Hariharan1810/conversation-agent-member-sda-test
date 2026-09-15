@@ -7,6 +7,7 @@ from __future__ import annotations
 import random
 
 from agent.core.agent import BaseAgent
+from agent.core.metadata_events import CALL_TRANSFER, find_agent_call_event, merge_events, transfer_event
 from agent.logger import get_logger
 from agent.state import State
 from agent.utils import pick
@@ -131,28 +132,20 @@ class EscalationAgent(BaseAgent):
 
         logger.info("EscalationAgent: transfer", extra={"ref_no": ref_no})
 
-        existing_event = next(
-            (
-                e
-                for e in (state.get("metadata_events") or [])
-                if e.get("eventType") == "AgentCallEvent"
-                and e.get("data", {}).get("eventName") == "AgentCallTransfer"
-            ),
-            None,
+        # The escalating agent already reported the transfer, with its reason and
+        # its initiator — re-report that one with the reference number added, so
+        # the caller is not told to quote a number the event never carried.
+        # merge_events keeps one AgentCallTransfer, this fuller one.
+        existing_event = find_agent_call_event(state.get("metadata_events"), CALL_TRANSFER)
+        event = (
+            {**existing_event, "data": {**existing_event["data"], "referenceNumber": ref_no}}
+            if existing_event
+            else transfer_event(
+                state.get("escalation_reason") or "Transfer initiated",
+                initiator="Agent",
+                reference_number=ref_no,
+            )
         )
-        transfer_event = {  # noqa: F841
-            "eventType": "AgentCallEvent",
-            "data": (
-                {**existing_event["data"], "referenceNumber": ref_no}
-                if existing_event
-                else {
-                    "eventName": "AgentCallTransfer",
-                    "transferInitiator": "Agent",
-                    "detail": state.get("escalation_reason", "Transfer initiated"),
-                    "referenceNumber": ref_no,
-                }
-            ),
-        }
         result = self.signal_complete(
             state,
             message=message,
@@ -160,9 +153,7 @@ class EscalationAgent(BaseAgent):
             context_updates={"escalation_reference_number": ref_no, "ref_no": ref_no},
             reasoning=f"Member transferred — ref {ref_no}",
         )
-        # result["metadata_events"] = result.get("metadata_events", []) + [transfer_event]
-
-        result["metadata_events"] = []
+        result["metadata_events"] = merge_events(result.get("metadata_events"), [event])
         result["next_node"] = "END"
         return result
 

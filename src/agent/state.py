@@ -1,7 +1,7 @@
 from typing import Annotated, Literal, Optional, Union
 
 from langgraph.graph.message import add_messages
-from typing_extensions import TypedDict
+from typing_extensions import Required, TypedDict
 
 ConversationContextDict = dict
 
@@ -16,10 +16,11 @@ class CallAgentFieldEvent(TypedDict):
     data: CallAgentFieldData
 
 
-class AgentCallEventData(TypedDict):
-    eventName: Literal["AgentCallEnded", "AgentCallTransfer"]
-    detail: str
-    transferInitiator: Optional[Literal["Agent", "Caller"]]
+class AgentCallEventData(TypedDict, total=False):
+    eventName: Required[Literal["AgentCallEnded", "AgentCallTransfer"]]
+    detail: Required[str]  # "complete", or what cut the call short / caused the transfer
+    transferInitiator: Literal["Agent", "Caller"]  # transfers only
+    referenceNumber: str  # added by escalation_agent once it mints the ref
 
 
 class AgentCallLifecycleEvent(TypedDict):
@@ -53,6 +54,11 @@ class State(TypedDict):
     pending_intent: Optional[str]  # new intent staged by reset_for_new_intent (mid-call switch)
     ref_no: str
     slot_attempts: dict[str, SlotState]
+    # Field name → the value last reported as a CallAgentField metadata event.
+    # Keyed by the REPORTED field name (call_intent and intake's "intent" slot
+    # both report as "intent"), so a field is reported once per distinct value.
+    # See core/metadata_events.py.
+    emitted_fields: dict[str, str]
     conversation_context: Optional[ConversationContextDict]
 
     # ── Caller identity (set by verification) ────────────────────────────────
@@ -93,6 +99,10 @@ class State(TypedDict):
     escalation_reference_number: str
     escalation_reason: str
     escalation_pre_message: str  # pre-escalation context message from the calling agent
+    # What a hard END should report as the AgentCallEnded detail. Set by a
+    # handler that ends the call for a reason of its own; everything else is
+    # inferred (see core/metadata_events.call_ended_detail).
+    call_end_detail: str
 
     # ── Slot tracking ────────────────────────────────────────────────────────
     awaiting_slot: str

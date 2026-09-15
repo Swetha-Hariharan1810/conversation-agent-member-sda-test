@@ -3825,14 +3825,17 @@ claim_then_pcp_new_intent = Scenario(
 # at END (the pivot reset cleared them and screening fired before identity was
 # re-collected). That is what proves the re-screen ran through the intake node.
 #
-# ASSERTION NOTE: agent-side escalations (the unsupported-provider case) do not
-# surface a harvestable escalation reason or AgentCallTransfer event in this
-# codebase — signal_escalate and escalation_agent both emit metadata_events=[],
-# and the reason lives only in last_agent_signal, which escalation_agent
-# overwrites with a COMPLETE signal before the next graph pause. So these
-# scenarios assert on escalated (via the reference number escalation_agent
-# stamps), the staged pre-escalation message, the final AI text, and the
-# no-re-verification state — not on escalation_reason_contains / transfer_event.
+# ASSERTION NOTE: agent-side escalations (the unsupported-provider case) once
+# surfaced neither a harvestable escalation reason nor an AgentCallTransfer
+# event — signal_escalate and escalation_agent both emitted metadata_events=[],
+# and the reason lived only in last_agent_signal, which escalation_agent
+# overwrites with a COMPLETE signal before the next graph pause. Both now report
+# the transfer (core/metadata_events.py), so the event and the reason it carries
+# ARE harvestable. These scenarios still assert what they always did — escalated
+# (via the reference number escalation_agent stamps), the staged pre-escalation
+# message, the final AI text, and the no-re-verification state — because that set
+# does not depend on which agent phrased the reason; the transfer event is now
+# available to tighten them with.
 # The out_of_scope cases DO carry a top-level escalation_reason, so they assert it
 # the same way intake_out_of_scope_appeal does.
 # ──────────────────────────────────────────────────────────────────────────────

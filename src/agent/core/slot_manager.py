@@ -147,6 +147,10 @@ class SlotManagerMixin:
         """Mark slot confirmed. Also queues a CallAgentField event."""
         self.get_slot(name).record_attempt(value, success=True)
         self._newly_confirmed.add(name)
+        # _newly_confirmed is consumed (and cleared) by the signal builders, and
+        # a slot's value does not always reach a state key of the same name, so
+        # keep the turn's captures for the CallAgentField stamp in execute().
+        self._confirmed_this_turn[name] = value
 
     def slot_fail(self, name: str, value: Any = None, is_asr: bool = False) -> None:
         """Record a failed slot attempt."""

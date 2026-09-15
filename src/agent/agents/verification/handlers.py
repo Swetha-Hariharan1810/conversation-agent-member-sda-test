@@ -384,6 +384,9 @@ async def collect_post_lookup(
             result["next_node"] = "END"
             result["is_interrupt"] = False
             result["phone_update_requested"] = True
+            # This END is not a completed call — say so in the AgentCallEnded
+            # event rather than letting it report the default "complete".
+            result["call_end_detail"] = "phone_not_confirmed"
             return result
 
     if "phone_confirmed" in post_collected:
