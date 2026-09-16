@@ -20,4 +20,6 @@ ai: Absolutely. I can also send you a link where you can upload the records dire
 human: no thanks
 ai: No problem. I can have one of our Personal Guides conduct the outreach to your doctor to request a complete copy of the medical records for this request. Would you like us to proceed?
 human: no i dont want to proceed
-ai: I'm not able to complete this step right now. I can connect you to a representative to finish this request. Your reference number is REF598198112. Thank you for calling Sagility Health. Have a great day.
+ai: Is there anything else I can help you with today?
+human: No, I'm all set. Thanks.
+ai: Thank you for calling Sagility Health. Have a great day, Michael!
