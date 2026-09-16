@@ -20,6 +20,7 @@ from agent.agents.verification.constants import (
     LOG_NAME_CONFIRM_EXHAUST,
     LOG_NAME_CONFIRMED,
     LOG_NAME_CORRECTED,
+    LOG_NAME_PART_RECOVERED,
     LOG_NAME_READBACK,
     LOG_VERIFIED,
     MAX_NAME_CONFIRM_ATTEMPTS,
@@ -54,6 +55,7 @@ from agent.agents.verification.handlers import (
     apply_corrections,
     collect_post_lookup,
     lookup_and_verify,
+    recover_name_correction,
     redirect_off_topic,
 )
 from agent.agents.verification.llm import (
@@ -1356,6 +1358,36 @@ class VerificationAgent(BaseAgent):
         corrected_first_raw = extracted.get("first_name", "")
         corrected_last_raw = extracted.get("last_name", "")
 
+        # ── The part the caller named, read from their own words ──────────────
+        # "My surname is Carter, not Watson" names the part it corrects and
+        # contrasts it with the name just read back. The trailing "not Watson"
+        # is the shape of every rejection in OUTCOME 3, so the model reads the
+        # turn as a bare no — and asks the caller for a name they just gave.
+        # Which part of a name is being corrected is a fact about the words
+        # whenever the caller names it, so it is settled before the outcomes.
+        named_parts = recover_name_correction(
+            last_user,
+            (state.get("first_name") or "").strip(),
+            (state.get("last_name") or "").strip(),
+        )
+        if named_parts:
+            named_first = named_parts.get("first_name", "")
+            named_last = named_parts.get("last_name", "")
+            # Reading the same sentence, the model sometimes files the named
+            # part under the other field. Keeping both would read back "Carter
+            # Carter" as the correction the caller asked for.
+            if named_last and normalize_name(corrected_first_raw) == named_last:
+                corrected_first_raw = ""
+            if named_first and normalize_name(corrected_last_raw) == named_first:
+                corrected_last_raw = ""
+            corrected_first_raw = named_first or corrected_first_raw
+            corrected_last_raw = named_last or corrected_last_raw
+            name_conf_raw = ""  # a named correction is never a bare yes or no
+            logger.info(
+                LOG_NAME_PART_RECOVERED,
+                extra={"parts": sorted(named_parts), "utterance": last_user},
+            )
+
         # ── OUTCOME 1: confirmed ─────────────────────────────────────────────
         if name_conf_raw == "yes":
             logger.info(LOG_NAME_CONFIRMED)
@@ -1445,13 +1477,42 @@ class VerificationAgent(BaseAgent):
         extracted = (result.extracted or {}) if result else {}
         corrected_first_raw = extracted.get("first_name", "")
         corrected_last_raw = extracted.get("last_name", "")
+        name_conf_raw = extracted.get("name_confirmed", "")
+
+        # ── The part the caller named, read from their own words ──────────────
+        # "My surname is Carter, not Watson" names the part it corrects and
+        # contrasts it with the name just read back. The trailing "not Watson"
+        # is the shape of every rejection in OUTCOME 3, so the model reads the
+        # turn as a bare no — and asks the caller for a name they just gave.
+        # Which part of a name is being corrected is a fact about the words
+        # whenever the caller names it, so it is settled before the outcomes.
+        named_parts = recover_name_correction(
+            last_user,
+            (state.get("first_name") or "").strip(),
+            (state.get("last_name") or "").strip(),
+        )
+        if named_parts:
+            named_first = named_parts.get("first_name", "")
+            named_last = named_parts.get("last_name", "")
+            # Reading the same sentence, the model sometimes files the named
+            # part under the other field. Keeping both would read back "Carter
+            # Carter" as the correction the caller asked for.
+            if named_last and normalize_name(corrected_first_raw) == named_last:
+                corrected_first_raw = ""
+            if named_first and normalize_name(corrected_last_raw) == named_first:
+                corrected_last_raw = ""
+            corrected_first_raw = named_first or corrected_first_raw
+            corrected_last_raw = named_last or corrected_last_raw
+            name_conf_raw = ""  # a named correction is never a bare yes or no
+            logger.info(
+                LOG_NAME_PART_RECOVERED,
+                extra={"parts": sorted(named_parts), "utterance": last_user},
+            )
 
         corrected_first = normalize_name(corrected_first_raw) if corrected_first_raw else ""
         corrected_last = normalize_name(corrected_last_raw) if corrected_last_raw else ""
         first_ok = bool(corrected_first) and validate_name(corrected_first).valid
         last_ok = bool(corrected_last) and validate_name(corrected_last).valid
-
-        name_conf_raw = extracted.get("name_confirmed", "")
 
         if first_ok or last_ok:
             new_first = corrected_first if first_ok else (state.get("first_name") or "").strip()
