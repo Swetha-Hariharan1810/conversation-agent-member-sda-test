@@ -344,52 +344,6 @@ def pick(pool) -> str:
     return pool or ""
 
 
-def _quick_yes_no(text: str) -> str:
-    """
-    Fast keyword check for unambiguous yes/no responses.
-    Returns 'yes', 'no', or '' (ambiguous — needs LLM).
-
-    Used as fast-path before LLM extraction for any yes/no decision.
-    Avoids LLM call for clear responses, improving latency.
-
-    Rules:
-    - Word boundary matching to avoid false positives
-    - Checks negation before YES patterns
-      ("not sure" must not match YES via "sure")
-    - Returns '' for anything ambiguous — caller decides via LLM
-    """
-    t = text.lower().strip()
-    if not t:
-        return ""
-
-    # Check negation first — blocks false YES matches
-    _NEGATION = re.compile(r"\b(not|don't|doesn't|can't|won't|never)\b")
-    has_negation = bool(_NEGATION.search(t))
-
-    # Clear YES — only when no leading negation
-    if not has_negation:
-        _YES = re.compile(
-            r"\b(yes|yeah|yep|yup|sure|please|transfer|"
-            r"connect|go ahead|ok|okay|absolutely)\b"
-        )
-        if _YES.search(t):
-            return "yes"
-        if t.startswith(("yes ", "yeah ", "sure ", "please ")):
-            return "yes"
-
-    # Clear NO
-    _NO = re.compile(
-        r"\b(no|nope|nah|never mind|nevermind|"
-        r"continue|stay|keep going|help me)\b"
-    )
-    if _NO.search(t):
-        return "no"
-    if t.startswith(("no ", "nope ", "nah ")):
-        return "no"
-
-    return ""  # ambiguous — needs LLM
-
-
 def name_part(source) -> str:
     """
     Return ', FirstName' if a first name is known, else ''.
