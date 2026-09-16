@@ -44,6 +44,13 @@ def intake_routing(state: State) -> str:
     # fast-path can route to the correct domain agent with member_verified=True.
     if state.get("next_node") == "orchestrator":
         return "orchestrator"
+    # Caller withdrew the request at intake ("that's everything, thanks") — the
+    # call is over, so let closure say goodbye. Named here because everything
+    # this router does not recognise falls through to verification, and the
+    # orchestrator's fast path would send it there too: follow_up's handback
+    # cleared member_status_verify, which is the first thing that path checks.
+    if state.get("next_node") == AgentNode.CLOSURE.value:
+        return AgentNode.CLOSURE.value
     return AgentNode.VERIFICATION.value
 
 

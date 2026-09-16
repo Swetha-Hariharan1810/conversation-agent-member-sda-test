@@ -26,18 +26,23 @@ from agent.agents.intake.constants import (
     LOG_SAME_MEMBER_AMBIGUOUS,
     LOG_SAME_MEMBER_CHECK,
     LOG_SAME_MEMBER_CONFIRMED,
+    LOG_SAME_MEMBER_GIVE_UP,
+    LOG_SAME_MEMBER_WITHDRAWN,
     MAX_CLARIFICATION_ATTEMPTS,
     OFFTOPIC_ESCALATION,
     OFFTOPIC_REASON,
     SAME_MEMBER_CHECK_QUESTION,
     SAME_MEMBER_CLARIFICATION_MSGS,
+    SAME_MEMBER_MAX_CLARIFICATIONS,
 )
 from agent.agents.intake.handlers import (
     _get_clarification_attempts,
+    _phrase_hit,
     handle_out_of_scope_intent,
     handle_unclear_intent,
     handle_unsupported_provider_type,
     screen_out_of_scope,
+    screen_request_withdrawn,
     screen_unsupported_provider_type,
 )
 from agent.agents.intake.llm import extract_intake_intent, extract_same_member_decision
@@ -316,6 +321,7 @@ class IntakeAgent(BaseAgent):
         result["call_intent"] = intent_value
         result["app_run_id"] = app_run_id
         result["same_member_check_pending"] = True
+        result["same_member_clarify_attempts"] = 0
         result["metadata_events"] = []
         if provider_type:
             result["provider_type"] = provider_type
@@ -324,13 +330,29 @@ class IntakeAgent(BaseAgent):
     async def _handle_same_member_check(self, state: State, app_run_id: str) -> dict:
         """Process the member's reply to the same-vs-different-member question.
 
-        Classification is LLM-first (same_member_check.md prompt → WorkerResult
-        extracted["same_member"] = "yes" | "no" | "unclear").  A keyword-based
-        fallback fires only when the LLM call fails entirely, ensuring robustness
-        while keeping natural-language understanding as the primary path.
+        Three things can come back, and only two of them are answers:
 
-        Ambiguous replies trigger a single clarification question; if still unclear
-        after that, we default to routing through verification (the safe path).
+          * an answer — same member, or a different one;
+          * a withdrawal — the caller no longer wants the request they just
+            made, and is closing the call;
+          * neither — a hedge, a non-answer, silence dressed as words.
+
+        Withdrawal is screened from the words before the model is asked
+        (screen_request_withdrawn), because "that's everything, thanks" is a
+        fact about the sentence and the classifier has no category for it: it
+        answered "unclear", and "unclear" used to mean ask again, forever.
+
+        Classification is otherwise LLM-first (same_member_check.md prompt →
+        WorkerResult extracted["same_member"] = "yes" | "no" | "withdrawn" |
+        "unclear"). A keyword-based fallback fires only when the LLM call fails
+        entirely, ensuring robustness while keeping natural-language
+        understanding as the primary path.
+
+        Ambiguous replies are clarified at most SAME_MEMBER_MAX_CLARIFICATIONS
+        times — each with a different sentence, so a caller never hears the same
+        question twice — and then the flow stops asking and routes through
+        verification, the safe path: a request whose member we could not
+        establish gets a fresh identity check rather than the saved one.
         """
         import re
 
@@ -339,6 +361,14 @@ class IntakeAgent(BaseAgent):
         last_agent = _last_assistant_msg(messages)
         call_intent = state.get("call_intent", "")
         provider_type = state.get("provider_type", "")
+
+        # ── Withdrawal screen — read from the words, before any LLM call ──────
+        if screen_request_withdrawn(last_user):
+            logger.info(
+                LOG_SAME_MEMBER_WITHDRAWN,
+                extra={"intent": call_intent, "app_run_id": app_run_id, "utterance": last_user},
+            )
+            return self._close_same_member_check(state, app_run_id)
 
         # ── LLM classification ────────────────────────────────────────────────
         system_prompt = build_extraction_prompt_core("extraction/same_member_check.md")
@@ -359,41 +389,41 @@ class IntakeAgent(BaseAgent):
                 extra={"app_run_id": app_run_id},
             )
             lowered = last_user.lower()
-            _SAME_KW = frozenset(
-                {
-                    "same",
-                    "yes",
-                    "yeah",
-                    "yep",
-                    "yup",
-                    "correct",
-                    "that's right",
-                    "thats right",
-                    "same member",
-                    "same person",
-                    "the same",
-                    "for the same",
-                }
+            # Word-boundary matching, not `in`: "no" lives inside "nothing" and
+            # "know", "new" inside "renew". Substring matching read "nope,
+            # nothing else" as a different member and sent a caller who was
+            # hanging up through identity verification.
+            _SAME_KW = (
+                "same",
+                "yes",
+                "yeah",
+                "yep",
+                "yup",
+                "correct",
+                "that's right",
+                "thats right",
+                "same member",
+                "same person",
+                "the same",
+                "for the same",
             )
-            _DIFF_KW = frozenset(
-                {
-                    "different",
-                    "no",
-                    "nope",
-                    "nah",
-                    "another",
-                    "new",
-                    "someone else",
-                    "other member",
-                    "different member",
-                    "different person",
-                    "new member",
-                    "a different",
-                    "not the same",
-                }
+            _DIFF_KW = (
+                "different",
+                "no",
+                "nope",
+                "nah",
+                "another",
+                "new",
+                "someone else",
+                "other member",
+                "different member",
+                "different person",
+                "new member",
+                "a different",
+                "not the same",
             )
-            kw_same = any(kw in lowered for kw in _SAME_KW)
-            kw_diff = any(kw in lowered for kw in _DIFF_KW)
+            kw_same = _phrase_hit(_SAME_KW, lowered)
+            kw_diff = _phrase_hit(_DIFF_KW, lowered)
             if kw_same and re.search(r"\bnot\b.{0,10}\bsame\b", lowered):
                 kw_same = False
                 kw_diff = True
@@ -405,6 +435,13 @@ class IntakeAgent(BaseAgent):
                 same_member_value = "unclear"
 
         # ── Route on classification result ────────────────────────────────────
+        if same_member_value == "withdrawn":
+            logger.info(
+                LOG_SAME_MEMBER_WITHDRAWN,
+                extra={"intent": call_intent, "app_run_id": app_run_id, "utterance": last_user},
+            )
+            return self._close_same_member_check(state, app_run_id)
+
         if same_member_value == "yes":
             logger.info(
                 LOG_SAME_MEMBER_CONFIRMED,
@@ -415,6 +452,7 @@ class IntakeAgent(BaseAgent):
             context_updates["member_status_verify"] = True
             context_updates["saved_member_context"] = None
             context_updates["same_member_check_pending"] = False
+            context_updates["same_member_clarify_attempts"] = 0
             context_updates["pending_intent"] = ""  # consumed — fast-path dispatches via call_intent
             context_updates["app_run_id"] = app_run_id
 
@@ -445,31 +483,85 @@ class IntakeAgent(BaseAgent):
                 LOG_DIFFERENT_MEMBER,
                 extra={"intent": call_intent, "app_run_id": app_run_id},
             )
-            bridge = self.ask_member(state, random.choice(INTENT_BRIDGE_MSGS))
-            bridge["call_intent"] = call_intent
-            bridge["app_run_id"] = app_run_id
-            bridge["resolved_intents"] = ["intake"]
-            bridge["next_node"] = AgentNode.VERIFICATION.value
-            bridge["metadata_events"] = []
-            bridge["saved_member_context"] = None
-            bridge["same_member_check_pending"] = False
-            if provider_type:
-                bridge["provider_type"] = provider_type
-            return bridge
+            return self._same_member_to_verification(state, call_intent, provider_type, app_run_id)
 
-        # ── Unclear — ask one clarification question ──────────────────────────
+        # ── Unclear — clarify, but a bounded number of times ──────────────────
+        attempts = int(state.get("same_member_clarify_attempts") or 0)
+        if attempts >= SAME_MEMBER_MAX_CLARIFICATIONS:
+            # Asking a third time is the loop. The question exists to save the
+            # caller a re-verification, so when it cannot be answered we spend
+            # the re-verification rather than the caller's patience.
+            logger.info(
+                LOG_SAME_MEMBER_GIVE_UP,
+                extra={"intent": call_intent, "app_run_id": app_run_id, "attempts": attempts},
+            )
+            return self._same_member_to_verification(state, call_intent, provider_type, app_run_id)
+
         logger.info(
             LOG_SAME_MEMBER_AMBIGUOUS,
-            extra={"intent": call_intent, "app_run_id": app_run_id, "utterance": last_user},
+            extra={
+                "intent": call_intent,
+                "app_run_id": app_run_id,
+                "utterance": last_user,
+                "attempt": attempts + 1,
+            },
         )
-        result = self.ask_member(state, random.choice(SAME_MEMBER_CLARIFICATION_MSGS))
+        # Indexed, not random: the second clarification must not be the first
+        # one again. Two phrasings, two attempts, then the cap above.
+        msg = SAME_MEMBER_CLARIFICATION_MSGS[min(attempts, len(SAME_MEMBER_CLARIFICATION_MSGS) - 1)]
+        result = self.ask_member(state, msg)
         result["call_intent"] = call_intent
         result["app_run_id"] = app_run_id
         result["same_member_check_pending"] = True
+        result["same_member_clarify_attempts"] = attempts + 1
         result["metadata_events"] = []
         if provider_type:
             result["provider_type"] = provider_type
         return result
+
+    def _close_same_member_check(self, state: State, app_run_id: str) -> dict:
+        """The caller withdrew the request — end the call instead of asking again.
+
+        Routed straight at closure_agent (see ``intake_routing``): the
+        orchestrator's fast path would send this at verification, because
+        ``reset_for_new_intent`` cleared member_status_verify when follow_up
+        handed the call back here.
+        """
+        result = self.signal_complete(
+            state=state,
+            message="",
+            resolved_intents=["intake"],
+            context_updates={
+                "app_run_id": app_run_id,
+                "same_member_check_pending": False,
+                "same_member_clarify_attempts": 0,
+                "saved_member_context": None,
+                "call_intent": "",
+                "pending_intent": "",
+            },
+            closure_requested=True,
+            reasoning="request withdrawn during same-member check — closing the call",
+        )
+        result["next_node"] = AgentNode.CLOSURE.value
+        return result
+
+    def _same_member_to_verification(
+        self, state: State, call_intent: str, provider_type: str, app_run_id: str
+    ) -> dict:
+        """Take the request through verification — a different member, or one we
+        could not establish. Either way the saved context must not be reused."""
+        bridge = self.ask_member(state, random.choice(INTENT_BRIDGE_MSGS))
+        bridge["call_intent"] = call_intent
+        bridge["app_run_id"] = app_run_id
+        bridge["resolved_intents"] = ["intake"]
+        bridge["next_node"] = AgentNode.VERIFICATION.value
+        bridge["metadata_events"] = []
+        bridge["saved_member_context"] = None
+        bridge["same_member_check_pending"] = False
+        bridge["same_member_clarify_attempts"] = 0
+        if provider_type:
+            bridge["provider_type"] = provider_type
+        return bridge
 
 
 async def intake_agent(state: State) -> dict:

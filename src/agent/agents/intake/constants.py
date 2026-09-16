@@ -35,6 +35,10 @@ LOG_SAME_MEMBER_CHECK = "IntakeAgent: same-member disambiguation triggered"
 LOG_SAME_MEMBER_CONFIRMED = "IntakeAgent: same member confirmed — restoring verification context"
 LOG_DIFFERENT_MEMBER = "IntakeAgent: different member indicated — routing to verification"
 LOG_SAME_MEMBER_AMBIGUOUS = "IntakeAgent: same-member response ambiguous — asking clarification"
+LOG_SAME_MEMBER_WITHDRAWN = "IntakeAgent: request withdrawn during same-member check — closing"
+LOG_SAME_MEMBER_GIVE_UP = (
+    "IntakeAgent: same-member response still ambiguous at the attempt cap — routing to verification"
+)
 
 INTENT_BRIDGE_MSGS = [
     "I can definitely help with that. To get started, could I get your first name?",
@@ -72,6 +76,12 @@ SAME_MEMBER_CLARIFICATION_MSGS = [
     "Just to confirm — is this request for the same member as before, or for someone new?",
     "Could you clarify — is this for the member we already have on file, or a different person?",
 ]
+
+# How many times the clarification above may be asked before intake stops asking
+# and takes the safe path (verification). The question is a yes/no with two
+# phrasings; a caller who has not answered it twice is not going to answer it a
+# third time, and asking again is the loop this cap exists to prevent.
+SAME_MEMBER_MAX_CLARIFICATIONS = MAX_CLARIFICATION_ATTEMPTS
 
 # Escalation handoff messages — delivered at moment of escalation
 UNCLEAR_ESCALATION = "Not a problem — let me connect you with a representative who can assist you further."

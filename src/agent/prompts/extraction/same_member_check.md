@@ -5,7 +5,7 @@ Context: The agent just asked "Is this request for the same member we've been
 discussing, or is this for a different member?" and is waiting for the answer.
 
 FIELDS
-  same_member   "yes" | "no" | "unclear"
+  same_member   "yes" | "no" | "withdrawn" | "unclear"
 
     "yes" — the caller confirms this is for the same member:
       Direct: "yes", "yeah", "same", "same person", "same member"
@@ -22,6 +22,16 @@ FIELDS
       Contextual: "actually it's for someone new", "this is a different claim holder",
                   "this one is for my family member"
 
+    "withdrawn" — the caller is no longer asking for the thing that triggered
+    this question; they are dropping the request or ending the call, and the
+    question no longer has an answer:
+      Closing: "that's everything, thanks", "no, that's all", "nothing else",
+               "I'm all set", "that's it, thank you", "nope, nothing else"
+      Dropping: "never mind", "forget it", "don't worry about it",
+                "actually, it's fine", "skip it"
+      A "no" or "nope" that opens one of these belongs to the closing, not to
+      the member: "no, that's everything" is withdrawn, not a different member.
+
     "unclear" — the caller's response does not clearly indicate same or different:
       Vague hedging: "I think so", "maybe", "possibly"
       Off-topic or non-answer: completely unrelated statement
@@ -33,3 +43,7 @@ CRITICAL RULES:
 - "Same claim" or "same issue" does NOT mean same member unless they explicitly
   say so — treat as "unclear".
 - Do NOT use guard fields for off-topic responses here; use "unclear" instead.
+- A caller who is saying goodbye is "withdrawn", never "unclear". "Unclear" is
+  for a caller still engaged with the question who has not settled it; asking
+  them again is the right next move, and asking someone who is hanging up the
+  same question again is the loop this field exists to prevent.
