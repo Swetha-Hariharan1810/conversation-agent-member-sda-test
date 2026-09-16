@@ -72,6 +72,7 @@ from agent.utils import (
     _last_user_msg,
     build_extraction_prompt_extraction,
     detect_cannot_provide,
+    detect_transfer_request,
     detect_wait_request,
     pick,
 )
@@ -523,8 +524,14 @@ class ClaimAdjustmentAgent(BaseAgent):
             result["awaiting_slot"] = "fallback_dos_billed"
             return None, result
 
-        # If user is asking for more time — acknowledge and stay on this stage
-        if detect_wait_request(last_user):
+        # A wait wrapped around a request to leave is a request to leave.
+        # guards.py settles this precedence — "TRANSFER_REQUEST, ABUSE and
+        # SELF_HARM always win: 'hold on, get me a human' is a transfer" — but
+        # this check runs ahead of the extraction the guards read, to spare an
+        # LLM call on the commonest turn there is. So it defers here on the
+        # transfer phrasings a keyword pass can settle, and the guard below
+        # takes the rest.
+        if detect_wait_request(last_user) and not detect_transfer_request(state):
             logger.info("claim_adjustment_agent: WAIT detected during claim_number fallback")
             wait_result = self.ask_member(state, pick(MSG_WAIT_ACK))
             wait_result["ref_no_fallback_stage"] = "claim_number_ask"
@@ -598,6 +605,35 @@ class ClaimAdjustmentAgent(BaseAgent):
             recent_messages=messages[-6:],
         )
         extraction = reconcile_worker_result(extraction, last_user)
+
+        # ── GUARDS ────────────────────────────────────────────────────────
+        #     AI      No problem. I can check another way. Do you have the
+        #             claim number?
+        #     Caller  exit
+        #     →       guard TRANSFER_REQUEST, guard_confidence 0.95
+        #     AI      I wasn't able to capture that claim number. Could you
+        #             repeat it for me?
+        #
+        # The extractor flagged the transfer request and nothing read it. The
+        # reference_number phase in run() calls run_conversation_guards; these
+        # two fallback stages extracted, reconciled, honoured WAIT and the
+        # pivots, and then went straight to the value — so for the whole of
+        # the fallback path a caller asking out was re-asked instead, and
+        # every other guard went with it: abuse and self-harm signals raised
+        # here were dropped in the same place.
+        # A guard that escalates owns the turn outright. A soft one — off
+        # topic, an interruption — re-asks, so it costs this stage an attempt
+        # and keeps the stage pointer, the same as any other non-answer here;
+        # without that a caller could hold the stage open indefinitely.
+        if interrupt := await self.run_conversation_guards(state, user_text=last_user, result=extraction):
+            if (interrupt.get("last_agent_signal") or {}).get("status") != "escalate":
+                _attempts = state.get("slot_attempts") or {}
+                _prev = _attempts.get("fallback_claim_number") or {}
+                _n = _prev.get("attempt_count", 0) if isinstance(_prev, dict) else 0
+                interrupt["ref_no_fallback_stage"] = "claim_number_ask"
+                interrupt["awaiting_slot"] = "fallback_claim_number"
+                interrupt["slot_attempts"] = {**_attempts, "fallback_claim_number": {"attempt_count": _n + 1}}
+            return None, interrupt
 
         # LLM-based WAIT check: detect_wait_request can miss wait phrases that are
         # followed by meta-commentary ("I need to look this up") because the
@@ -695,8 +731,14 @@ class ClaimAdjustmentAgent(BaseAgent):
         Returns (adjustment_record, None) when lookup succeeds.
         Returns (None, interrupt_dict) when still collecting or escalating.
         """
-        # If user is asking for more time — acknowledge and stay on this stage
-        if detect_wait_request(last_user):
+        # A wait wrapped around a request to leave is a request to leave.
+        # guards.py settles this precedence — "TRANSFER_REQUEST, ABUSE and
+        # SELF_HARM always win: 'hold on, get me a human' is a transfer" — but
+        # this check runs ahead of the extraction the guards read, to spare an
+        # LLM call on the commonest turn there is. So it defers here on the
+        # transfer phrasings a keyword pass can settle, and the guard below
+        # takes the rest.
+        if detect_wait_request(last_user) and not detect_transfer_request(state):
             logger.info("claim_adjustment_agent: WAIT detected during dos_billed fallback")
             wait_result = self.ask_member(state, pick(MSG_WAIT_ACK))
             wait_result["ref_no_fallback_stage"] = "dos_billed_ask"
@@ -769,6 +811,35 @@ class ClaimAdjustmentAgent(BaseAgent):
             recent_messages=messages[-6:],
         )
         extraction = reconcile_worker_result(extraction, last_user)
+
+        # ── GUARDS ────────────────────────────────────────────────────────
+        #     AI      No problem. I can check another way. Do you have the
+        #             claim number?
+        #     Caller  exit
+        #     →       guard TRANSFER_REQUEST, guard_confidence 0.95
+        #     AI      I wasn't able to capture that claim number. Could you
+        #             repeat it for me?
+        #
+        # The extractor flagged the transfer request and nothing read it. The
+        # reference_number phase in run() calls run_conversation_guards; these
+        # two fallback stages extracted, reconciled, honoured WAIT and the
+        # pivots, and then went straight to the value — so for the whole of
+        # the fallback path a caller asking out was re-asked instead, and
+        # every other guard went with it: abuse and self-harm signals raised
+        # here were dropped in the same place.
+        # A guard that escalates owns the turn outright. A soft one — off
+        # topic, an interruption — re-asks, so it costs this stage an attempt
+        # and keeps the stage pointer, the same as any other non-answer here;
+        # without that a caller could hold the stage open indefinitely.
+        if interrupt := await self.run_conversation_guards(state, user_text=last_user, result=extraction):
+            if (interrupt.get("last_agent_signal") or {}).get("status") != "escalate":
+                _attempts = state.get("slot_attempts") or {}
+                _prev = _attempts.get("fallback_dos_billed") or {}
+                _n = _prev.get("attempt_count", 0) if isinstance(_prev, dict) else 0
+                interrupt["ref_no_fallback_stage"] = "dos_billed_ask"
+                interrupt["awaiting_slot"] = "fallback_dos_billed"
+                interrupt["slot_attempts"] = {**_attempts, "fallback_dos_billed": {"attempt_count": _n + 1}}
+            return None, interrupt
 
         # LLM-based WAIT check (mirrors claim_number fallback above).
         _evt_db = getattr(extraction, "event_type", None) if extraction else None

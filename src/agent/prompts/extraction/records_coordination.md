@@ -12,6 +12,27 @@ empty and set:
 The agent will decline the request gracefully before re-asking for the current slot.
 This applies regardless of how the request is phrased.
 
+## A yes or a no belongs to the question that was just asked
+The awaiting slot names the question on the table, and a bare yes/no answers
+THAT question — put it in that slot's field and no other. Several fields below
+share phrasings, because "no, I don't want to proceed" is how a caller refuses
+any offer; the wording never decides which field it lands in, the awaiting slot
+does.
+
+  awaiting personal_guide_consent  → personal_guide_consent  ("yes" | "no")
+  awaiting upload_consent          → upload_consent          ("yes" | "no")
+  awaiting upload_method           → upload_method           (the option named)
+
+    Awaiting: personal_guide_consent
+    AI      I can have one of our Personal Guides contact your doctor's office
+            on your behalf. Would you like us to proceed with that?
+    Caller  no i dont want to proceed
+    →       personal_guide_consent: "no"      NOT upload_method: "decline"
+
+  upload_method's "decline" is only for a caller refusing the records step
+  itself while upload_method is the awaiting slot — never for a caller
+  answering a later yes/no offer.
+
 FIELDS
   upload_method  "member_upload" | "doctor_direct" | "personal_guide" | "decline"
     How the member intends to provide their medical records.
@@ -33,9 +54,13 @@ FIELDS
       "yes please", "please do that", "go ahead and contact them",
       "you can contact my doctor"
 
-    decline — member does not want to proceed with any option:
-      "no", "no thanks", "I don't want to proceed", "not right now"
-      (only when all relevant options have been offered)
+    decline — only while upload_method is the awaiting slot, and only for a
+      caller who refuses the records step itself rather than choosing one of
+      the three ways to provide them: "no", "no thanks",
+      "I don't want to proceed", "not right now".
+      Once a specific offer has been made — the upload link, or Personal Guide
+      outreach — a refusal answers THAT offer and belongs in upload_consent or
+      personal_guide_consent. Never put it here.
 
   upload_consent  "yes" | "no"
     Whether the member wants to receive the secure upload link via email.
@@ -103,6 +128,10 @@ FIELDS
     Clear consent → "yes":
       "yes", "sure", "Perfect. Please do that", "yes please",
       "go ahead", "please arrange that", "please reach out to them"
+
+    This is the field for EVERY refusal of the guide offer, however worded.
+    A refusal here is never upload_method "decline" — that option was already
+    chosen and is no longer the question.
 
     Clear decline → "no":
       "no", "no I don't want to proceed",

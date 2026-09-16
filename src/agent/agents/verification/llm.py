@@ -8,7 +8,13 @@ Public API:
         → WorkerResult
 
 Extracted slot values live in result.extracted:
-  first_name, last_name, member_id, dob, relationship, phone_confirmation
+  first_name, last_name, member_id, dob, relationship, phone_confirmed
+
+The phone field is `phone_confirmed` — the name the pipeline slot, the
+extraction contract in verification_claims.md and the state key all use.
+This line said `phone_confirmation` and nothing read that key, so a
+confirmation filed under it was dropped and the caller was asked again;
+collect_post_lookup now reads both names.
 
 Corrections live in result.corrections (dict[str, str]).
 """

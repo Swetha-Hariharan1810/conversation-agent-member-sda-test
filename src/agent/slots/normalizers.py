@@ -779,6 +779,40 @@ def normalize_email(value: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
+# An affirmation written out instead of the canonical token. Every caller of
+# normalize_yes_no passes a value the MODEL already placed in a yes/no field,
+# so nothing here classifies a turn — it spells one the model has classified.
+# That is the difference between this and a keyword list read off the caller's
+# words, which is not what any call site does.
+#
+# Anchored at the start, because the affirmation has to BE the answer: "that's
+# right" is one, "is that the right number?" is the question being answered.
+_AFFIRMATIVE_PHRASE_RE = re.compile(
+    r"^(?:"
+    r"that'?s\s+(?:the\s+)?(?:right|correct|it|one|mine|my\s+(?:number|cell|phone|mobile|email))"
+    r"|it\s+is"
+    r"|still\s+(?:right|correct|good|current|the\s+same)"
+    r"|sounds?\s+(?:right|good)"
+    r"|looks?\s+(?:right|good)"
+    r"|all\s+good"
+    r"|perfect"
+    r"|confirmed"
+    r"|verified"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# "that's right" and "that's not right" differ by one word and mean opposite
+# things, so a negation anywhere disqualifies the whole set above rather than
+# being subtracted from it one phrasing at a time. Spelled out rather than
+# matched as a contraction suffix, which would read the "nt" in "went".
+_NEGATED_RE = re.compile(
+    r"\b(?:no|nope|nah|not|never|wrong|incorrect|stale|outdated)\b"
+    r"|\b(?:is|was|are|were|does|do|did|ca|wo|has|have|had|could|would|should)n'?t\b",
+    re.IGNORECASE,
+)
+
+
 def normalize_yes_no(value: str | None) -> str:
     """
     Safety net for non-canonical outputs. Primary yes/no mapping is
@@ -832,6 +866,14 @@ def normalize_yes_no(value: str | None) -> str:
         return "yes"
     if cleaned.startswith(("no,", "no.", "nope,", "nah,")):
         return "no"
+
+    # The affirmations above are all openers. These are the ones that carry the
+    # confirmation in the middle of the phrase — "that's right", "that's my
+    # number", "still correct" — which the openers miss and which reached the
+    # validator as-is, failing it and re-asking a question the caller answered.
+    # Runs last, and only over a value with no negation in it: see _NEGATED_RE.
+    if _AFFIRMATIVE_PHRASE_RE.match(cleaned) and not _NEGATED_RE.search(cleaned):
+        return "yes"
 
     return cleaned
 

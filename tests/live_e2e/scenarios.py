@@ -1695,8 +1695,8 @@ records_no_guide_then_unsupported_provider = Scenario(
     ),
 )
 
-phone_not_confirmed_ends_call = Scenario(
-    name="phone_not_confirmed_ends_call",
+phone_not_confirmed_escalates = Scenario(
+    name="phone_not_confirmed_escalates",
     flow="claim",
     user_turns=[
         "I adjusted the claim and I want to follow up",
@@ -1708,16 +1708,27 @@ phone_not_confirmed_ends_call = Scenario(
         "no, that's not my number",  # decline phone confirmation
     ],
     expect=Expected(
-        completed=True,  # hard END, no escalation agent
-        escalated=False,
-        transfer_event=False,
+        escalated=True,
+        transfer_event=True,
         final_is_interrupt=False,
         final_state={"phone_update_requested": True},
         last_ai_contains=[
             r"unable to verify",
-            r"transferring you to a live representative",
+            r"connect you with a live representative",
+            # escalation_agent appends the reference number to the pre-message
+            r"reference number",
             pool_regex(MSG_PHONE_NOT_CONFIRMED),
         ],
+    ),
+    notes=(
+        "The number on file is not the caller's, identity cannot be verified "
+        "without it, and the field is human_only — so the call goes to a "
+        "representative. It used to route to END while saying it was "
+        "transferring the caller, so no AgentCallTransfer was raised and no "
+        "reference number was minted for a transfer the caller had been "
+        "promised. The decline is also read from the caller's words now when "
+        "extraction places nothing, which is what left 'no, that's not my "
+        "number' re-asking the same question."
     ),
 )
 
@@ -7002,7 +7013,7 @@ SCENARIOS: list[Scenario] = [
     records_no_guide_then_pcp_new_intent,  # 24f (mutating)
     records_no_guide_then_claim_new_intent,  # 24g
     records_no_guide_then_unsupported_provider,  # 24h
-    phone_not_confirmed_ends_call,  # 25
+    phone_not_confirmed_escalates,  # 25
     ref_not_found_retry_then_success,  # 26
     ref_not_found_twice_escalates,  # 27
     ref_exhaustion,  # 28

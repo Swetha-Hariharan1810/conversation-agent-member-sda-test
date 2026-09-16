@@ -461,36 +461,68 @@ class RecordsCoordinationAgent(BaseAgent):
         if current_awaiting == "personal_guide_consent":
             guide_consent = normalize_yes_no(extracted.get("personal_guide_consent", ""))
 
+            # The answer to the guide offer, filed under the option slot.
+            #
+            #     AI      I can have one of our Personal Guides contact your
+            #             doctor's office on your behalf. Would you like us to
+            #             proceed with that?
+            #     Caller  no i dont want to proceed
+            #     →       extracted {"upload_method": "decline"}
+            #
+            # records_coordination.md lists "I don't want to proceed" under
+            # upload_method's decline AND "no I don't want to proceed" under
+            # personal_guide_consent's no, so the caller's sentence is the
+            # documented example for two different fields. The model picked one
+            # and this branch read the other, which made a clear refusal
+            # ambiguous: re-asked, and escalated on the third pass.
+            #
+            # upload_method is scoped by the prompt to the agent's most recent
+            # offer, and the most recent offer IS the guide offer — so decline
+            # and personal_guide are positions on it, not on a choice that has
+            # already been made. This reads the model's own classification; it
+            # never guesses one.
+            if not guide_consent:
+                by_option = {"personal_guide": "yes", "decline": "no"}.get(
+                    str(extracted.get("upload_method", "") or "").strip().lower(), ""
+                )
+                if by_option:
+                    logger.info(
+                        "records_coordination: guide consent read from the option slot",
+                        extra={"upload_method": extracted.get("upload_method"), "consent": by_option},
+                    )
+                    guide_consent = by_option
+
             if guide_consent == "yes":
                 return await self._trigger_guide_and_proceed(state)
 
             if guide_consent == "no":
-                from agent.agents.follow_up.constants import MSG_FOLLOW_UP_ASK
-
-                handoff = pick(MSG_FOLLOW_UP_ASK)
-                result = self.ask_member(state, handoff)
-                result["next_node"] = "follow_up_agent"
-                result["awaiting_slot"] = ""
-                result["records_branch_taken"] = "declined_personal_guide"
-                # Mark the claim flow as complete so follow_up_agent's
-                # is_new_intake_intent gate recognises a subsequent same-intent
-                # request (e.g. "I have another adjustment") as a fresh intake.
-                result["claim_flow_complete"] = True
-                result["last_agent_signal"] = {
-                    "status": "complete",
-                    "resolved_intents": ["records_coordination"],
-                    "closure_requested": False,
-                    "context_updates": {},
-                    "proactive_offer_available": False,
-                    "escalation_reason": None,
-                    "reasoning": "records_coordination_agent",
-                }
-                return result
+                return self._decline_guide_and_close(state)
 
             # Ambiguous
             # Never verbatim-repeat over an unhandled request (Phase 7).
             if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                 return handled
+
+            # Neither a yes nor a no, and the turn is not about something else:
+            # a refusal the model could not place. The offer is the only
+            # question on the table, so a turn that takes no position on it
+            # took none on anything — see core.confirmation. This is the same
+            # backstop the email_confirmed phase above runs, and the same
+            # asymmetry decides it: reading a decline here closes the records
+            # branch cleanly and leaves the caller the follow-up question to
+            # ask again on, while re-asking spends the caller's refusal on a
+            # retry and hands them a representative they never asked for.
+            #
+            # Consent to act stays with the model: only "no" is read this way,
+            # never "yes" — a Personal Guide calling a provider is not an
+            # outcome to reach on anything but the caller's word.
+            if not is_not_an_answer(result, last_user, owned_slots=("personal_guide_consent",)):
+                logger.info(
+                    "records_coordination: guide offer declined — no position taken on it",
+                    extra={"utterance": (last_user or "")[:60]},
+                )
+                return self._decline_guide_and_close(state)
+
             # Waiting is not a failed attempt — see wait_ack.
             if wait := self.wait_ack(state, "personal_guide_consent", decision=result):
                 return wait
@@ -544,6 +576,34 @@ class RecordsCoordinationAgent(BaseAgent):
         result["awaiting_slot"] = awaiting
         if prefix:
             result["messages"]["content"] = prefix + result["messages"]["content"]
+        return result
+
+    def _decline_guide_and_close(self, state: State) -> dict:
+        """The caller does not want Personal Guide outreach — close the branch.
+
+        Declining the guide offer is not a failure and not an escalation: the
+        records step has been offered every way it can be, so the call moves to
+        the follow-up question with the branch recorded as declined.
+        """
+        from agent.agents.follow_up.constants import MSG_FOLLOW_UP_ASK
+
+        result = self.ask_member(state, pick(MSG_FOLLOW_UP_ASK))
+        result["next_node"] = "follow_up_agent"
+        result["awaiting_slot"] = ""
+        result["records_branch_taken"] = "declined_personal_guide"
+        # Mark the claim flow as complete so follow_up_agent's
+        # is_new_intake_intent gate recognises a subsequent same-intent
+        # request (e.g. "I have another adjustment") as a fresh intake.
+        result["claim_flow_complete"] = True
+        result["last_agent_signal"] = {
+            "status": "complete",
+            "resolved_intents": ["records_coordination"],
+            "closure_requested": False,
+            "context_updates": {},
+            "proactive_offer_available": False,
+            "escalation_reason": None,
+            "reasoning": "records_coordination_agent",
+        }
         return result
 
     async def _handle_guide_consent_ask(self, state: State) -> dict:
