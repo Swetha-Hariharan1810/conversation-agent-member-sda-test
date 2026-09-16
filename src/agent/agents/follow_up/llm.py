@@ -25,6 +25,10 @@ from agent.utils import speak_email, speak_url
 
 logger = get_logger(__name__)
 
+# The label the model sees above the call record. Caller-safe by construction —
+# see the module docstring.
+SNAPSHOT_HEADER = "OUR CONVERSATION"
+
 
 def _build_session_snapshot(state: State) -> str:  # noqa: C901
     """
@@ -171,7 +175,7 @@ async def extract_follow_up_decision(
     """
     Single LLM call: classifies guard + intent AND generates answer if needed.
 
-    Session snapshot is injected into the user content so the model can answer
+    The call record is injected into the user content so the model can answer
     questions directly without a second generation call.
 
     The answer field on WorkerResult carries the generated response back.
@@ -191,7 +195,7 @@ async def extract_follow_up_decision(
     # Inject session snapshot into the user message content so the model
     # has all the information it needs to generate an answer in one pass.
     if session_snapshot and messages:
-        messages[-1]["content"] = f"SESSION SNAPSHOT:\n{session_snapshot}\n\n" + messages[-1]["content"]
+        messages[-1]["content"] = f"{SNAPSHOT_HEADER}:\n{session_snapshot}\n\n" + messages[-1]["content"]
 
     try:
         result: FollowUpResult = await llm.with_structured_output(FollowUpResult).ainvoke(messages)
