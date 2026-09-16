@@ -561,6 +561,10 @@ class RecordsCoordinationAgent(BaseAgent):
 
         logger.info(LOG_UPLOAD_LINK_SENT, extra={"email_tail": email[-8:]})
 
+        # The caller confirmed this address before the link went out, so the
+        # call captured it — report it even if it is the one on file.
+        self.field_captured("email", email)
+
         # upload_link_sent=True means the upload_method decision is resolved —
         # mark the slot confirmed so no dangling unconfirmed slot remains.
         self.get_slot("upload_method").record_attempt("upload_link", success=True)

@@ -59,6 +59,12 @@ class State(TypedDict):
     # both report as "intent"), so a field is reported once per distinct value.
     # See core/metadata_events.py.
     emitted_fields: dict[str, str]
+    # Reported field names standing at the value the member record had on file,
+    # which the call has not captured. The sweep that reports direct state
+    # writes passes these over until the call asks about them — a claim call
+    # does not report the ZIP, fax and email the lookup hydrated for the agents
+    # that may need them. See core/metadata_events.py.
+    fields_on_file: list[str]
     conversation_context: Optional[ConversationContextDict]
 
     # ── Caller identity (set by verification) ────────────────────────────────
@@ -304,6 +310,7 @@ def reset_for_new_intent(state: State, new_intent: Optional[str]) -> dict:
         "fax": None,
         "email": None,
         "conversation_context": None,  # rebuilt fresh from cleared identity
+        "fields_on_file": [],  # nothing on file survives cleared contact fields
         # ── Verification flag(s) → False/0 ───────────────────────────────────
         "member_status_verify": False,
         "reverify_bridge_pending": True,  # one-shot: deliver first-name bridge on next verification entry
