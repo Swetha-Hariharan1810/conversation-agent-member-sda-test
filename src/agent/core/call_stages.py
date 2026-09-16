@@ -62,6 +62,56 @@ STAGE_LABELS: dict[str, str] = {
 }
 
 
+# The same rule, applied to the other half of the line. "Coming up:" is built
+# from two lists: the stages after this agent, labelled above, and the slots
+# this agent has left — and those went in as their own field names, with the
+# underscores swapped for spaces:
+#
+#     Coming up: personal guide consent, choosing SMS or email for claim status updates
+#
+# The caller had just asked us to contact their doctor's office. The answer was
+# the first item on that line, and the model did not recognise it as one,
+# because "personal guide consent" is not a thing that happens to a caller —
+# it is the name of a field. So it took the question as one the call could not
+# reach, declined it ("a representative would need to make that change"), and
+# the system appended the offer it had been about to make anyway:
+#
+#     AI  I understand you'd prefer we contact your doctor's office directly.
+#         A representative would need to make that change. I can also have one
+#         of our Personal Guides contact your doctor's office on your behalf.
+#         Would you like us to proceed with that?
+#
+# A slot with no entry here still goes in as its own name, which is right for
+# the ones that read as themselves ("provider type", "zip code"). Only the
+# steps a caller would not recognise under their field name need translating.
+SLOT_STAGE_LABELS: dict[str, str] = {
+    # ── records coordination ─────────────────────────────────────────────────
+    "upload_method": "choosing how the medical records reach us",
+    "upload_consent": "an offer of a secure upload link by email",
+    "personal_guide_consent": (
+        "an offer to have a Personal Guide contact your doctor's office for the records"
+    ),
+    # ── delivery management ──────────────────────────────────────────────────
+    "delivery_method": "choosing whether the provider list comes by fax or email",
+    "fax_confirmed": "confirming the fax number the list goes to",
+    "fax": "the fax number the list goes to",
+    "email_confirmed": "confirming the email address",
+    "email": "the email address to use",
+    "benefits_response": "an offer to go over the benefits for office visits",
+    # ── notification setup ───────────────────────────────────────────────────
+    "notification_method": "choosing SMS or email for claim status updates",
+    "phone_confirmed": "confirming the phone number for updates",
+    "phone": "the phone number for updates",
+    "timeline_question": "an offer of updates as the claim moves along",
+    "n2_notification_method": "choosing how those timeline updates reach you",
+}
+
+
+def spoken_slot_stage(slot: str) -> str:
+    """A pipeline slot as a step the caller would recognise being told about."""
+    return SLOT_STAGE_LABELS.get(slot, (slot or "").replace("_", " "))
+
+
 def _still_ahead(agent: str, state: Mapping[str, Any]) -> bool:
     """Is this stage still going to happen?
 

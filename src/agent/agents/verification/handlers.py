@@ -4,6 +4,7 @@ handlers.py — Verification workflow handlers. Updated to use pick().
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from agent.agents.verification.constants import (
@@ -511,3 +512,113 @@ def apply_corrections(agent, collected, state, decision: "WorkerResult | None"):
         state["member_status_verify"] = False
 
     return corrected
+
+
+# ── Named-part name corrections, read from the words ─────────────────────────
+#
+#     AI    Thank you. Just to confirm — is your name Emily Watson. That's
+#           spelled E-M-I-L-Y-W-A-T-S-O-N, correct?
+#     User  Actually, my surname is Carter, not Watson.
+#     AI    Sure, what is the correct name?
+#
+# The caller had just given the correct name. They said which half of it was
+# wrong and what it should be, and were asked to say it again.
+#
+# name_confirmation.md teaches the correction shape as "no, it's Jhon Doe" — a
+# replacement offered whole, with no part of the name named. This caller named
+# the part ("surname") and contrasted it with the value that had been read back
+# ("not Watson"), and neither phrasing is in the contract. The trailing "not
+# Watson" is the problem: it is the shape of every rejection listed under
+# OUTCOME 3 ("that's not right", "no that's not me"), so the turn comes back a
+# bare no — or, worse, as last_name="Watson", which reads the wrong name back
+# as though the caller had asked for it.
+#
+# Which part of their name a caller is correcting is a fact about their words
+# whenever they name it, so it is read from the words, the way a named
+# specialty and a named appeal already are in intake.
+
+_NAME_WORD = r"[A-Za-z][A-Za-z'\-]*"
+
+# Words that can stand where a name would and are not one. Without these the
+# capture runs past the name into the rest of the sentence: "my last name is
+# wrong" yields "Wrong", and "my surname is Carter, not Watson" yields "Carter
+# Not Watson" — a correction assembled out of the sentence complaining about it.
+_NOT_A_NAME = (
+    r"(?:not|and|or|but|instead|rather|it|its|that|this|these|those|the|a|an|is|was|"
+    r"are|were|my|your|his|her|their|our|please|thanks|thank|actually|really|correct|"
+    r"right|wrong|incorrect|different|spelled|spelt|sorry|no|yes|yeah|yep|nope|"
+    r"name|names|surname|first|last|family|maiden|given)"
+)
+_NAME_TOKEN = rf"\b(?!{_NOT_A_NAME}\b){_NAME_WORD}"
+# Up to three words: "Carter", "Van Der Berg". The lookbehind keeps the run from
+# starting inside a word or after an apostrophe — without it "it's Carter" reads
+# as the name "T's Carter", the tail of a contraction the stop list already
+# rejected whole.
+_NAME_RUN = rf"((?<![\w']){_NAME_TOKEN}(?:\s+{_NAME_TOKEN}){{0,2}})"
+
+_PART_LABELS: dict[str, str] = {
+    "last_name": r"(?:sur\s?name|last\s+name|family\s+name|second\s+name|maiden\s+name)",
+    "first_name": r"(?:first\s+name|given\s+name|fore\s?name|christian\s+name)",
+}
+# Carries its own leading space so "my surname's Carter" reads the same as
+# "my surname is Carter".
+_IS = r"(?:\s*'s|\s+(?:is|was|should\s+be|would\s+be|needs?\s+to\s+be|must\s+be|goes\s+by))"
+_FILLER = r"(?:\s+(?:actually|really|spelled|spelt|just))?"
+
+# A bare "X, not Y" names no part, but which part it corrects is still knowable
+# when Y is the name the call is currently holding: X replaces it.
+_CONTRASTIVE_MAX_WORDS = 6
+
+_NAMED_PART_PATTERNS: dict[str, re.Pattern[str]] = {
+    slot: re.compile(
+        rf"\b(?:(?:my|the|her|his|their|our)\s+)?{labels}{_IS}{_FILLER}\s+{_NAME_RUN}",
+        re.IGNORECASE,
+    )
+    for slot, labels in _PART_LABELS.items()
+}
+_CONTRASTIVE_PATTERN: re.Pattern[str] = re.compile(
+    rf"{_NAME_RUN}\s*,?\s+not\s+({_NAME_WORD})\b", re.IGNORECASE
+)
+
+
+def recover_name_correction(
+    utterance: str,
+    current_first: str = "",
+    current_last: str = "",
+) -> dict[str, str]:
+    """The name parts the caller's words name, as ``{slot: value}``.
+
+    Empty when the words name nothing — the ordinary case, where the LLM's
+    reading stands unchanged. Only ever returns a part the caller identified:
+    either by naming it ("my surname is Carter") or by contrasting the
+    replacement with the value the call is currently holding ("Carter, not
+    Watson").
+    """
+    text = (utterance or "").replace("\u2019", "'")
+    found: dict[str, str] = {}
+
+    for slot, pattern in _NAMED_PART_PATTERNS.items():
+        match = pattern.search(text)
+        if not match:
+            continue
+        candidate = normalize_name(match.group(1))
+        if candidate and validate_name(candidate).valid:
+            found[slot] = candidate
+
+    # The contrastive reading only applies to a short turn. "X, not Y" carries a
+    # correction when it is most of what the caller said; inside a longer
+    # sentence it is as likely to be about someone else ("I spoke to Sarah, not
+    # Watson, about the claim"), and that one is the model's to read, not a
+    # regex's.
+    if len(text.split()) <= _CONTRASTIVE_MAX_WORDS:
+        for match in _CONTRASTIVE_PATTERN.finditer(text):
+            replacement = normalize_name(match.group(1))
+            replaced = normalize_name(match.group(2)).lower()
+            if not replacement or not validate_name(replacement).valid or not replaced:
+                continue
+            if replaced == (current_last or "").strip().lower():
+                found.setdefault("last_name", replacement)
+            elif replaced == (current_first or "").strip().lower():
+                found.setdefault("first_name", replacement)
+
+    return found

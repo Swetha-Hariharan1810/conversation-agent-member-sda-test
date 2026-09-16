@@ -50,6 +50,9 @@ LOG_ENTERED = "follow_up_agent: entered"
 LOG_ANSWERED = "follow_up_agent: answered from session context"
 LOG_CLOSURE = "follow_up_agent: closure signal detected"
 LOG_CANNOT_ANSWER = "follow_up_agent: LLM could not answer from context"
+LOG_ANSWER_NAMED_MACHINERY = (
+    "follow_up_agent: answer named the machinery — falling back to the caller-facing wording"
+)
 LOG_NEW_INTENT = "follow_up_agent: new intent detected — restarting flow"
 
 # State fields that must be cleared when a new intent is detected mid-call.

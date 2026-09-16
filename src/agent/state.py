@@ -191,6 +191,7 @@ class State(TypedDict):
     # verification can be skipped entirely.
     saved_member_context: Optional[dict]  # snapshot of identity/verification fields
     same_member_check_pending: bool  # True while awaiting the same-vs-different answer
+    same_member_clarify_attempts: int  # clarifications already spent on that answer
 
     # ── Caller type detection ────────────────────────────────────────────────
     caller_type: str  # "member" | "provider" | "employer_group" | "other_carrier" | "unknown"
@@ -366,6 +367,7 @@ def reset_for_new_intent(state: State, new_intent: Optional[str]) -> dict:
         # ── Same-member disambiguation ────────────────────────────────────────
         "saved_member_context": None,
         "same_member_check_pending": False,
+        "same_member_clarify_attempts": 0,
         # ── Claim adjustment ─────────────────────────────────────────────────
         "reference_number": "",
         "claim_status": "",

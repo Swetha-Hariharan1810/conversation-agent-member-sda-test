@@ -139,6 +139,7 @@ LOG_PARTIAL_REASK = "VerificationAgent: partial re-ask — clearing only mismatc
 LOG_NAME_READBACK = "VerificationAgent: name readback delivered"
 LOG_NAME_CONFIRMED = "VerificationAgent: name confirmed by member"
 LOG_NAME_CORRECTED = "VerificationAgent: name corrected by member"
+LOG_NAME_PART_RECOVERED = "VerificationAgent: name part read from the caller's own words"
 LOG_NAME_CONFIRM_EXHAUST = "VerificationAgent: name confirmation exhausted — escalating"
 
 # =========================================================

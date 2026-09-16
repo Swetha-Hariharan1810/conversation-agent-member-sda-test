@@ -135,8 +135,17 @@ def test_this_pipelines_slots_come_before_the_rest_of_the_call():
     out = _coming_up(
         ctx_slots=["zip_code", "delivery_method"], remaining=[], slot_name="", call_intent=PROVIDER
     )
-    assert out[:2] == ["zip code", "delivery method"]
-    assert STAGE_LABELS["delivery_management_agent"] in out[2:]
+    assert out[:2] == ["zip code", STAGE_LABELS["delivery_management_agent"]]
+
+
+def test_a_step_reachable_from_both_halves_is_named_once():
+    """provider_search's delivery_method slot IS the delivery stage that
+    follows it. Named twice, the line reads as two steps to get through."""
+    out = _coming_up(
+        ctx_slots=["zip_code", "delivery_method"], remaining=[], slot_name="", call_intent=PROVIDER
+    )
+    assert out.count(STAGE_LABELS["delivery_management_agent"]) == 1
+    assert len(out) == len(set(out))
 
 
 def test_the_slot_being_collected_is_not_listed_as_coming():
@@ -157,7 +166,7 @@ def test_the_tail_of_a_pipeline_still_has_the_call_ahead_of_it():
 
 def test_remaining_is_the_fallback_when_the_context_carries_nothing():
     out = _coming_up(ctx_slots=[], remaining=["delivery_method"], slot_name="", call_intent=PROVIDER)
-    assert out[0] == "delivery method"
+    assert out[0] == STAGE_LABELS["delivery_management_agent"]
 
 
 # ── the labels are spoken, not internal ──────────────────────────────────────

@@ -348,3 +348,121 @@ async def handle_unsupported_provider_type(agent, state: State, result=None) -> 
         reason=PROVIDER_TYPE_UNSUPPORTED_REASON,
         initiator="Agent",
     )
+
+
+# ── Withdrawal screen, applied before the same-member question is re-asked ───
+# The same-member question ("same member, or a different member?") assumes the
+# caller still wants the thing they just asked for. A caller who has changed
+# their mind does not answer it — they close the call:
+#
+#     AI      Is this request for the same member we've been discussing, or is
+#             this for a different member?
+#     Caller  no worries, that's fine. no, that's everything — thanks for the help
+#     AI      Could you clarify — is this for the member we already have on
+#             file, or a different person?
+#     Caller  really, that's all — thanks
+#     AI      Could you clarify — is this for the member we already have on
+#             file, or a different person?
+#
+# The classifier has no category for this, so every one of those turns came
+# back "unclear" and the question was asked again, verbatim, for as long as the
+# caller kept saying goodbye. "That's everything" is a fact about the words, so
+# — like the specialty and appeal screens above — it is read from the words,
+# before the model is asked anything.
+
+_WITHDRAWAL_PHRASES: tuple[str, ...] = (
+    "that's all",
+    "thats all",
+    "that's it",
+    "thats it",
+    "that's everything",
+    "thats everything",
+    "that will be all",
+    "that'll be all",
+    "thatll be all",
+    "nothing else",
+    "nothing more",
+    "nothing further",
+    "no thanks",
+    "no thank you",
+    "all set",
+    "all good",
+    "i'm good",
+    "im good",
+    "i'm done",
+    "im done",
+    "we're done",
+    "were done",
+    "never mind",
+    "nevermind",
+    "forget it",
+    "forget about it",
+    "don't worry about it",
+    "dont worry about it",
+    "leave it",
+    "skip it",
+    "goodbye",
+    "good bye",
+    "bye",
+    "take care",
+)
+# Deliberately not here: "that's fine", "okay", "sure". Ending a call wrongly
+# costs more than one more question, and those can just as easily mean "fine,
+# use the same member". They are left to the classifier, which reads them next
+# to what was asked; the screen only claims the sentences that can mean nothing
+# else.
+
+# Anything that names a member — or points at one — means the turn is an answer
+# to the question, not a withdrawal, however it ends. "That's all, it's for my
+# wife" is a different member and a closing breath, and the member wins.
+_MEMBER_REFERENCE_PHRASES: tuple[str, ...] = (
+    "same",
+    "different",
+    "someone else",
+    "somebody else",
+    "another",
+    "new member",
+    "new patient",
+    "on file",
+    "for her",
+    "for him",
+    "for them",
+    "my wife",
+    "my husband",
+    "my spouse",
+    "my son",
+    "my daughter",
+    "my mother",
+    "my father",
+    "my mom",
+    "my dad",
+    "my child",
+    "my kid",
+    "my partner",
+    "myself",
+)
+
+
+def _phrase_hit(phrases: tuple[str, ...], utterance: str) -> bool:
+    """Word-boundary match of any phrase in ``phrases`` against ``utterance``.
+
+    Word boundaries, not ``in``: "no" lives inside "nothing", "now" and "know",
+    and "new" inside "renew" — substring matching on either list turns a caller
+    saying goodbye into a caller naming a different member.
+    """
+    import re
+
+    text = (utterance or "").lower().replace("’", "'").replace("‘", "'")
+    pattern = r"\b(?:" + "|".join(re.escape(p) for p in phrases) + r")\b"
+    return bool(re.search(pattern, text))
+
+
+def screen_request_withdrawn(utterance: str) -> bool:
+    """Is the caller dropping the request rather than answering the question?
+
+    True only when the turn closes the call AND names no member: a withdrawal
+    is what is left when nothing in the sentence answers "same or different".
+    """
+    return _phrase_hit(_WITHDRAWAL_PHRASES, utterance) and not _phrase_hit(
+        _MEMBER_REFERENCE_PHRASES, utterance
+    )

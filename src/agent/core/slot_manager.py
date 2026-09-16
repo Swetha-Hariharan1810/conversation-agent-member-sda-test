@@ -20,11 +20,12 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional, Tuple
 
 from agent.conversation.context import ConversationContext
-from agent.core.call_stages import remaining_call_stages
+from agent.core.call_stages import remaining_call_stages, spoken_slot_stage
 from agent.core.constants import MAX_FREE_FOLLOWUP_TURNS, MAX_WAIT_TURNS
 from agent.core.followup_grounding import is_grounded_followup
 from agent.core.models import SlotAttempt
 from agent.llm.config import Config
+from agent.logger import get_logger
 from agent.responses.builder import (
     build_initial_prompt,
     build_retry_prompt,
@@ -41,6 +42,168 @@ from agent.utils import (
     detect_wait_request,
     pick,
 )
+
+logger = get_logger(__name__)
+
+
+# ── A turn that declines what it then offers ─────────────────────────────────
+#
+#     AI    I can also generate a secure upload link and send it to your email.
+#           Would you like me to do that?
+#     User  no — actually, I've changed my mind, I don't want the link. could
+#           you just reach out to my doctor's office for me instead?
+#     AI    I understand you'd prefer we contact your doctor's office directly.
+#           A representative would need to make that change. I can also have
+#           one of our Personal Guides contact your doctor's office on your
+#           behalf. Would you like us to proceed with that?
+#
+# One turn, built by two layers that cannot see each other. The caller's side
+# question went to the generation LLM, which found no answer for it and
+# declined; the declining sentence was carried in ``pending_side_answer``; and
+# the agent then spoke the Personal Guide offer — which is that same outreach,
+# offered. The caller is told no and yes about one thing, in that order.
+#
+# "Coming up:" now names the Personal Guide step in words (see
+# call_stages.SLOT_STAGE_LABELS), which is what should stop the decline being
+# written at all. This is the second line: whatever the generation layer
+# produced, a carried decline is dropped when the turn it rides in front of
+# offers the same thing. Only the carried sentence is ever dropped — the
+# handler's own message always speaks.
+_DECLINE_MARKERS: tuple[str, ...] = (
+    "representative would need",
+    "representative will need",
+    "representative can make",
+    "representative would have to",
+    "would need a representative",
+    "need to speak with a representative",
+    "isn't something this line",
+    "is not something this line",
+    "isn't something i can",
+    "is not something i can",
+    "isn't something we can",
+    "is not something we can",
+    "not able to do that",
+    "unable to do that",
+    "can't do that",
+    "cannot do that",
+)
+
+# An offer is a first-person capability: the turn saying it will do the thing.
+_OFFER_MARKERS: tuple[str, ...] = (
+    "i can ",
+    "i could ",
+    "i can also",
+    "we can ",
+    "i'll ",
+    "we'll ",
+    "would you like",
+    "can reach out",
+    "can contact",
+    "can conduct",
+)
+
+# Words that two sentences about different things still share.
+_OVERLAP_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "that",
+        "this",
+        "with",
+        "your",
+        "yours",
+        "you",
+        "would",
+        "could",
+        "like",
+        "also",
+        "from",
+        "have",
+        "want",
+        "them",
+        "they",
+        "there",
+        "here",
+        "will",
+        "just",
+        "into",
+        "about",
+        "what",
+        "when",
+        "then",
+        "than",
+        "make",
+        "made",
+        "need",
+        "needs",
+        "please",
+        "sure",
+        "help",
+        "today",
+        "call",
+        "line",
+    }
+)
+
+# The decline and the offer are written by different layers, so they name the
+# same subject differently: the caller's "doctor's office" is the offer's
+# "provider", and "contact" is "reach out". Counting raw words, the two
+# sentences about one thing looked like two sentences about two.
+_SUBJECT_SYNONYMS: dict[str, str] = {
+    "doctor": "provider",
+    "doctors": "provider",
+    "physician": "provider",
+    "provider": "provider",
+    "providers": "provider",
+    "office": "provider",
+    "practice": "provider",
+    "clinic": "provider",
+    "contact": "outreach",
+    "contacting": "outreach",
+    "reach": "outreach",
+    "reaching": "outreach",
+    "outreach": "outreach",
+    "record": "records",
+    "records": "records",
+    "documentation": "records",
+    "documents": "records",
+    "guide": "guide",
+    "guides": "guide",
+    "link": "link",
+    "upload": "link",
+}
+
+# Two shared subject words is the same threshold _match_promised_item uses to
+# decide a caller is asking about a parked item. One is a coincidence.
+_MIN_SHARED_WORDS = 2
+
+
+def _content_words(text: str) -> set[str]:
+    """The words a sentence is about, with the synonyms folded together."""
+    words = set()
+    for raw in re.findall(r"[a-z]+", (text or "").lower()):
+        word = _SUBJECT_SYNONYMS.get(raw, raw)
+        if len(word) > 3 and word not in _OVERLAP_STOPWORDS:
+            words.add(word)
+    return words
+
+
+def _declines_what_is_offered(answer: str, message: str) -> bool:
+    """Does ``answer`` say no to the thing ``message`` is about to offer?
+
+    All three have to hold: the answer declines, the message offers, and the
+    two are about the same thing. Subject overlap is what keeps an unrelated
+    decline — "a representative would need to change your address", spoken in
+    front of a fax offer — from being swallowed: a decline the turn does not
+    answer is still owed to the caller.
+    """
+    lowered_answer = (answer or "").lower()
+    if not any(marker in lowered_answer for marker in _DECLINE_MARKERS):
+        return False
+    lowered_message = (message or "").lower()
+    if not any(marker in lowered_message for marker in _OFFER_MARKERS):
+        return False
+    shared = _content_words(answer) & _content_words(message)
+    return len(shared) >= _MIN_SHARED_WORDS
+
 
 # ── Empathetic "cannot provide" escalation message ────────────────────────────
 # Slot-aware: {slot_label} is filled at runtime from the SlotType label.
@@ -1007,10 +1170,21 @@ class SlotManagerMixin:
 
     @staticmethod
     def join_side_answer(answer: str, message: str) -> str:
-        """Put the side answer in front of the message the handler was sending."""
+        """Put the side answer in front of the message the handler was sending.
+
+        Unless the answer declines what the message is about to offer, in which
+        case the answer is dropped and the message speaks alone — see
+        ``_declines_what_is_offered``.
+        """
         answer = (answer or "").strip()
         message = (message or "").strip()
         if not answer:
+            return message
+        if message and _declines_what_is_offered(answer, message):
+            logger.info(
+                "join_side_answer: dropped a decline of what this turn offers",
+                extra={"dropped": answer, "kept": message},
+            )
             return message
         return f"{answer} {message}".strip() if message else answer
 
@@ -1116,12 +1290,18 @@ class SlotManagerMixin:
         declined, so the narrower line meant declining questions this call was
         always going to reach.
         """
-        slots = [s.replace("_", " ") for s in (ctx.coming_up or remaining) if s != slot_name]
-        return slots + remaining_call_stages(
+        slots = [spoken_slot_stage(s) for s in (ctx.coming_up or remaining) if s != slot_name]
+        stages = remaining_call_stages(
             intent=str(state.get("call_intent") or ""),
             current_agent=self.AGENT_NAME,
             state=state,
         )
+        # One step, named once. The two halves can reach the same step from
+        # either side — provider_search's own delivery_method slot IS the
+        # delivery stage that follows it — and a line that says the same thing
+        # twice reads as two steps the caller has to get through.
+        seen: set[str] = set()
+        return [item for item in slots + stages if not (item in seen or seen.add(item))]
 
     @staticmethod
     def resolve_park_guard(guard: str, *, parks_as_action: bool) -> str:

@@ -35,6 +35,7 @@ from agent.agents.records_coordination.constants import (
     MSG_GUIDE_SCHEDULED,
     MSG_NOTIFICATION_BRIDGE,
     MSG_PERSONAL_GUIDE_OFFER,
+    MSG_PERSONAL_GUIDE_OFFER_ALSO,
     MSG_UPLOAD_OFFER,
     MSG_UPLOAD_SENT,
     RECORDS_SLOT_ORDER,
@@ -570,7 +571,8 @@ class RecordsCoordinationAgent(BaseAgent):
         self.get_slot("upload_method").record_attempt("upload_link", success=True)
 
         sent_msg = pick(MSG_UPLOAD_SENT)
-        guide_msg = pick(MSG_PERSONAL_GUIDE_OFFER)
+        # Second in the turn, after the link went out — the "also" pool.
+        guide_msg = pick(MSG_PERSONAL_GUIDE_OFFER_ALSO)
         combined = join_turn(sent_msg, guide_msg)
 
         result = self.ask_member(state, combined)

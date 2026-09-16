@@ -26,6 +26,7 @@ from agent.agents.follow_up.constants import (
     FLOW_COMPLETE_FLAGS,
     INTAKE_INTENTS,
     INTAKE_RESCREEN_INTENTS,
+    LOG_ANSWER_NAMED_MACHINERY,
     LOG_ANSWERED,
     LOG_CANNOT_ANSWER,
     LOG_CLOSURE,
@@ -87,6 +88,67 @@ _FORBIDDEN_ANSWER_PHRASES = (
     "i can help you with",
     "i can help with",
 )
+
+# ── Words the caller is never told ───────────────────────────────────────────
+#
+#     User  can you go over my claim history again?
+#     AI    Claim history was not included in the session snapshot. Do you have
+#           any other questions about what we covered?
+#
+# The prompt asks the model to answer from a block of call data and to return
+# null when the answer is not in it. Told to answer from a thing, a model that
+# cannot find something in that thing says so — and names it. The caller hears
+# the plumbing, and the sentence they get is written in the system's terms
+# instead of their own: "the session snapshot" for "our conversation".
+#
+# The prompt has said "answer=null … do not redirect" all along, so this is not
+# a rule the model is missing; it is a rule it does not always keep. An answer
+# naming the machinery is a non-answer wearing an answer's clothes, so it is
+# treated as one: the turn falls to MSG_CANNOT_ANSWER, which says the same
+# thing in the caller's terms ("that isn't something we covered during this
+# call"), and — because the streak counts it — three of them now escalate
+# instead of looping.
+#
+# Matched anywhere in the answer, not just at its start like the phrases above:
+# the leak arrives mid-sentence, as the object of the refusal.
+_MACHINERY_TERMS = (
+    "snapshot",
+    "session context",
+    "session data",
+    "session state",
+    "session record",
+    "context window",
+    "my context",
+    "the context provided",
+    "context provided to me",
+    "provided context",
+    "system prompt",
+    "my instructions",
+    "my training",
+    "the payload",
+    "data provided to me",
+    "information provided to me",
+    "conversation log",
+    "call log",
+    "transcript",
+)
+_MACHINERY_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(t) for t in _MACHINERY_TERMS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _names_the_machinery(answer: str) -> str:
+    """The machinery term the answer speaks aloud, or "".
+
+    Whole-answer, not per-sentence: a refusal that names its source is not a
+    good sentence in a bad answer, it is the whole answer, and trimming the
+    sentence would leave the caller with nothing at all. The fallback already
+    has the words for this.
+    """
+    match = _MACHINERY_RE.search(answer or "")
+    return match.group(0) if match else ""
+
 
 # Whole-word match over the appeal/grievance keywords. Word boundaries keep
 # "appeal" from matching inside unrelated words and let each surface form
@@ -527,6 +589,9 @@ class FollowUpAgent(BaseAgent):
             answer_lower = answer.lower().strip()
             if any(answer_lower.startswith(p) for p in _FORBIDDEN_ANSWER_PHRASES):
                 logger.info(LOG_CANNOT_ANSWER)
+                answer = ""
+            elif leaked := _names_the_machinery(answer):
+                logger.info(LOG_ANSWER_NAMED_MACHINERY, extra={"term": leaked, "answer": answer})
                 answer = ""
 
         if not answer:

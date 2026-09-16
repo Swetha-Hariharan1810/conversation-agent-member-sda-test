@@ -22,6 +22,8 @@ FIELDS
   last_name  Title Case string
     The corrected last name, when the member declines AND gives the right name inline.
     Often given together with first_name in the same utterance.
+    "surname", "family name", "second name" and "maiden name" all mean last_name.
+    "given name" and "forename" mean first_name.
 
 CRITICAL EXTRACTION RULE — three outcomes, mutually exclusive:
 
@@ -38,6 +40,27 @@ CRITICAL EXTRACTION RULE — three outcomes, mutually exclusive:
     name_confirmed = "no", first_name omitted, last_name omitted
     Only use when the member clearly rejected the name but gave no replacement.
 
+NAMING THE PART, AND CONTRASTING IT — the two shapes that are still OUTCOME 2:
+
+  The member may say WHICH HALF of the name is wrong rather than repeating the
+  whole name. Extract that half; leave the other one alone.
+    "my surname is Carter"        → last_name="Carter"
+    "my first name is Emma"       → first_name="Emma"
+
+  The member may name the correction and the value it replaces in one breath,
+  as "<correct>, not <wrong>". The trailing "not <wrong>" is part of the
+  correction — it names what is being replaced. It is NEVER a bare rejection,
+  even though it reads like the OUTCOME 3 phrases above, and the name after
+  "not" is NEVER the correction.
+    "my surname is Carter, not Watson"   → last_name="Carter"  (NOT "Watson",
+                                            and NOT name_confirmed="no")
+    "it's Carter, not Watson"            → last_name="Carter"
+    "Emma, not Emily"                    → first_name="Emma"
+
+  A member who says only what is wrong, with no replacement, is still OUTCOME 3:
+    "my surname is not Watson"           → name_confirmed="no"
+    "my last name is wrong"              → name_confirmed="no"
+
 Examples:
   "yes that's correct"                     → name_confirmed="yes"
   "yes"                                    → name_confirmed="yes"
@@ -48,6 +71,7 @@ Examples:
   "no, it's Jhon Doe"                   → first_name="Jhon", last_name="Doe"
   "actually my name is Jhon Doe"        → first_name="Jhon", last_name="Doe"
   "no that's not right, it's Jhon Doe"  → first_name="Jhon", last_name="Doe"
+  "actually, my surname is Carter, not Watson" → last_name="Carter"
   "yes j h o n d o e"             → name_confirmed="yes"
 
 SPELLED-OUT CORRECTIONS — letter-by-letter responses:

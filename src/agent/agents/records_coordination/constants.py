@@ -42,11 +42,27 @@ MSG_DOCTOR_DIRECT_ACK = [
 ]
 
 # ── Personal Guide offer ───────────────────────────────────────────────────────
+# Standing alone: the caller has just turned the upload link down, or asked for
+# the outreach outright. Nothing precedes this in the turn, so nothing in it can
+# say "also" — an offer made "as well" as the thing they just refused reads as
+# though we were not listening.
 MSG_PERSONAL_GUIDE_OFFER = [
     "I can have one of our Personal Guides conduct the outreach to your doctor "
     "to request a complete copy of the medical records for this request. "
     "Would you like us to proceed?",
     "Our Personal Guides can reach out directly to your provider to request the records. "
+    "Would you like us to proceed with that?",
+    "I can have one of our Personal Guides contact your doctor's office on your behalf. "
+    "Would you like us to proceed with that?",
+]
+
+# The same offer, second in its turn: the link has just gone out, and this is
+# the other thing we can do on top of it. "Also" is right here and only here.
+MSG_PERSONAL_GUIDE_OFFER_ALSO = [
+    "I can also have one of our Personal Guides conduct the outreach to your doctor "
+    "to request a complete copy of the medical records for this request. "
+    "Would you like us to proceed?",
+    "Our Personal Guides can also reach out directly to your provider to request the records. "
     "Would you like us to proceed with that?",
     "I can also have one of our Personal Guides contact your doctor's office on your behalf. "
     "Would you like us to proceed with that?",
