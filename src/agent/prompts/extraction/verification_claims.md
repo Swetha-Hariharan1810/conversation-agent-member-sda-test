@@ -77,11 +77,22 @@ FIELDS
                   "no"  — the caller indicates it is not: wrong, out of date,
                           not theirs, or theirs to change. Any phrasing.
 
-                There is no list to match against, and nothing downstream
-                supplies one. If the caller genuinely does not know, leave
-                this empty and classify the turn ambiguous — the agent asks
-                again rather than recording a confirmation the caller did not
-                give, or a refusal they did not make.
+                There is no list to match against. Write the canonical
+                token — "yes" or "no" — and not the caller's words: the field
+                is the verdict, not a quote.
+
+                If the caller genuinely does not know, leave this empty and
+                classify the turn ambiguous — the agent asks again rather than
+                recording a confirmation the caller did not give, or a refusal
+                they did not make. An ambiguous turn is never read as either
+                answer downstream, so that label is honoured, not overridden.
+
+                A plain affirmation IS read from the caller's words downstream
+                when this field comes back empty, so an unplaced "yep, that's
+                the right number" no longer re-asks. A decline is not, and
+                cannot be: it ends the call. Leaving this empty on a caller who
+                refuses costs them the re-ask; filling it wrongly costs them
+                the call.
 
 NAME PLAUSIBILITY CHECK
 When extracting first_name or last_name, verify the value is a plausible

@@ -18,6 +18,7 @@ from agent.agents.verification.constants import (
 )
 from agent.conversation.context import ConversationContext
 from agent.core.metadata_events import ON_FILE_FIELDS, mark_on_file
+from agent.logger import get_logger
 
 if TYPE_CHECKING:
     from agent.llm.schema import WorkerResult
@@ -37,7 +38,7 @@ from agent.slots.validators import (
     validate_member_id,
     validate_name,
 )
-from agent.utils import pick
+from agent.utils import _last_user_msg, pick
 
 # Escalation messages — delivered at the moment of verification failure handoff
 MSG_ESCALATE = [
@@ -307,6 +308,67 @@ async def lookup_and_verify(agent, state, collected):
     return result, None
 
 
+# ── Reading a confirmation of the number on file ─────────────────────────────
+#     AI      Thank you. Is your phone number 512-555-6101?
+#     Caller  yep, that's the right number
+#     AI      Sorry, I didn't catch that — is 512-555-6101 still the best
+#             number to reach you?
+#
+# The caller confirmed and the turn re-asked. This slot lost its last backstop
+# when the raw-utterance normalize_yes_no fallback was removed, on the ground
+# that the model has the context and the contract by this turn. It mostly does.
+# When it does not, nothing catches it, and what the caller hears is the
+# question they just answered.
+#
+# What was removed injected "yes" OR "no" off one keyword list, and the "no"
+# half is the half that should not come back: a decline here ends the call
+# (MSG_PHONE_NOT_CONFIRMED), the phone on file is human_only so there is no
+# replacement to collect, and the ways of declining do not make a list that
+# finishes. normalize_yes_no("no, that's right") is "no" — that is the shape of
+# the mistake, and it costs a caller their call.
+#
+# An affirmation is the other case. It is a closed set — people have a handful
+# of ways to agree and they are not inventing more (see core.confirmation) —
+# so it can be read from the caller's words without a list that has to finish.
+# This reads only that, only when the model placed nothing, and only when
+# nothing in the turn contradicts it.
+_AFFIRMS_RE = re.compile(
+    r"^\W*(?:"
+    r"yes|yeah|yep|yup|ya|uh\s*huh|mm\s*hmm|sure|absolutely|definitely|certainly"
+    r"|correct|right|true|affirmative|of\s+course"
+    r"|that'?s\s+(?:the\s+)?(?:right|correct|it|one|mine|my\s+(?:number|cell|phone|mobile))"
+    r"|it\s+is|still\s+(?:right|correct|good|current|the\s+same)"
+    r"|sounds?\s+(?:right|good)|looks?\s+(?:right|good)|all\s+good|perfect"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Anything that argues with the affirmation it opened with. A caller who says
+# "yes, but it's changed" has not confirmed the number, and a caller asking a
+# question has not answered one.
+_CONTRADICTS_RE = re.compile(
+    r"\b(?:no|nope|nah|not|never|wrong|incorrect|different|another|other"
+    r"|new|newer|change|changed|changing|update|updated|updating|old|older"
+    r"|outdated|stale|switch|switched|replace|replaced|moved|instead)\b"
+    r"|\b(?:is|was|are|were|does|do|did|ca|wo|has|have|had|could|would|should)n'?t\b",
+    re.IGNORECASE,
+)
+
+
+def screen_phone_affirmation(utterance: str) -> str:
+    """``"yes"`` when ``utterance`` plainly confirms the number read back, else "".
+
+    Never returns "no". A decline ends the call, so it stays with the model —
+    see the note above.
+    """
+    text = (utterance or "").strip()
+    if not text or text.endswith("?"):
+        return ""
+    if _CONTRADICTS_RE.search(text):
+        return ""
+    return "yes" if _AFFIRMS_RE.match(text) else ""
+
+
 async def collect_post_lookup(
     agent,
     state,
@@ -329,20 +391,47 @@ async def collect_post_lookup(
         )
         claims_pipeline.configs["phone_confirmed"].prompt = prompt
         pipeline = claims_pipeline
-        # No keyword fallback here. This used to run normalize_yes_no over the
-        # caller's raw words when the model returned no phone_confirmed, which
-        # classified the turn from a fixed list of affirmations — "yes", "yep",
-        # "correct" — and silently missed anything outside it. By the turn the
-        # caller answers, awaiting_slot is "phone_confirmed" and the field is
-        # specified in verification_claims.md, so the model has both the
-        # context and the contract to classify on meaning; the list was
-        # covering for variance, not for a missing signal.
-        #
+
         # A turn the model cannot place re-asks, and deliberately does not fall
-        # either way. Unlike a fax or email read-back there is no new value to
+        # either way: unlike a fax or email read-back there is no new value to
         # collect — the phone on file is human_only — so "anything that is not
-        # a yes is a decline" buys nothing here, while a decline read into a
-        # caller who did say yes would stand as a confirmation they never gave.
+        # a yes is a decline" buys nothing here, and a decline read into a
+        # caller who did say yes ends their call on a refusal they never made.
+        #
+        # What DOES get read is the two ways a confirmation the model made
+        # never reaches the slot. The field is `phone_confirmed` in
+        # verification_claims.md and `phone_confirmation` in llm.py's own
+        # docstring, and redirect_off_topic below already treats both names as
+        # this slot — the pipeline read only the first, so a confirmation filed
+        # under the second was dropped. And an affirmation in the caller's
+        # words, when the model placed nothing at all: only "yes", never "no",
+        # and only when nothing in the turn contradicts it — see
+        # screen_phone_affirmation.
+        if decision is not None:
+            from agent.llm.schema import EventType
+
+            extracted = dict(decision.extracted or {})
+            answer = extracted.get("phone_confirmed", "") or extracted.get("phone_confirmation", "")
+            # A turn the model labelled AMBIGUOUS or WAIT keeps its label: "I'm
+            # not sure" and "hold on" are not positions on the number, whatever
+            # words carry them, and the screen is for the turn the model placed
+            # nowhere — not for one it placed as unsure. Same ordering, and the
+            # same reason, as core.confirmation.is_not_an_answer.
+            placed_no_position = getattr(decision, "event_type", None) in (
+                EventType.AMBIGUOUS,
+                EventType.WAIT,
+            )
+            if (
+                not answer
+                and not placed_no_position
+                and (screened := screen_phone_affirmation(_last_user_msg(messages)))
+            ):
+                get_logger(__name__).info(
+                    "collect_post_lookup: phone confirmation read from the caller's words"
+                )
+                answer = screened
+            if answer and not extracted.get("phone_confirmed"):
+                decision.extracted = {**extracted, "phone_confirmed": answer}
     else:
         # relationship_str = (member_record or {}).get("relationship") or ""
         relationship_str = "planholder or dependent"
