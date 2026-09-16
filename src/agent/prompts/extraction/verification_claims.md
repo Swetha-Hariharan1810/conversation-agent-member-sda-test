@@ -87,12 +87,17 @@ FIELDS
                 they did not make. An ambiguous turn is never read as either
                 answer downstream, so that label is honoured, not overridden.
 
-                A plain affirmation IS read from the caller's words downstream
-                when this field comes back empty, so an unplaced "yep, that's
-                the right number" no longer re-asks. A decline is not, and
-                cannot be: it ends the call. Leaving this empty on a caller who
-                refuses costs them the re-ask; filling it wrongly costs them
-                the call.
+                A plain affirmation and an explicit refusal are both read
+                from the caller's words downstream when this field comes back
+                empty, so an unplaced "yep, that's the right number" or "no,
+                that's not my number" no longer re-asks. That is a backstop,
+                not a reason to leave the field empty: a turn phrased any other
+                way has only this field to carry it.
+
+                A refusal routes the call to a representative — the number is
+                human_only, so nothing here can act on a "no". A caller who
+                does not know is not refusing: that is the ambiguous case
+                above, and it re-asks.
 
 NAME PLAUSIBILITY CHECK
 When extracting first_name or last_name, verify the value is a plausible

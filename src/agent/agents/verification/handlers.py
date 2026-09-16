@@ -75,11 +75,14 @@ MSG_OFFTOPIC_PREFIX = [
     "Let me finish verifying your account first. ",
 ]
 
-# ── Phone not confirmed — static end message ──────────────────────────────────
+# ── Phone not confirmed — escalation pre-message ───────────────────────────────
+# Spoken by the escalation agent, which appends the reference number and the
+# sign-off — so this carries no goodbye of its own. It used to end the call
+# where it stood, while telling the caller they were being transferred; the
+# transfer is real now and the wording no longer promises one twice.
 MSG_PHONE_NOT_CONFIRMED = (
     "I'm sorry, I'm unable to verify your account without confirming "
-    "the phone number on file. I'm transferring you to a live representative."
-    "Thank you for calling Sagility Health."
+    "the phone number on file. Let me connect you with a live representative."
 )
 
 # Truly human-only fields: system flags and the SF-verified phone number.
@@ -320,18 +323,23 @@ async def lookup_and_verify(agent, state, collected):
 # When it does not, nothing catches it, and what the caller hears is the
 # question they just answered.
 #
-# What was removed injected "yes" OR "no" off one keyword list, and the "no"
-# half is the half that should not come back: a decline here ends the call
-# (MSG_PHONE_NOT_CONFIRMED), the phone on file is human_only so there is no
-# replacement to collect, and the ways of declining do not make a list that
-# finishes. normalize_yes_no("no, that's right") is "no" — that is the shape of
-# the mistake, and it costs a caller their call.
+# Both directions are read, and only when the model placed nothing at all.
 #
-# An affirmation is the other case. It is a closed set — people have a handful
-# of ways to agree and they are not inventing more (see core.confirmation) —
-# so it can be read from the caller's words without a list that has to finish.
-# This reads only that, only when the model placed nothing, and only when
-# nothing in the turn contradicts it.
+# An affirmation is a closed set — people have a handful of ways to agree and
+# they are not inventing more (see core.confirmation) — so it reads without a
+# list that has to finish. A refusal is not a closed set, and this reads only
+# the explicit ones, never "anything that is not a yes": a garbled turn or a
+# hold has taken no position, and re-asking is the right answer to those.
+#
+# What made the decline unreadable before was where it went. It ended the call
+# where it stood, so a wrong read cost the caller the call. It escalates now,
+# which is where the re-ask was taking them anyway once the attempts ran out —
+# so the cost of reading one wrongly is reaching a representative sooner, and
+# the cost of not reading one is asking a caller the question they answered.
+#
+# The mistake that stays guarded is the mixed turn: normalize_yes_no("no,
+# that's right") is "no", and that caller confirmed. A turn that both affirms
+# and refuses is read as neither.
 _AFFIRMS_RE = re.compile(
     r"^\W*(?:"
     r"yes|yeah|yep|yup|ya|uh\s*huh|mm\s*hmm|sure|absolutely|definitely|certainly"
@@ -343,30 +351,64 @@ _AFFIRMS_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Anything that argues with the affirmation it opened with. A caller who says
-# "yes, but it's changed" has not confirmed the number, and a caller asking a
-# question has not answered one.
-_CONTRADICTS_RE = re.compile(
-    r"\b(?:no|nope|nah|not|never|wrong|incorrect|different|another|other"
-    r"|new|newer|change|changed|changing|update|updated|updating|old|older"
-    r"|outdated|stale|switch|switched|replace|replaced|moved|instead)\b"
+# A refusal of the number, or a statement that it is not the current one. Read
+# now because a decline no longer ends the call where it stands — it escalates,
+# so the cost of reaching this wrongly is a caller handed to a representative,
+# which is where a re-ask of a question they already answered was taking them
+# anyway, three attempts later.
+#
+# Explicit refusals only. NOT "anything that is not a yes": a garbled turn, a
+# side question or a hold have all said nothing about the number, and they
+# still re-ask.
+_DECLINES_RE = re.compile(
+    r"^\W*(?:no|nope|nah)\b"
+    r"|\b(?:not\s+(?:my|mine|right|correct|it|that|the\s+right|anymore|any\s+more)"
+    r"|wrong|incorrect|different|another|new\s+(?:number|phone|cell)"
+    r"|old|older|outdated|stale|previous|former"
+    r"|changed|change[sd]?\s+it|switch(?:ed)?|replaced|moved|disconnected)\b"
     r"|\b(?:is|was|are|were|does|do|did|ca|wo|has|have|had|could|would|should)n'?t\b",
     re.IGNORECASE,
 )
 
+# An affirmation anywhere in the turn, not just at the start — the guard for
+# "no, that's right", which opens on a refusal and then confirms. Turns that do
+# both say nothing this can act on, and re-ask.
+#
+# The phrases require their words adjacent, so "that's not right" is not one of
+# them: "that's right" and "that's not right" differ by one word and mean
+# opposite things.
+_AFFIRMS_ANYWHERE_RE = re.compile(
+    r"\b(?:"
+    r"that'?s\s+(?:the\s+)?(?:right|correct|it|one|mine|my\s+(?:number|cell|phone|mobile))"
+    r"|it\s+is|still\s+(?:right|correct|good|current|the\s+same)"
+    r"|sounds?\s+(?:right|good)|looks?\s+(?:right|good)|all\s+good"
+    r")\b",
+    re.IGNORECASE,
+)
 
-def screen_phone_affirmation(utterance: str) -> str:
-    """``"yes"`` when ``utterance`` plainly confirms the number read back, else "".
 
-    Never returns "no". A decline ends the call, so it stays with the model —
-    see the note above.
+def screen_phone_confirmation(utterance: str) -> str:
+    """``"yes"``, ``"no"``, or "" — the caller's position on the number read back.
+
+    "" for a turn that takes no position, which is most turns: a question, a
+    hold, an answer to something else. Both directions are read only when the
+    turn is unmixed — a caller who affirms and refuses in one breath gets the
+    question again rather than a guess at which half won.
     """
     text = (utterance or "").strip()
     if not text or text.endswith("?"):
         return ""
-    if _CONTRADICTS_RE.search(text):
+
+    declines = bool(_DECLINES_RE.search(text))
+    affirms = bool(_AFFIRMS_RE.match(text) or _AFFIRMS_ANYWHERE_RE.search(text))
+
+    if declines and affirms:
         return ""
-    return "yes" if _AFFIRMS_RE.match(text) else ""
+    if declines:
+        return "no"
+    if affirms and _AFFIRMS_RE.match(text):
+        return "yes"
+    return ""
 
 
 async def collect_post_lookup(
@@ -424,10 +466,11 @@ async def collect_post_lookup(
             if (
                 not answer
                 and not placed_no_position
-                and (screened := screen_phone_affirmation(_last_user_msg(messages)))
+                and (screened := screen_phone_confirmation(_last_user_msg(messages)))
             ):
                 get_logger(__name__).info(
-                    "collect_post_lookup: phone confirmation read from the caller's words"
+                    "collect_post_lookup: phone position read from the caller's words",
+                    extra={"verdict": screened},
                 )
                 answer = screened
             if answer and not extracted.get("phone_confirmed"):
@@ -465,28 +508,33 @@ async def collect_post_lookup(
 
     collected.update(post_collected)
 
-    # ── Phone not confirmed — end call immediately with static message ────────
-    # When the caller says "no" to the phone confirmation (claims flow), we
-    # cannot verify their identity. Route directly to END with a static message
-    # rather than completing verification or escalating to a live agent.
+    # ── Phone not confirmed — escalate to a representative ───────────────────
+    # The caller says the number on file is not theirs. Identity cannot be
+    # verified without it and the field is human_only, so there is nothing this
+    # call can do with the answer — it goes to someone who can.
+    #
+    # This used to route straight to END while saying "I'm transferring you to
+    # a live representative", so the caller was told about a transfer that
+    # never happened: no AgentCallTransfer event, no reference number, and the
+    # call reported itself finished. signal_escalate raises the event, hands
+    # the pre-message to escalation_agent for the reference number, and makes
+    # the sentence true.
     if call_intent == "claim_services":
         phone_answer = post_collected.get("phone_confirmed", "")
         # normalize_yes_no maps "no" → "no"; the slot value may also be stored
         # as the boolean False when collected["phone_confirmed"] == "no".
         phone_declined = phone_answer == "no" or phone_answer is False or str(phone_answer).lower() == "no"
         if phone_declined:
-            import logging
-
-            logging.getLogger(__name__).info(
-                "collect_post_lookup: phone_confirmed=no — ending call with static message"
+            get_logger(__name__).info(
+                "collect_post_lookup: phone_confirmed=no — escalating to a representative"
             )
-            result = agent.ask_member(state, MSG_PHONE_NOT_CONFIRMED)
-            result["next_node"] = "END"
-            result["is_interrupt"] = False
+            result = agent.signal_escalate(
+                state,
+                MSG_PHONE_NOT_CONFIRMED,
+                "phone_not_confirmed",
+                initiator="Agent",
+            )
             result["phone_update_requested"] = True
-            # This END is not a completed call — say so in the AgentCallEnded
-            # event rather than letting it report the default "complete".
-            result["call_end_detail"] = "phone_not_confirmed"
             return result
 
     if "phone_confirmed" in post_collected:
@@ -495,7 +543,7 @@ async def collect_post_lookup(
         # The caller heard the number on file read back and said it was theirs.
         # That is this call capturing the phone number, not merely carrying it,
         # so it is reported now — a decline never reaches here (the branch
-        # above ends the call), and the claims pipeline is the only one that
+        # above escalates), and the claims pipeline is the only one that
         # asks, so a flow that never puts the number to the caller still
         # reports nothing.
         phone_on_file = (member_record or {}).get("phone_number") or state.get("phone_number") or ""

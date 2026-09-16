@@ -25,11 +25,13 @@ of them landing on that one sentence:
     on the ground that the model has the context and the contract by this
     turn. It mostly does; when it does not, nothing catches it.
 
-What is deliberately NOT read from the caller's words is a decline. A "no"
-here ends the call, the phone on file is human_only so there is no
-replacement to collect, and the ways of refusing do not make a list that
-finishes. An affirmation is the opposite case — a closed set (see
-core.confirmation) — so it is read, and only it.
+The decline is read too, and did not used to be, for a reason that has since
+changed: it ended the call where it stood, so a wrong read cost the caller
+their call. A decline escalates now, which is where the re-ask was taking
+them anyway once the attempts ran out. Explicit refusals only — a garbled
+turn, a hold or a side question has taken no position and still re-asks — and
+never a mixed turn: normalize_yes_no("no, that's right") is "no", and that
+caller confirmed.
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ from unittest.mock import patch
 import pytest
 
 from agent.agents.verification.agent import VerificationAgent
-from agent.agents.verification.handlers import collect_post_lookup, screen_phone_affirmation
+from agent.agents.verification.handlers import collect_post_lookup, screen_phone_confirmation
 from agent.agents.verification.pipelines import build_claims_pipeline, build_provider_pipeline
 from agent.llm.schema import EventType, WorkerResult
 from agent.slots.normalizers import normalize_yes_no
@@ -128,37 +130,52 @@ def test_the_decline_side_is_left_to_the_model():
     ],
 )
 def test_an_affirmation_is_read_from_the_callers_words(said):
-    assert screen_phone_affirmation(said) == "yes"
+    assert screen_phone_confirmation(said) == "yes"
 
 
 @pytest.mark.parametrize(
     "said",
     [
-        # Refusals — never read here, whatever the wording.
         "no",
-        "no, that's my old number",
+        "nope",
+        "no, that's not my number",
         "that's not my number",
+        "that's not right",
+        "that's the wrong number",
+        "that's my old number",
+        "that's a different number",
         "I changed it last month",
-        # An affirmative opener with something that argues with it.
+        "I don't use that anymore",
+        "that number's been disconnected",
+    ],
+)
+def test_an_explicit_refusal_is_read_from_the_callers_words(said):
+    assert screen_phone_confirmation(said) == "no"
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        # Affirms and refuses in one breath — read as neither. "no, that's
+        # right" is the one normalize_yes_no gets wrong, and that caller
+        # confirmed.
+        "no, that's right",
         "yes, but I changed it recently",
         "yeah, that's my old one",
         "yes, can you update it to my cell?",
-        # Not an answer at all.
+        # No position on the number at all.
         "is that the number ending 6101?",
         "what number do you have?",
         "hold on, let me check",
+        "let me grab my card",
+        "umm",
         "",
     ],
 )
-def test_the_screen_reads_nothing_else(said):
-    """It returns "yes" or nothing. A decline read from words ends a call the
-    caller never asked to end."""
-    assert screen_phone_affirmation(said) == ""
-
-
-def test_the_screen_never_returns_no():
-    for said in ("no", "nope", "that's wrong", "not mine", "no thanks", "wrong number"):
-        assert screen_phone_affirmation(said) != "no"
+def test_a_turn_with_no_position_reads_as_none(said):
+    """Not "anything that is not a yes is a no" — that would escalate a caller
+    whose turn was garbled or who only asked a question."""
+    assert screen_phone_confirmation(said) == ""
 
 
 # ── end to end, through collect_post_lookup ──────────────────────────────────
@@ -234,15 +251,13 @@ async def test_the_reported_turn_confirms_the_number(decision):
             id="labelled-unsure-despite-the-opener",
         ),
         pytest.param("yes, but I changed it recently", WorkerResult(), id="affirms-then-contradicts"),
-        pytest.param("no, that's my old number", WorkerResult(), id="declines-in-words-only"),
+        pytest.param("no, that's right", WorkerResult(), id="affirms-and-refuses-at-once"),
         pytest.param(REPORTED, WorkerResult(extracted={"phone_confirmed": PHONE}), id="the-number-itself"),
     ],
 )
 async def test_what_must_still_be_asked_again(said, decision):
     """A label of AMBIGUOUS or WAIT is honoured over the words — the screen is
-    for a turn the model placed nowhere, not one it placed as unsure. And a
-    refusal is never read from words: the re-ask is the caller's chance to be
-    heard, where a wrong "no" would have ended the call."""
+    for a turn the model placed nowhere, not one it placed as unsure."""
     out = await _turn(said, decision)
 
     assert out["interrupt"] is not None, f"{said!r} was read as a confirmation"
@@ -250,9 +265,54 @@ async def test_what_must_still_be_asked_again(said, decision):
     assert not out["collected"].get("phone_confirmed")
 
 
-async def test_a_decline_the_model_placed_still_ends_the_call():
-    """The screen adds nothing to this path and must not take it away."""
-    out = await _turn("no, that's my old number", WorkerResult(extracted={"phone_confirmed": "no"}))
+# ── a decline escalates ──────────────────────────────────────────────────────
 
-    assert out["interrupt"]["next_node"] == "END"
-    assert out["interrupt"]["call_end_detail"] == "phone_not_confirmed"
+
+@pytest.mark.parametrize(
+    "said, decision",
+    [
+        pytest.param("no, that's not my number", WorkerResult(), id="the-reported-turn"),
+        pytest.param(
+            "no, that's not my number",
+            WorkerResult(extracted={"phone_confirmed": "no"}),
+            id="canonical",
+        ),
+        pytest.param(
+            "that's not my number",
+            WorkerResult(extracted={"phone_confirmation": "no"}),
+            id="the-other-field-name",
+        ),
+    ],
+)
+async def test_a_declined_number_escalates(said, decision):
+    """Identity cannot be verified without the number and the field is
+    human_only, so the answer goes to someone who can act on it. This used to
+    route to END while telling the caller they were being transferred — no
+    AgentCallTransfer, no reference number, and the call reported itself
+    finished."""
+    out = await _turn(said, decision)
+    result = out["interrupt"]
+
+    assert result["next_node"] == "escalation_agent"
+    assert result["last_agent_signal"]["status"] == "escalate"
+    assert result["phone_update_requested"] is True
+    assert "unable to verify" in result["escalation_pre_message"]
+
+    transfers = [
+        e
+        for e in (result.get("metadata_events") or [])
+        if (e.get("data") or {}).get("eventName") == "AgentCallTransfer"
+    ]
+    assert len(transfers) == 1, "the transfer the caller is promised must be reported"
+    assert transfers[0]["data"]["detail"] == "phone_not_confirmed"
+
+
+def test_the_pre_message_leaves_the_sign_off_to_the_escalation_agent():
+    """escalation_agent appends the reference number and the goodbye, so the
+    pre-message must not carry one of its own."""
+    from agent.agents.verification.handlers import MSG_PHONE_NOT_CONFIRMED
+
+    assert "unable to verify" in MSG_PHONE_NOT_CONFIRMED
+    assert "representative" in MSG_PHONE_NOT_CONFIRMED
+    assert "Have a great day" not in MSG_PHONE_NOT_CONFIRMED
+    assert "Thank you for calling" not in MSG_PHONE_NOT_CONFIRMED

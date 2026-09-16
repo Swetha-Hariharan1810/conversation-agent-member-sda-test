@@ -108,8 +108,8 @@ are wrapped in a `finally` block that restores the snapshotted values via
 - **D. Intake routing** — unclear-intent exhaustion, out-of-scope billing
   (hard END, routed phone number, no transfer event), non-member caller.
 - **E. Claim flow** — happy path, upload-only, guide-only, decline-everything,
-  phone-not-confirmed hard END, ref-not-found retry + escalation, ref exhaustion,
-  email change during upload.
+  phone-not-confirmed escalation, ref-not-found retry + escalation, ref
+  exhaustion, email change during upload.
 - **F. Follow-up escalations** — update request, 3× cannot-answer.
 - **G. Contact-change loop limits** — zip change loop, email change loop in
   notification setup.
@@ -142,9 +142,10 @@ LLM phrasing varies between runs, so assertions never compare exact sentences:
   pause carries the call so far — see `core/metadata_events.py`, which also
   reports each captured field as `CallAgentField` and the call's end as
   `AgentCallEnded`),
-- **END / interrupt flags** — including hard-END paths (phone-not-confirmed,
-  out-of-scope) where `is_interrupt=False` and `next_node=END` with **no**
-  transfer event,
+- **END / interrupt flags** — including the hard-END path (out-of-scope)
+  where `is_interrupt=False` and `next_node=END` with **no** transfer event.
+  Phone-not-confirmed is no longer one of these: it escalates, so it asserts
+  `escalated=True` and a transfer event,
 - tolerant case-insensitive regexes over the transcript; where wording comes from
   a static pool the pool constant is imported and matched via `pool_regex()`.
 
