@@ -274,5 +274,3 @@ NO_SSN_AVAILABLE_PHRASES = (
     "no ssn",
 )
 
-YES_PHRASES = frozenset({"yes", "yeah", "yep", "sure", "okay", "ok", "yup"})
-NO_PHRASES = frozenset({"no", "nope", "nah"})

@@ -344,52 +344,6 @@ def pick(pool) -> str:
     return pool or ""
 
 
-def _quick_yes_no(text: str) -> str:
-    """
-    Fast keyword check for unambiguous yes/no responses.
-    Returns 'yes', 'no', or '' (ambiguous — needs LLM).
-
-    Used as fast-path before LLM extraction for any yes/no decision.
-    Avoids LLM call for clear responses, improving latency.
-
-    Rules:
-    - Word boundary matching to avoid false positives
-    - Checks negation before YES patterns
-      ("not sure" must not match YES via "sure")
-    - Returns '' for anything ambiguous — caller decides via LLM
-    """
-    t = text.lower().strip()
-    if not t:
-        return ""
-
-    # Check negation first — blocks false YES matches
-    _NEGATION = re.compile(r"\b(not|don't|doesn't|can't|won't|never)\b")
-    has_negation = bool(_NEGATION.search(t))
-
-    # Clear YES — only when no leading negation
-    if not has_negation:
-        _YES = re.compile(
-            r"\b(yes|yeah|yep|yup|sure|please|transfer|"
-            r"connect|go ahead|ok|okay|absolutely)\b"
-        )
-        if _YES.search(t):
-            return "yes"
-        if t.startswith(("yes ", "yeah ", "sure ", "please ")):
-            return "yes"
-
-    # Clear NO
-    _NO = re.compile(
-        r"\b(no|nope|nah|never mind|nevermind|"
-        r"continue|stay|keep going|help me)\b"
-    )
-    if _NO.search(t):
-        return "no"
-    if t.startswith(("no ", "nope ", "nah ")):
-        return "no"
-
-    return ""  # ambiguous — needs LLM
-
-
 def name_part(source) -> str:
     """
     Return ', FirstName' if a first name is known, else ''.
@@ -464,7 +418,35 @@ def speak_url(url: str | None) -> str:
 #   - All patterns require a first-person ownership phrase so plain "no"
 #     (a legitimate confirmation response) is never caught.
 #   - Compiled once at import time — <1µs per call at runtime.
+#
+# What "first-person ownership" has to mean here. A match ends the call: every
+# call site in _collect_slot escalates on it without a retry, so a pattern that
+# also fits an ordinary sentence hangs up on a caller who was cooperating. Two
+# rules keep that from happening, and both are load-bearing:
+#
+#   - A verb of loss or non-receipt names WHAT was lost, from the nouns that
+#     carry an identifier (_IDENTIFIER_OBJECT). "I lost my card" is a denial;
+#     "I lost my job" is why they are calling, and an unrestricted "my" cannot
+#     tell the two apart.
+#   - "I don't know" counts alone, as the whole turn. Bare, it is filler at
+#     least as often as refusal — "I don't know, is it the one ending in
+#     5309?" is an answer — so it denies only when the turn says nothing else.
+#     Qualified by an object ("I don't know the claim number") it is a denial
+#     wherever it appears.
 # ---------------------------------------------------------------------------
+
+# Nouns that stand for the thing being asked for. A caller who has lost one of
+# these has lost the identifier; a caller who has lost anything else has told
+# us about their life. Kept deliberately concrete — no "thing", no "stuff".
+_IDENTIFIER_OBJECT = (
+    r"(?:it|that|this|one|those|them"
+    r"|(?:my|the|a|an|any)\s+(?:\w+\s+){0,2}"
+    r"(?:card|cards|i\.?d\.?|ids|member\s*i\.?d\.?|number|numbers|letter|letters"
+    r"|paper|papers|paperwork|document|documents|documentation|form|forms|statement"
+    r"|statements|bill|bills|mail|envelope|policy|plan|reference|claim|insurance"
+    r"|info|information)"
+    r")"
+)
 
 _CANNOT_PROVIDE_PATTERNS: list = [
     _re.compile(p, _re.IGNORECASE)
@@ -485,9 +467,17 @@ _CANNOT_PROVIDE_PATTERNS: list = [
         r"\bi\s+don'?t\s+think\s+i\s+(?:ever\s+)?(received|got|was\s+given)\b",
         r"\bhe\s+doesn'?t\s+have\b",
         r"\bshe\s+doesn'?t\s+have\b",
-        # "don't / doesn't know" variants
-        r"\bi\s+don'?t\s+know\s+(it|that|my\b|the\b|what)",
-        r"\bi\s+don'?t\s+know\b",  # bare "I don't know"
+        # "don't / doesn't know" variants. Qualified by an object — including
+        # "where my card is" — this is a denial wherever it sits in the turn.
+        r"\bi\s+don'?t\s+know\s+(it|that|my\b|the\b|what|where)",
+        # Bare "I don't know", and only when it is the whole turn. Politeness
+        # and hedges are not "something else"; a follow-on clause is, and it
+        # is usually the caller answering ("I don't know, is it 512-555-6101?").
+        r"^\W*(?:(?:i'?m\s+|i\s+am\s+)?sorry[\s,.\-]*)?"
+        r"i\s+(?:really\s+|honestly\s+|truly\s+|just\s+|actually\s+)?"
+        r"do(?:\s+not|n'?t)\s+know"
+        r"(?:[\s,.\-]*(?:it|that|this|offhand|off\s+hand|right\s+now|sorry|unfortunately))*"
+        r"[\s,.!\-]*$",
         # "can't remember / recall / find"
         r"\bcan'?t\s+(remember|recall|find)\s+(it|that|my\b|the\b)",
         r"\bi\s+can'?t\s+(remember|recall|find)\b",
@@ -495,13 +485,21 @@ _CANNOT_PROVIDE_PATTERNS: list = [
         r"\bi\s+don'?t\s+(remember|recall)\b",
         # "haven't memorised / got it"
         r"\bhaven'?t\s+(memorized?|memorised?|got\s+it)\b",
-        # "never received / got it"
-        # r"\bi\s+never\s+(received|got)\s+(it|that|one|my\b)",
-        r"\bi\s+never\s+(received|got)\b",
-        # physical absence
-        r"\bi\s+(lost|misplaced)\s+(it|that|my\b|the\b)",
-        r"\b(not with me|left it|don'?t carry)\b",
-        r"\bi\s+left\s+it\s+(at\s+home|behind|there)\b",
+        # "never received / got it" — what was never received has to be the
+        # identifier. "I never received the provider list you faxed" is the
+        # reason for the call, not an inability to answer the question.
+        r"\bi\s+never\s+(?:received|got)\s+" + _IDENTIFIER_OBJECT + r"\b",
+        # physical absence — same rule on the object.
+        r"\bi\s+(?:lost|misplaced)\s+" + _IDENTIFIER_OBJECT + r"\b",
+        # First-person, and the place it was left is named. The bare "left it"
+        # this replaces matched "she left it with the doctor" and "we left it
+        # at that"; "I left it" alone needs no complement, but "I left it
+        # blank on the form" is a caller describing a form, not a denial.
+        r"\bi\s+left\s+it\s+(?:at\b|in\s+(?:the|my)\b|back\s+(?:at|home)\b"
+        r"|behind\b|there\b|home\b|with\s+(?:my|the)\b)",
+        r"^\W*i\s+left\s+it\W*$",
+        r"\bi\s+don'?t\s+carry\s+(?:it|that|one\b|my\b|the\b)",
+        r"^\W*not\s+with\s+me\W*$",
         # access / availability
         r"\bdon'?t\s+have\s+access\b",
         r"\bnot\s+(available|with\s+me|here)\s+right\s+now\b",
@@ -537,8 +535,12 @@ def detect_cannot_provide(text: str | None) -> bool:
       "nope"          "I think it's..."  "can you repeat"
       "I moved"       "yes"              "april twelfth"
 
-    False positives are extremely low: all patterns require first-person
-    ownership language ("I don't have", "I lost", "it's not with me").
+    Every pattern is first-person, and the ones built on a verb of loss or
+    non-receipt also name what was lost, from _IDENTIFIER_OBJECT. A match
+    escalates the call with no retry (see the four call sites in
+    _collect_slot), so a pattern that also fits an ordinary sentence — "I lost
+    my job", "I never received the list you faxed" — costs a caller who was
+    answering. Widen this list only with an object attached.
     """
     if not text:
         return False

@@ -45,9 +45,7 @@ from agent.agents.verification.constants import (
     MSG_SSN_SUCCESS,
     NAME_CORRECTION_PROMPTS,
     NAME_READBACK_TEMPLATES,
-    NO_PHRASES,
     NO_SSN_AVAILABLE_PHRASES,
-    YES_PHRASES,
 )
 from agent.agents.verification.handlers import (
     _NORMALIZERS,
@@ -154,15 +152,6 @@ class VerificationAgent(BaseAgent):
             result = validate_ssn(candidate)
             return candidate if result.valid else ""
         return ""
-
-    @staticmethod
-    def _is_yes(text: str) -> bool:
-        t = text.strip().lower()
-        return t in YES_PHRASES or any(p in t for p in YES_PHRASES)
-
-    @staticmethod
-    def _is_no(text: str) -> bool:
-        return text.strip().lower() in NO_PHRASES
 
     @staticmethod
     def _is_no_ssn_available(text: str) -> bool:

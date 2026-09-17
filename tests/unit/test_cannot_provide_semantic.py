@@ -93,3 +93,111 @@ def test_reconcile_tolerates_a_non_worker_result_shim():
 
     # Must not raise even though cannot_provide cannot be assigned.
     reconcile_worker_result(_Frozen(), "I don't have it")
+
+
+# ── A denial names what is missing ───────────────────────────────────────────
+#
+# Every call site in _collect_slot escalates on this flag with no retry, so a
+# pattern that also fits an ordinary sentence hangs up on a caller who was
+# cooperating. The three that did:
+#
+#   "I lost my ..."        — accepted any noun, so "I lost my job" was a denial
+#   "I never received ..." — same, so "I never received the list you faxed"
+#                            (the reason for the call) was a denial
+#   "left it" / "not with me" — no first-person anchor at all, despite the
+#                            docstring promising one
+#
+# and the bare "I don't know", which is filler at least as often as refusal.
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        # A life event, not a missing identifier.
+        "I lost my job so I'm on COBRA now",
+        "I lost my husband last year",
+        "I lost my train of thought",
+        # The reason for the call, not an inability to answer this question.
+        "I never received the provider list you faxed last month",
+        # Somebody other than the caller.
+        "she left it with the doctor",
+        "we left it at that",
+        # The caller describing a form they filled in.
+        "I left it blank on the form",
+    ],
+)
+def test_an_ordinary_sentence_is_not_a_denial(utterance):
+    from agent.utils import detect_cannot_provide
+
+    assert detect_cannot_provide(utterance) is False
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "I lost my card",
+        "I lost my insurance card",
+        "I lost my credit ID card",
+        "I lost the paper that had the reference number",
+        "I misplaced my card",
+        "I never received a card",
+        "I never received one",
+        "I never received my member id",
+        "I never received a reference number for this",
+        "I left it at home",
+        "I left it with my doctor",
+        "I don't carry it with me",
+    ],
+)
+def test_a_missing_identifier_is_still_a_denial(utterance):
+    from agent.utils import detect_cannot_provide
+
+    assert detect_cannot_provide(utterance) is True
+
+
+# ── "I don't know" denies only when it is the whole turn ─────────────────────
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    ["I don't know", "I don't know.", "Sorry, I don't know", "I don't know, sorry", "I don't know right now"],
+)
+def test_a_bare_dont_know_is_a_denial(utterance):
+    """Politeness and hedges are not "something else"."""
+    from agent.utils import detect_cannot_provide
+
+    assert detect_cannot_provide(utterance) is True
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "I don't know, is it the one ending in 5309?",
+        "I don't know if this helps but my ID is M907503",
+    ],
+)
+def test_a_dont_know_that_carries_an_answer_is_not_a_denial(utterance):
+    from agent.utils import detect_cannot_provide
+
+    assert detect_cannot_provide(utterance) is False
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    ["I don't know the claim number, but I have my reference number", "I don't know where my card is"],
+)
+def test_a_qualified_dont_know_denies_wherever_it_sits(utterance):
+    from agent.utils import detect_cannot_provide
+
+    assert detect_cannot_provide(utterance) is True
+
+
+def test_a_caller_hedging_while_they_look_is_waiting_not_refusing():
+    """cannot-provide outranks wait, so a loose denial pattern silently ate the
+    wait path: "hold on, I don't know, let me find my card" escalated instead
+    of acknowledging the hold."""
+    from agent.utils import detect_cannot_provide, detect_wait_request
+
+    utterance = "hold on, I don't know, let me find my card"
+    assert detect_cannot_provide(utterance) is False
+    assert detect_wait_request(utterance) is True
