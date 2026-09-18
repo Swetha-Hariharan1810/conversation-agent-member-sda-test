@@ -99,7 +99,7 @@ _REQUEST_CUES: tuple[tuple[str, re.Pattern], ...] = (
             re.IGNORECASE,
         ),
     ),
-    # Change / redo shapes. These usually arrive as update_target rather than
+    # Change / redo shapes. These usually arrive as a request intent rather than
     # followup_query, but when they arrive as both the question is real.
     (
         "change_request",
@@ -185,13 +185,12 @@ def carries_freeform_content(text: str | None) -> bool:
 #     AI      …I can also provide your benefits information for Pediatrician
 #             visits — would that be helpful?
 #     Caller  No. But I lost my credit ID card. Can you help me with the new one?
-#     → {"event_type": "answered", "followup_query": null}
+#     → {"followup_query": null}
 #
 #     AI      …Do you want us to send the details of our Care Coach Guides?
 #     Caller  That sounds interesting, but I lost my ID card. Can you help me to
 #             get a new one?
-#     → {"event_type": "answered_with_followup",
-#        "followup_query": "can you help me to get a new one"}
+#     → {"followup_query": "can you help me to get a new one"}
 #
 # The same request, two turns apart, classified both ways. It is not model
 # variance: those two slots run different prompt stacks. benefits_response is

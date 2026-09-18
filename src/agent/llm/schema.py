@@ -16,7 +16,7 @@ all: the headers told it to always emit `followup_disposition:"none"` ("the
 system decides"), and `needs_freeform_response` asked a perception model for a
 routing decision Python overrode in eight of its ten branches.
 
-What the model reports now is one classification and one target:
+What the model reports is one classification and one target:
 
     extracted        — the values the caller spoke this turn
     turn_intent      — what the utterance DID (TurnIntent)
@@ -25,37 +25,26 @@ What the model reports now is one classification and one target:
     guard_confidence
     followup_query   — the side question, in the caller's words
 
-Everything downstream still reads `event_type`, `corrections`, `update_target`,
-`request_kind`, `cannot_provide` and `fallback_pivot`. Those are now DERIVED
-here, from the reported intent plus what Python already knows, and the
-derivation is one-way by construction: combinations the old schema allowed and
-no code could handle — a pivot that is also a denial, a CORRECTED with empty
-corrections and no target, an ANSWERED_WITH_FOLLOWUP carrying no question —
-cannot be represented at all, so the defensive branches that used to catch
-them have nothing left to catch.
+Plus one thing the pipeline knows and the model does not: which of the values
+the caller spoke replace something already confirmed. `split_corrections` works
+that out from the same Confirmed: view the prompt was built from, and files
+them under `corrections`.
 
-`corrections` is the one derived value that needs state rather than arithmetic:
-whether a spoken value is new or a correction depends on what is already
-confirmed, which the pipeline knows and the model does not. `split_corrections`
-applies it at the extraction boundary (see core.request_detection).
+Everything else the pipelines used to read is now a question asked of the
+intent — `cannot_supply`, `pivot_target`, `change_target`, `asked_for_time`,
+`no_usable_value`. Each is one line, and each carries a precedence rule the
+headers used to spend a paragraph on: a value the caller spoke outranks every
+reading that says there is none.
+
+There is no second vocabulary. The old field names are gone from the schema,
+from every consumer, and from the prompts, so a turn has exactly one
+description and no way to disagree with itself.
 """
 
 from enum import Enum
 from typing import Any, Dict, Mapping, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
-
-
-class EventType(str, Enum):
-    """Legacy turn classification. Derived from TurnIntent — see
-    ``WorkerResult.event_type``. Nothing sets it on the model any more."""
-
-    ANSWERED = "answered"
-    ANSWERED_WITH_FOLLOWUP = "answered_with_followup"
-    CORRECTED = "corrected"
-    AMBIGUOUS = "ambiguous"
-    WAIT = "wait"  # caller asked for time: "give me a minute", "hold on"
-    NONE = "none"
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
 class TurnIntent(str, Enum):
@@ -117,26 +106,23 @@ REQUEST_INTENTS = frozenset({TurnIntent.UPDATE, TurnIntent.REDO, TurnIntent.REPL
 # turn overrides all three — the rule the headers spelled out three times.
 NO_VALUE_INTENTS = frozenset({TurnIntent.UNUSABLE, TurnIntent.CANNOT_PROVIDE, TurnIntent.PIVOT})
 
-
-class FollowupDisposition(str, Enum):
-    """How a side question is handled. Python's to choose, never the model's —
-    the headers already instructed it to emit "none" on every turn, so the
-    field was pure prompt cost. Kept as a Python-side attribute because
-    request_detection's grounding recovery and slot_manager's park path both
-    set it; see ``WorkerResult.followup_disposition``."""
-
-    ANSWER = "answer"  # answer from Confirmed: if possible; gracefully decline if not
-    PARK = "park"  # an update another flow owns, carried to it; never a question
-    NONE = "none"  # default
-    # Legacy aliases kept for backward compat with cached extraction results
-    ANSWER_NOW = "answer_now"
-    DECLINE = "decline"
+# The three request shapes by name, for the deterministic layer that detects
+# them from the caller's words (core.request_detection). See adopt_request.
+_REQUEST_INTENT_BY_KIND: dict[str, TurnIntent] = {
+    "update": TurnIntent.UPDATE,
+    "redo": TurnIntent.REDO,
+    "replay": TurnIntent.REPLAY,
+}
 
 
 class RequestKind(str, Enum):
-    """Cross-call request shapes. On WorkerResult this is derived from
-    TurnIntent; FollowUpResult still reports it directly, because the follow-up
-    agent classifies a request with no slot being collected around it."""
+    """Cross-call request shapes, as FollowUpResult reports them.
+
+    WorkerResult has no equivalent field: a collection turn says what it did
+    with TurnIntent, and UPDATE / REDO / REPLAY are three of its members. The
+    follow-up agent runs with no slot being collected around it, so it
+    classifies the request on its own.
+    """
 
     UPDATE = "update"
     REDO = "redo"
@@ -154,79 +140,21 @@ class GuardType(str, Enum):
     NONE = "NONE"
 
 
-# ── Legacy payload translation ───────────────────────────────────────────────
-# Extraction results cached before the schema narrowed, and the hand-built
-# WorkerResults in tests and live_e2e, still arrive in the old shape. They are
-# translated once, here, on the way in — which is also where the old precedence
-# prose ends up as code: pivot beats denial, a named request beats an event
-# label, and a value beats all of them.
-_LEGACY_EVENT_INTENT: dict[str, TurnIntent] = {
-    "answered": TurnIntent.ANSWERED,
-    "answered_with_followup": TurnIntent.ANSWERED,
-    "corrected": TurnIntent.ANSWERED,  # the corrections{} carry it
-    "ambiguous": TurnIntent.UNUSABLE,
-    "wait": TurnIntent.WAIT,
-    "none": TurnIntent.UNUSABLE,  # a guard fired; guard fields carry that
-}
-
-_LEGACY_KIND_INTENT: dict[str, TurnIntent] = {
-    "update": TurnIntent.UPDATE,
-    "redo": TurnIntent.REDO,
-    "replay": TurnIntent.REPLAY,
-}
-
-_LEGACY_KEYS = (
-    "event_type",
-    "corrections",
-    "update_target",
-    "request_kind",
-    "cannot_provide",
-    "fallback_pivot",
-    "followup_disposition",
-    "needs_freeform_response",
-)
-
-
-def _enum_value(raw: Any) -> str:
-    """Normalize an enum member, a bare string or None to a lowercase string."""
-    return str(getattr(raw, "value", raw) or "").strip().lower()
-
-
-def _translate_legacy(data: dict) -> tuple[dict, dict, Optional[str]]:
-    """Fold a pre-narrowing payload into (new fields, corrections, disposition)."""
-    legacy = {k: data.pop(k) for k in _LEGACY_KEYS if k in data}
-    if not legacy:
-        return data, {}, None
-
-    # corrections{} the old shape reported are taken as already split: the
-    # payload carries the model's own verdict on them and there is no fresher
-    # Confirmed: view to re-derive it from.
-    corrections = {k: v for k, v in (legacy.get("corrections") or {}).items() if isinstance(v, str) and v}
-
-    target = (legacy.get("update_target") or "").strip()
-    pivot = (legacy.get("fallback_pivot") or "").strip()
-    kind = _enum_value(legacy.get("request_kind"))
-    event = _enum_value(legacy.get("event_type"))
-
-    if pivot:
-        data["turn_intent"], data["turn_target"] = TurnIntent.PIVOT, pivot
-    elif legacy.get("cannot_provide"):
-        data["turn_intent"], data["turn_target"] = TurnIntent.CANNOT_PROVIDE, None
-    elif target or kind in _LEGACY_KIND_INTENT:
-        data["turn_intent"] = _LEGACY_KIND_INTENT.get(kind, TurnIntent.UPDATE)
-        data["turn_target"] = target or None
-    elif event:
-        data["turn_intent"] = _LEGACY_EVENT_INTENT.get(event, TurnIntent.ANSWERED)
-
-    disposition = _enum_value(legacy.get("followup_disposition")) or None
-    return data, corrections, disposition
+def _clean(value: Any) -> str:
+    """A trimmed string from a field that may be None."""
+    return str(value or "").strip()
 
 
 class WorkerResult(BaseModel):
-    """One extraction turn. Six reported fields; the rest is derived.
+    """One extraction turn: six fields the model reports, and the questions
+    the pipelines ask of them.
 
-    ``extra="forbid"`` keeps the model honest about the narrow contract, and
-    the wrap validator below is what lets a legacy payload through it.
+    ``extra="forbid"`` is the whole compatibility story. There is no
+    translation layer under it and nothing accepts the shape this replaced —
+    a payload carrying `event_type`, `corrections`, `update_target`,
+    `request_kind`, `cannot_provide`, `fallback_pivot`,
+    `followup_disposition` or `needs_freeform_response` is rejected where it
+    is built, which is where the mistake is.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -249,84 +177,28 @@ class WorkerResult(BaseModel):
     followup_query: Optional[str] = None
 
     # ── Python-owned, never reported by the model ────────────────────────────
+    # Which of the values in extracted{} replace something already confirmed.
+    # Filled by split_corrections below — see its docstring for why this is not
+    # the model's to answer.
     _corrections: Dict[str, str] = PrivateAttr(default_factory=dict)
     _corrections_split: bool = PrivateAttr(default=False)
-    _followup_disposition: FollowupDisposition = PrivateAttr(default=FollowupDisposition.NONE)
 
-    @model_validator(mode="wrap")
-    @classmethod
-    def _accept_legacy_payload(cls, data: Any, handler):
-        if not isinstance(data, Mapping):
-            return handler(data)
-        payload, corrections, disposition = _translate_legacy(dict(data))
-        obj = handler(payload)
-        if corrections:
-            obj._corrections = corrections
-            obj._corrections_split = True
-        if disposition:
-            try:
-                obj._followup_disposition = FollowupDisposition(disposition)
-            except ValueError:
-                pass
-        return obj
-
-    # ── Derived: what the pipelines read ─────────────────────────────────────
+    # ── Reading the turn ─────────────────────────────────────────────────────
+    # Each of these is one question the pipelines ask, answered from the intent
+    # and the values in one place. Between them they carry the precedence the
+    # extraction headers used to state three times over: a value the caller
+    # actually spoke outranks every reading that says there is none. "hold
+    # on — okay, it's M451982" is an answer, not a wait; "I don't have my card
+    # but my ID is M451982" is an answer, not a denial.
 
     @property
     def has_extracted_value(self) -> bool:
+        """Did the caller speak a usable value this turn?"""
         return any(v for v in (self.extracted or {}).values())
 
     @property
-    def event_type(self) -> EventType:
-        """The legacy turn classification, derived.
-
-        A value the caller spoke outranks every no-value intent — the rule the
-        three headers each wrote out ("a value given in the same utterance
-        always wins") — so that comparison happens once, here.
-        """
-        intent = self.turn_intent
-        has_value = self.has_extracted_value
-        if intent is TurnIntent.WAIT and not has_value:
-            return EventType.WAIT
-        if intent in NO_VALUE_INTENTS and not has_value:
-            return EventType.AMBIGUOUS
-        if intent in REQUEST_INTENTS:
-            return EventType.ANSWERED_WITH_FOLLOWUP if has_value else EventType.CORRECTED
-        if any(self._corrections.values()):
-            return EventType.ANSWERED_WITH_FOLLOWUP if has_value else EventType.CORRECTED
-        if (self.followup_query or "").strip():
-            return EventType.ANSWERED_WITH_FOLLOWUP if has_value else EventType.AMBIGUOUS
-        return EventType.ANSWERED
-
-    @event_type.setter
-    def event_type(self, value: Any) -> None:
-        """Legacy write path — mapped back onto turn_intent.
-
-        Kept for shims and cached results that still assign an event. The
-        reconcile layer no longer uses it: it changes the intent, and the event
-        follows.
-        """
-        event = _enum_value(value)
-        if event == "wait":
-            self.turn_intent = TurnIntent.WAIT
-        elif event in ("ambiguous", "none"):
-            if self.turn_intent not in NO_VALUE_INTENTS:
-                self.turn_intent = TurnIntent.UNUSABLE
-        elif event == "corrected":
-            if self.turn_intent not in REQUEST_INTENTS and not any(self._corrections.values()):
-                self.turn_intent = TurnIntent.UPDATE
-        elif event in ("answered", "answered_with_followup"):
-            if self.turn_intent in (TurnIntent.WAIT, TurnIntent.UNUSABLE):
-                self.turn_intent = TurnIntent.ANSWERED
-
-    @property
     def corrections(self) -> Dict[str, str]:
-        """Values that replace something already confirmed.
-
-        Filled by split_corrections against the same Confirmed: view the
-        extraction prompt was given, so the answer is identical to the one the
-        model used to guess at — and available on turns where it guessed wrong.
-        """
+        """Values that replace something already confirmed, slot → value."""
         return self._corrections
 
     @corrections.setter
@@ -334,76 +206,84 @@ class WorkerResult(BaseModel):
         self._corrections = {k: v for k, v in (value or {}).items() if v}
 
     @property
-    def update_target(self) -> Optional[str]:
-        return self.turn_target if self.turn_intent in REQUEST_INTENTS else None
+    def change_target(self) -> str:
+        """The slot or topic the caller asked to change, redo or replay.
 
-    @update_target.setter
-    def update_target(self, value: Optional[str]) -> None:
-        target = (value or "").strip()
-        if not target:
-            if self.turn_intent in REQUEST_INTENTS:
-                self.turn_intent, self.turn_target = TurnIntent.ANSWERED, None
-            return
-        # A pivot or a denial is a reading of THIS slot the model made on the
-        # words; a request target is a gap-filler's guess about another one.
-        # The specific reading wins, and does so structurally.
-        if self.turn_intent in (TurnIntent.PIVOT, TurnIntent.CANNOT_PROVIDE):
-            return
-        if self.turn_intent not in REQUEST_INTENTS:
-            self.turn_intent = TurnIntent.UPDATE
-        self.turn_target = target
+        Empty unless they asked for one of those. A caller who gave the new
+        value is not asking for a change — the value is in extracted{} and
+        split_corrections decides what it replaces.
+        """
+        return _clean(self.turn_target) if self.turn_intent in REQUEST_INTENTS else ""
 
     @property
-    def request_kind(self) -> RequestKind:
-        if self.turn_intent in REQUEST_INTENTS:
-            return RequestKind(self.turn_intent.value)
-        return RequestKind.NONE
-
-    @request_kind.setter
-    def request_kind(self, value: Any) -> None:
-        kind = _enum_value(value)
-        if kind in _LEGACY_KIND_INTENT:
-            if self.turn_intent not in (TurnIntent.PIVOT, TurnIntent.CANNOT_PROVIDE):
-                self.turn_intent = _LEGACY_KIND_INTENT[kind]
-        elif self.turn_intent in REQUEST_INTENTS:
-            self.turn_intent, self.turn_target = TurnIntent.ANSWERED, None
+    def change_kind(self) -> str:
+        """ "update", "redo" or "replay" — or "" when none was asked for."""
+        return self.turn_intent.value if self.turn_intent in REQUEST_INTENTS else ""
 
     @property
-    def cannot_provide(self) -> bool:
+    def pivot_target(self) -> str:
+        """The identifier the caller offered instead of the one being collected."""
+        if self.turn_intent is TurnIntent.PIVOT and not self.has_extracted_value:
+            return _clean(self.turn_target)
+        return ""
+
+    @property
+    def cannot_supply(self) -> bool:
+        """Did the caller say they cannot give the slot being collected?"""
         return self.turn_intent is TurnIntent.CANNOT_PROVIDE and not self.has_extracted_value
 
-    @cannot_provide.setter
-    def cannot_provide(self, value: bool) -> None:
-        if value:
-            if self.turn_intent in (TurnIntent.ANSWERED, TurnIntent.UNUSABLE, TurnIntent.WAIT):
-                self.turn_intent, self.turn_target = TurnIntent.CANNOT_PROVIDE, None
-        elif self.turn_intent is TurnIntent.CANNOT_PROVIDE:
-            self.turn_intent = TurnIntent.UNUSABLE
+    @property
+    def asked_for_time(self) -> bool:
+        """Did the caller ask for a moment rather than answering?"""
+        return self.turn_intent is TurnIntent.WAIT and not self.has_extracted_value
 
     @property
-    def fallback_pivot(self) -> Optional[str]:
-        if self.turn_intent is TurnIntent.PIVOT and not self.has_extracted_value:
-            return self.turn_target
-        return None
+    def no_usable_value(self) -> bool:
+        """Is there nothing to take from this turn?
 
-    @fallback_pivot.setter
-    def fallback_pivot(self, value: Optional[str]) -> None:
-        pivot = (value or "").strip()
-        if pivot:
-            self.turn_intent, self.turn_target = TurnIntent.PIVOT, pivot
-        elif self.turn_intent is TurnIntent.PIVOT:
-            self.turn_intent, self.turn_target = TurnIntent.UNUSABLE, None
+        True for a turn that was garbled, a denial, a pivot, or a question
+        asked INSTEAD of answering — the four shapes that leave the slot
+        uncollected and the caller owed a response rather than a retry.
+        """
+        if self.has_extracted_value:
+            return False
+        if self.turn_intent in NO_VALUE_INTENTS:
+            return True
+        return self.turn_intent is TurnIntent.ANSWERED and bool(_clean(self.followup_query))
 
-    @property
-    def followup_disposition(self) -> FollowupDisposition:
-        return self._followup_disposition
+    # ── Writing the turn: the reconcile layer's channel ──────────────────────
 
-    @followup_disposition.setter
-    def followup_disposition(self, value: Any) -> None:
-        try:
-            self._followup_disposition = FollowupDisposition(_enum_value(value) or "none")
-        except ValueError:
-            self._followup_disposition = FollowupDisposition.NONE
+    def adopt_request(self, kind: str, target: str) -> bool:
+        """Take a request the model did not report. Returns whether it was taken.
+
+        The deterministic layer in core.request_detection reads the caller's
+        words for request shapes the extraction model missed. It fills gaps and
+        never overrides: a request the model already reported keeps its target,
+        and a pivot or a denial is left alone entirely — those are readings of
+        the slot in hand, made on the caller's words, and a pattern match about
+        some other slot does not outrank one.
+        """
+        kind, target = _clean(kind), _clean(target)
+        if kind not in _REQUEST_INTENT_BY_KIND or not target:
+            return False
+        if self.turn_intent in (TurnIntent.PIVOT, TurnIntent.CANNOT_PROVIDE):
+            return False
+        self.turn_intent = _REQUEST_INTENT_BY_KIND[kind]
+        self.turn_target = target
+        return True
+
+    def report_cannot_supply(self) -> bool:
+        """Record a denial the model missed. Returns whether it was taken.
+
+        Never overrides a value, a pivot or a request: the same precedence as
+        adopt_request, and for the same reason.
+        """
+        if self.turn_intent not in (TurnIntent.ANSWERED, TurnIntent.UNUSABLE, TurnIntent.WAIT):
+            return False
+        if self.has_extracted_value:
+            return False
+        self.turn_intent, self.turn_target = TurnIntent.CANNOT_PROVIDE, None
+        return True
 
     # ── The one derivation that needs state ──────────────────────────────────
 

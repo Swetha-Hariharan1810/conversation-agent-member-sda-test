@@ -69,9 +69,9 @@ async def extract_delivery_management_decision(
         )
         # ADD THIS
         # logger.debug(
-        #     "delivery_management LLM result: extracted=%r event_type=%r guard=%r",
+        #     "delivery_management LLM result: extracted=%r turn_intent=%r guard=%r",
         #     result.extracted,
-        #     result.event_type,
+        #     result.turn_intent,
         #     result.guard,
         # )
 

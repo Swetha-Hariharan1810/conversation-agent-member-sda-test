@@ -49,7 +49,6 @@ from agent.agents.intake.llm import extract_intake_intent, extract_same_member_d
 from agent.agents.intake.models import IntentTag
 from agent.core.agent import BaseAgent
 from agent.llm.config import get_extraction_llm
-from agent.llm.schema import EventType
 from agent.logger import get_logger
 from agent.orchestration.orchestration import AgentNode
 from agent.slots.normalizers import normalize_provider_type
@@ -201,38 +200,34 @@ class IntakeAgent(BaseAgent):
         # Phase 6: routed through the same disposition mapping as _collect_slot
         # (Phase 4). Intake has no confirmed slots yet, so a side question here
         # is answered from call scope or declined — in the sentence it is asked.
-        # Nothing parks: intake carries no update_target, and a parked question
+        # Nothing parks: intake routes no updates, and a parked question
         # is a promise follow_up does not keep. Missing/none defaults to
         # FOLLOWUP_RESPOND, which self-triages.
         # Option A applies here too: Gemini only acknowledges — Python appends
         # the first-name bridge ask and routes straight to verification, exactly
         # like the clean answered path below.
-        # An answered_with_followup carrying no followup_query has nothing to
-        # follow up on. "I want to check my claim status. Can you help me with
-        # that today?" arrives labelled that way — the courtesy question is
-        # part of the request, not a side question, so the extractor leaves
-        # followup_query null. Generating here hands FOLLOWUP_RESPOND a payload
-        # with no "Followup:" line to answer, and it pads. The clean bridge
-        # below says the same thing better, with no LLM call.
-        if (
-            result.event_type == EventType.ANSWERED_WITH_FOLLOWUP
-            and (getattr(result, "followup_query", None) or "").strip()
-        ):
+        # A side question alongside the intent: both halves are real, so the
+        # turn answers the question and bridges into the flow in one sentence.
+        #
+        # This used to test an ANSWERED_WITH_FOLLOWUP label as well, and had to
+        # test the question too, because the label arrived without one: "I want
+        # to check my claim status. Can you help me with that today?" came back
+        # labelled that way with followup_query null — the courtesy question is
+        # part of the request, not a side question. Generating on the label
+        # alone handed FOLLOWUP_RESPOND a payload with no "Followup:" line to
+        # answer and it padded. The question is the whole condition now.
+        if (getattr(result, "followup_query", None) or "").strip():
             from agent.conversation.context import ConversationContext
             from agent.core.call_stages import remaining_call_stages
-            from agent.core.slot_manager import _DISPOSITION_GUARDS, _mk_session_ctx
+            from agent.core.slot_manager import _mk_session_ctx
 
-            disposition = getattr(result, "followup_disposition", None)
-            disposition_value = str(getattr(disposition, "value", disposition) or "none")
-            # Intake carries no update_target, so nothing here is ever an
-            # action — a side question is answered or declined where it is asked.
-            guard = self.resolve_park_guard(
-                _DISPOSITION_GUARDS.get(disposition_value, "FOLLOWUP_RESPOND"),
-                parks_as_action=False,
-            )
+            # Intake collects one slot and routes no updates, so nothing here is
+            # ever an action — a side question is answered or declined where it
+            # is asked.
+            guard = self.resolve_park_guard("FOLLOWUP_RESPOND", parks_as_action=False)
             followup_query = (getattr(result, "followup_query", None) or "").strip()
             logger.info(
-                "IntakeAgent: answered_with_followup — disposition routing",
+                "IntakeAgent: answering a side question asked with the intent",
                 extra={"intent": intent_value, "guard": guard, "app_run_id": app_run_id},
             )
 

@@ -88,7 +88,7 @@ _SLOT_LABELS: dict[str, str] = {
 
 # ── Recovery guard labels ────────────────────────────────────────────────────
 # These are Python-internal routing labels passed to generate_recovery_message().
-# They are NOT LLM extraction outputs (see llm/schema.py EventType for those).
+# They are NOT LLM extraction outputs (see llm/schema.py TurnIntent for those).
 #
 # Label            | Produced by              | Meaning
 # -----------------|--------------------------|-----------------------------------
@@ -220,7 +220,7 @@ def needs_freeform_response(
     # Content the caller supplied that a canned re-ask cannot carry.
     if any(v for v in (getattr(decision, "corrections", None) or {}).values()):
         return True
-    if (getattr(decision, "update_target", None) or "").strip():
+    if getattr(decision, "change_target", ""):
         return True
     if (getattr(decision, "followup_query", None) or "").strip():
         return True

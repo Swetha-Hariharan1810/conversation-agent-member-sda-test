@@ -238,15 +238,13 @@ class ConversationGuardsMixin:
             # phrase in front of abuse or a safety signal changes nothing.
             # Returning None hands the turn to the agent, whose own wait branch
             # owns it — one implementation, not a fourth copy here.
-            # The model's own WAIT label counts as asking for a moment, the
+            # The model's own WAIT intent counts as asking for a moment, the
             # same as the words do. detect_wait_request misses a wait carried
             # with meta-commentary ("hold on, I need to look this up") because
             # the continuation guard fires, which is why several agents honour
             # the label as a fallback — a soft guard reaching the turn first
             # would take it before they could.
-            _said_wait = detect_wait_request(user_text) or (
-                str(getattr(getattr(result, "event_type", None), "value", "") or "").lower() == "wait"
-            )
+            _said_wait = detect_wait_request(user_text) or (result is not None and result.asked_for_time)
             if guard in ("INTERRUPTION", "OFFTOPIC_GLOBAL", "OFFTOPIC_AGENT") and _said_wait:
                 self.logger.info(
                     "%s: %s suppressed — the caller asked for a moment",

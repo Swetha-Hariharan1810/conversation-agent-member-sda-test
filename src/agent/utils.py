@@ -227,7 +227,7 @@ _INTENT_CONTRACT = "extraction/_intent_contract.md"
 #
 # ssn_fallback.md returns SsnFallbackResult; follow_up.md and
 # follow_up_claims.md return FollowUpResult, which classifies a request with no
-# slot being collected around it and so keeps reporting request_kind itself.
+# slot being collected around it and so reports its own request_kind.
 # Each already describes its own fields; what they used to get on top was a
 # header RETURN block for a schema they do not use.
 _NON_WORKER_RESULT_PROMPTS: frozenset[str] = frozenset(
@@ -595,7 +595,7 @@ def detect_cannot_provide(text: str | None) -> bool:
 # WAIT detection — "give me a minute", "hold on", "let me grab my card"
 #
 # Regex fallback for the WAIT event in _collect_slot (core/slot_manager.py):
-# fires when the extraction LLM returns event_type "wait" OR mislabels a
+# fires when the extraction LLM reports turn_intent "wait" OR mislabels a
 # wait as ambiguous. Compiled once at import time.
 # ---------------------------------------------------------------------------
 

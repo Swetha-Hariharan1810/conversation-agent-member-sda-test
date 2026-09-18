@@ -450,18 +450,15 @@ async def collect_post_lookup(
         # and only when nothing in the turn contradicts it — see
         # screen_phone_affirmation.
         if decision is not None:
-            from agent.llm.schema import EventType
-
             extracted = dict(decision.extracted or {})
             answer = extracted.get("phone_confirmed", "") or extracted.get("phone_confirmation", "")
-            # A turn the model labelled AMBIGUOUS or WAIT keeps its label: "I'm
+            # A turn with nothing usable in it, or one asking for time: "I'm
             # not sure" and "hold on" are not positions on the number, whatever
             # words carry them, and the screen is for the turn the model placed
             # nowhere — not for one it placed as unsure. Same ordering, and the
             # same reason, as core.confirmation.is_not_an_answer.
-            placed_no_position = getattr(decision, "event_type", None) in (
-                EventType.AMBIGUOUS,
-                EventType.WAIT,
+            placed_no_position = decision is not None and (
+                decision.no_usable_value or decision.asked_for_time
             )
             if (
                 not answer

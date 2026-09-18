@@ -74,9 +74,8 @@ def build_worker_input(
         Omitted entirely when None or empty.
     pending_slots:
         Slot names still to be collected later in this call, in order.
-        Rendered as a "Pending:" context line so the extraction LLM can
-        classify follow-up questions as parkable (followup_disposition
-        "park"). Omitted entirely when None or empty.
+        Rendered as a "Pending:" context line so a follow-up question about a
+        step still ahead can be answered from it. Omitted when None or empty.
     attempt:
         How many collection attempts have been made for awaiting_slot so far.
     recent_messages:
