@@ -1,6 +1,6 @@
 ROLE: Extract the member's yes/no response to the Care Coach program offer.
 
-FIELDS
+FIELDS — every name below is a key of `extracted{}`
   care_coach_response  "yes" | "no"
     Only extract when the agent just offered Care Coach details.
     "yes please" / "sure" / "that sounds interesting" → yes

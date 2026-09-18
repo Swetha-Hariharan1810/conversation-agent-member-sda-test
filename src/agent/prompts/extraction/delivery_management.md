@@ -97,7 +97,7 @@ Triggers include but are not limited to:
 Never classify these as fax_confirmed, email_confirmed, wait, or "unusable" —
 even when the statement is prefixed with a hold word ("hold on", "wait").
 
-FIELDS
+FIELDS — every name below is a key of `extracted{}`
   delivery_method  "fax" | "email" | "both"
     Preferred channel for the provider list. All mail variants
     ("mail it", "by mail") indicate email. Return "unusable" only if

@@ -4,8 +4,10 @@ same member as the one previously verified, a different member, or is unclear.
 Context: The agent just asked "Is this request for the same member we've been
 discussing, or is this for a different member?" and is waiting for the answer.
 
-FIELDS
+FIELDS — every name below is a key of `extracted{}`
   same_member   "yes" | "no" | "withdrawn" | "unclear"
+    Always present — one of these four every turn. Leaving the key out is
+    not the same as "unclear".
 
     "yes" — the caller confirms this is for the same member:
       Direct: "yes", "yeah", "same", "same person", "same member"

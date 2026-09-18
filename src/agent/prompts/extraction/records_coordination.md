@@ -33,7 +33,7 @@ does.
   itself while upload_method is the awaiting slot — never for a caller
   answering a later yes/no offer.
 
-FIELDS
+FIELDS — every name below is a key of `extracted{}`
   upload_method  "member_upload" | "doctor_direct" | "personal_guide" | "decline"
     How the member intends to provide their medical records.
     Context determines which values are applicable — extract only what fits

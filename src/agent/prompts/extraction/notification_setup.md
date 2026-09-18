@@ -1,7 +1,7 @@
 ROLE: Extract the member's notification channel preference (SMS or email)
 and confirm their contact detail.
 
-FIELDS
+FIELDS — every name below is a key of `extracted{}`
   notification_method  "sms" | "email" | "both"
     The member's preferred channel for claim status update notifications.
     "text me", "send a text", "my phone", "SMS", "phone" → sms

@@ -139,7 +139,27 @@ class IntakeAgent(BaseAgent):
                     )
             return interrupt
 
-        intent_value = (result.extracted or {}).get("intent", IntentTag.UNCLEAR.value)
+        extracted = result.extracted or {}
+        intent_value = (extracted.get("intent") or "").strip()
+        if not intent_value:
+            # No classification came back at all. That is not the same thing as
+            # classifying the caller "unclear" — "unclear" is a reading of what
+            # they said, and a missing key is the absence of one. Both take the
+            # clarification path, because there is nothing else to do with the
+            # turn, but they have different fixes: one is a caller who has not
+            # said what they need, the other is the extraction contract failing
+            # on a caller who said it plainly. Distinguishing them in the log is
+            # the difference between reading a transcript and guessing at it.
+            logger.warning(
+                "IntakeAgent: extraction reported no intent key — treating as unclear",
+                extra={
+                    "utterance": last_user,
+                    "turn_intent": getattr(result.turn_intent, "value", ""),
+                    "extracted_keys": sorted(extracted),
+                    "app_run_id": app_run_id,
+                },
+            )
+            intent_value = IntentTag.UNCLEAR.value
 
         # ── Deterministic screens ──────────────────────────────────────────────
         # Both read tables that already knew the answer, and both used to run
@@ -181,7 +201,7 @@ class IntakeAgent(BaseAgent):
 
         provider_type = ""
         if intent_value == IntentTag.PROVIDER_SERVICES.value:
-            provider_type = normalize_provider_type((result.extracted or {}).get("provider_type", ""))
+            provider_type = normalize_provider_type(extracted.get("provider_type", ""))
             if provider_type:
                 logger.info(
                     "IntakeAgent: provider_type extracted at intake — propagating to state",

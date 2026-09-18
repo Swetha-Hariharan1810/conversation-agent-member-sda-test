@@ -10,8 +10,13 @@ caller's retry attempts on it.
   (pizza, weather, sports, personal questions to the agent)
   Do NOT use for insurance-adjacent topics — use out_of_scope instead.
 
-FIELDS
+FIELDS — every name below is a key of `extracted{}`
 intent: provider_services | provider_type_unsupported | claim_services | out_of_scope | unclear
+  Always present. Every utterance gets exactly one of these five tags,
+  "unclear" included — it is a classification of what was said, not a value
+  the caller has to supply. Leaving the key out is not the same as
+  "unclear": it tells the agent you classified nothing, and the caller is
+  asked to state their reason for calling all over again.
 
 provider_type  — optional, only populate when intent = provider_services AND the caller
   explicitly names a specific supported provider type:

@@ -67,6 +67,23 @@ If the caller said a usable value, put it in `extracted{}` and use `answered`
 
 ### `extracted{}` — every value, no bookkeeping
 
+`extracted{}` is the ONLY place a slot value goes. The agent section at the end
+of this prompt names the slots it collects and their allowed values — under a
+FIELDS heading, or inline. **Every name it lists is a key inside `extracted{}`,
+never a field of its own.** A classification the agent asked you to make
+(`intent`, `same_member`, `name_confirmed`, `care_coach_response`) is a value
+like any other and goes in the same place:
+
+  FIELDS
+    intent: provider_services | claim_services | ...
+
+  → {"extracted": {"intent": "claim_services"}, "turn_intent": "answered", ...}
+
+Fill the key the `Currently asking for:` line points at whenever the caller's
+words settle it — including when the answer is the "nothing specific yet" tag
+the agent section lists. An empty `extracted{}` says they settled nothing, and
+the agent believes you.
+
 Put every value the caller spoke this turn in `extracted{}`, keyed by slot
 name. Do not decide whether a value is new or replaces one already on file, and
 do not sort it anywhere else: the system knows what it has already confirmed
@@ -127,11 +144,13 @@ Return JSON only — no markdown, no explanation.
 
 {"extracted": {}, "turn_intent": "answered", "turn_target": null, "guard": null, "guard_confidence": 0.0, "followup_query": null}
 
-`extracted` — slot name → the value the caller spoke this turn; {} when none
+`extracted` — slot name → what the caller's words settle for that slot; {} when none.
+  Every field the agent section names lives in here. See `extracted{}` above.
 `turn_intent` — "answered" | "wait" | "unusable" | "cannot_provide" | "pivot" | "update" | "redo" | "replay"; default "answered"
 `turn_target` — what update / redo / replay / pivot points at; null otherwise
 `guard` — the guard label when one fires, null when none
 `guard_confidence` — the fired guard's threshold value; 0.0 when none fires
 `followup_query` — the caller's side question in their own words, condensed; null otherwise. See THE FOLLOW-UP CONTRACT.
 
-Nothing else. These six fields are the whole contract.
+Nothing else. These six are the whole contract — the agent section adds keys
+to `extracted`, never fields alongside it.

@@ -1,6 +1,6 @@
 ROLE: Extract provider search slots from caller utterances.
 
-FIELDS
+FIELDS — every name below is a key of `extracted{}`
   provider_type  non-empty string
     The type of medical provider requested.
 

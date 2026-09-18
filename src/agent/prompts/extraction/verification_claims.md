@@ -16,7 +16,7 @@ The awaiting_slot is only the PRIMARY field being asked for; any other
 identity field (first_name, last_name) stated in the same utterance must
 also appear in extracted{}.
 
-FIELDS
+FIELDS — every name below is a key of `extracted{}`
   first_name    Title Case    "my name is" / "I'm" / direct name
   last_name     Title Case    surname after first confirmed / "last name is"
 

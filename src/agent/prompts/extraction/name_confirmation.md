@@ -3,7 +3,7 @@ ROLE: Extract the member's response to a name readback / confirmation.
 The agent just read back the member's full name, spelled letter by letter, and asked
 "is that correct?". There are exactly three valid outcomes — extract accordingly.
 
-FIELDS
+FIELDS — every name below is a key of `extracted{}`
   name_confirmed  "yes" | "no"
     "yes" — member confirmed the name is correct:
       "yes", "yep", "correct", "that's right", "yes that's me",

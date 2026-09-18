@@ -2,7 +2,7 @@ ROLE: Extract claim adjustment slots from caller utterances.
 
 Every example below is turn_intent "answered" unless it says otherwise.
 
-FIELDS
+FIELDS — every name below is a key of `extracted{}`
   reference_number  spoken digit words only
     Extract only the spoken digit words from the caller's utterance.
     Strip all surrounding words. Do not convert or normalize.

@@ -181,6 +181,9 @@ async def extract_ssn_decision(
         pending_slots=None,
         attempt=0,
         recent_messages=recent_messages,
+        # This one reports in named fields (ssn_intent / ssn), not extracted{},
+        # so there is no key for the awaited stage to be bound to.
+        result_schema=SsnFallbackResult,
     )
     try:
         result: SsnFallbackResult = await llm.with_structured_output(SsnFallbackResult).ainvoke(messages)
