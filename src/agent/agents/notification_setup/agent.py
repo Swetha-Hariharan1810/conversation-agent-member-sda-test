@@ -518,6 +518,14 @@ class NotificationSetupAgent(BaseAgent):
             # Not an answer to the read-back — uncertain, holding, or raising
             # something else. Re-ask it.
             if is_not_an_answer(result, last_user, owned_slots=("email", "email_confirmed")):
+                # Waiting is not a failed attempt — see wait_ack. This was the
+                # one read-back in this file that skipped the helper: the wait
+                # was routed to a re-ask correctly (is_not_an_answer consults
+                # the words), but on the way it charged an email_confirmed
+                # attempt and spent a generation call telling a caller who had
+                # just said "hold on" that we had not heard them.
+                if wait := self.wait_ack(state, "email_confirmed", decision=result):
+                    return wait
                 self.slot_fail("email_confirmed")
                 if self.get_slot("email_confirmed").is_exhausted():
                     return self.signal_escalate(
