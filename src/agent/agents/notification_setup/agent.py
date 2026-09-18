@@ -326,7 +326,7 @@ class NotificationSetupAgent(BaseAgent):
             # value matching what we just read back is a context echo. See
             # core.confirmation.is_read_back_echo.
             if contact_conf == "no" and is_read_back_echo(
-                new_phone_raw, pending_phone or phone_on_file, normalize_phone_number
+                new_phone_raw, pending_phone or phone_on_file, normalize_phone_number, last_user=last_user
             ):
                 new_phone_raw = ""
 
@@ -468,7 +468,7 @@ class NotificationSetupAgent(BaseAgent):
             # value matching what we just read back is a context echo. See
             # core.confirmation.is_read_back_echo.
             if contact_conf == "no" and is_read_back_echo(
-                new_email_raw, pending_email or email_on_file, normalize_email
+                new_email_raw, pending_email or email_on_file, normalize_email, last_user=last_user
             ):
                 new_email_raw = ""
 

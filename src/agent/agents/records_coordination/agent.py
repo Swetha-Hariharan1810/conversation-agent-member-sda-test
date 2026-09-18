@@ -306,7 +306,7 @@ class RecordsCoordinationAgent(BaseAgent):
             # value matching what we just read back is a context echo. See
             # core.confirmation.is_read_back_echo.
             if contact_conf == "no" and is_read_back_echo(
-                new_email_raw, pending_email or email_on_file, normalize_email
+                new_email_raw, pending_email or email_on_file, normalize_email, last_user=last_user
             ):
                 new_email_raw = ""
 

@@ -35,7 +35,7 @@ from agent.agents.provider_search.pipelines import (
 )
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import confirms_value, is_not_an_answer
+from agent.core.confirmation import confirms_value, is_not_an_answer, is_read_back_echo
 from agent.llm.config import get_extraction_llm
 from agent.logger import get_logger
 from agent.slots.normalizers import normalize_provider_type, normalize_yes_no, normalize_zip_code
@@ -206,23 +206,31 @@ class ProviderSearchAgent(BaseAgent):
             #       Nothing was supplied, so the decline path at the bottom of
             #       this branch asks for the current ZIP.
             #
-            # The comparison against zip_on_file happens below and decides one
-            # thing only: whether Salesforce needs writing. It must not decide
-            # whether the caller answered. This line used to clear the value
-            # whenever a "no" arrived carrying a ZIP equal to the one read back
-            # (core.confirmation.is_read_back_echo), which dropped a turn that
-            # HAD an answer into the path built for turns that had none — the
-            # caller was asked for a ZIP they had just spoken:
+            # Which shape it is turns on whether the caller SPOKE a ZIP, never
+            # on how that ZIP compares to the one on file. The comparison below
+            # decides one thing only — whether Salesforce needs writing — and a
+            # ZIP equal to the one read back is still the caller's answer:
             #
             #     AI      I have your ZIP code as 02140. Is that right?
             #     Caller  no, my zip changed, it's zero two one four zero
             #     AI      No problem — what is your current 5-digit ZIP code?
             #
-            # An affirmation still clears it. A "yes" carrying a ZIP other than
-            # the one read back is a misheard read-back, not a replacement the
-            # caller can be held to, and this branch writes to Salesforce with no
-            # read-back of its own to catch it.
-            if zip_conf == "yes":
+            # That is what this used to do, by clearing the value on any "no"
+            # carrying a ZIP equal to the read-back. is_read_back_echo now asks
+            # the utterance instead, so the clear is left doing only the job it
+            # was meant for: a "no" whose ZIP the caller never said is the model
+            # filling the field from its own Confirmed: context line, and that
+            # is a bare decline — the path at the bottom of this branch asks for
+            # the current ZIP.
+            #
+            # An affirmation still clears it outright. A "yes" carrying a ZIP
+            # other than the one read back is a misheard read-back, not a
+            # replacement the caller can be held to, and this branch writes to
+            # Salesforce with no read-back of its own to catch it.
+            if zip_conf == "yes" or (
+                zip_conf == "no"
+                and is_read_back_echo(new_zip_raw, zip_on_file, normalize_zip_code, last_user=last_user)
+            ):
                 new_zip_raw = ""
 
             if new_zip_raw:
