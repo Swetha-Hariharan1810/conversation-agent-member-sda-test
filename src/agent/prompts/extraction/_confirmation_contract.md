@@ -50,7 +50,7 @@ Three answers matter, and they are not symmetrical.
   ever finished.
 
 So: recognise the first two, and treat **everything else as a decline** →
-`"no"`. Never `"ambiguous"`. You do not need to match a phrasing to decline,
+`"no"`. Never `"unusable"`. You do not need to match a phrasing to decline,
 and asking for the current value is always safer than reading the same one
 back.
 
@@ -94,9 +94,9 @@ confirmed.
 ### The one case that is NEITHER
 
 The caller genuinely does not know: "maybe", "I'm not sure", "I think so?",
-"not sure if that's still active" → `event_type` "ambiguous", leave the
+"not sure if that's still active" → `turn_intent` "unusable", leave the
 confirmation field empty.
 
 Keep this narrow. It is the difference between a caller who CANNOT answer and
 one who is answering no. "I moved recently" is a DECLINE — they know the value
-is wrong. "I'm not sure if that's still right" is AMBIGUOUS — they do not know.
+is wrong. "I'm not sure if that's still right" is "unusable" — they do not know.

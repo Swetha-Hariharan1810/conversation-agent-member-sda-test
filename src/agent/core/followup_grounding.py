@@ -153,10 +153,11 @@ def is_grounded_followup(query: str | None, utterance: str | None) -> bool:
 def carries_freeform_content(text: str | None) -> bool:
     """Does this utterance contain something a canned re-ask cannot address?
 
-    Used as the safety net under ``WorkerResult.needs_freeform_response``: the
-    flag comes from a model that can be wrong about its own output, and it was
-    wrong on "Please check my claim status today" — a clear request that got
-    "Sorry, I didn't catch that" twice running.
+    One of the checks ``needs_freeform_response`` decides from. It began as the
+    safety net under a ``needs_freeform_response`` flag the extraction model
+    reported, and outlived it: the flag was wrong on "Please check my claim
+    status today" — a clear request that got "Sorry, I didn't catch that" twice
+    running — and this is the test that caught it.
 
     The net used to be a word count (four words or more => generate). Word
     count is the wrong proxy: on a voice call nearly every non-answer clears

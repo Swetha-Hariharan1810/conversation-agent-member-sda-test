@@ -38,7 +38,7 @@ FIELDS
                      → extracted: {"member_id": "n seven one four five nine eight"}
                 ✓  "en six six two one three zero"
                      → extracted: {"member_id": "en six six two one three zero"}
-                ✗  "one two three four five six" → ambiguous
+                ✗  "one two three four five six" → "unusable"
 
                 The system converts spoken digits after extraction.
                 Never produce a converted value like "M110781" from spoken words —
@@ -46,8 +46,10 @@ FIELDS
 
                 DENIAL: If the caller says they do not have their Member ID
                 (e.g. "I don't have it", "don't know", "can't find it"),
-                leave member_id EMPTY and set event_type to "answered".
-                Do NOT mark as ambiguous. The system handles the fallback.
+                leave member_id EMPTY and use turn_intent "cannot_provide".
+                The system offers the fallback identifier itself. If they name
+                one ("can I use my social?") that is "pivot" instead, with
+                turn_target "ssn".
 
   dob           spoken words only — return exactly as the caller said them,
                 with two cleanup rules applied before returning:
@@ -58,11 +60,11 @@ FIELDS
 
                 Caller must state the year — never assume it. If the agent
                 re-asks for the year and caller responds with a full date,
-                extract it — do not treat as ambiguous.
+                extract it — do not treat as "unusable".
 
                 ✓  "the thirtieth of july nineteen seventy seven"
                      → {"dob": "thirtieth july nineteen seventy seven"}
-                ✗  "april twelfth" → ambiguous (year is required)
+                ✗  "april twelfth" → "unusable" (year is required)
 
                 The system converts to date format after extraction.
    relationship  "subscriber" | "dependent"
@@ -76,7 +78,7 @@ FIELDS
                   Example: caller says "plan older" → extract relationship="plan_holder".
                 dependent — spouse, wife, husband, son, daughter, partner,
                   parent, child, sibling, family member, my parter
-                Cannot be both. Cannot say either. Uncertainty → ambiguous.
+                Cannot be both. Cannot say either. Uncertainty → "unusable".
                 Only extract when agent just asked about it.
                 "representative" in transfer context → TRANSFER_REQUEST guard.
 
@@ -90,7 +92,7 @@ ACCEPT — err heavily toward acceptance for borderline cases:
 - hyphenated or apostrophe-containing names
 - dictionary words that are also used as names
 
-REJECT — set event_type=ambiguous, do not populate the extracted field:
+REJECT — set turn_intent "unusable", do not populate the extracted field:
 - values clearly impossible as human names, such as:
   pure numbers, obvious gibberish, random identifiers,
   or clearly non-name phrases, standalone common nouns not plausibly used as names
@@ -103,16 +105,17 @@ An answer to the awaiting slot may arrive together with a request to update
 a DIFFERENT identity slot. Extract the answer AND flag the request:
   "m nine zero seven five zero three — oh, also I need to update my last name"
     → extracted={"member_id": "m nine zero seven five zero three"},
-      event_type="answered_with_followup", update_target="last_name",
-      request_kind="update", followup_disposition="none"
-Leave followup_disposition as "none" — the system decides the disposition.
+      turn_intent="update", turn_target="last_name"
+A bare update request with no answer ("I need to update my last name") is the
+same intent and target with extracted{} empty.
 NEVER park and NEVER decline an update request for first_name, last_name,
 member_id, dob, or relationship: these are always handled in this flow.
-A bare update request with no answer ("I need to update my last name")
-is event_type="corrected" with update_target set and corrections{} empty.
+When the caller DOES say the new value ("actually my last name is Carter"),
+that is turn_intent "answered" with the value extracted — the system knows
+which of its slots that replaces.
 
 CONFIDENCE NOTES (see header [ANCHOR: CONFIDENCE])
-- member_id: missing M or N prefix → ambiguous. Return spoken words as-is when M or N is present.
-- dob: missing year or any uncertain part → ambiguous. Return spoken words as-is.
+- member_id: missing M or N prefix → "unusable". Return spoken words as-is when M or N is present.
+- dob: missing year or any uncertain part → "unusable". Return spoken words as-is.
 - relationship: only extract when agent just asked about it; "representative"
   in transfer context → prefer TRANSFER_REQUEST guard over extraction.

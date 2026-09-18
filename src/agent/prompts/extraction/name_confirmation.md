@@ -90,7 +90,7 @@ SPELLED-OUT CORRECTIONS — letter-by-letter responses:
   Spelling that MATCHES what was read back exactly → OUTCOME 1 (confirmed):
     "y e s" or confirmed form of exactly the same letters → name_confirmed="yes"
 
-  NEVER treat a spelled correction as AMBIGUOUS when the letters clearly form
+  NEVER treat a spelled correction as "unusable" when the letters clearly form
   a plausible name.
 
 NAME PLAUSIBILITY — same rule as verification:
@@ -99,5 +99,5 @@ NAME PLAUSIBILITY — same rule as verification:
 
 CONFIDENCE NOTES
   Only extract when the member's intent is unambiguous.
-  Hesitation or spelling filler words ("um", "let me think") → event_type "ambiguous".
+  Hesitation or spelling filler words ("um", "let me think") → turn_intent "unusable".
   If the member only gives a first name (no last name), extract first_name only.

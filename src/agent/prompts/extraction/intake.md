@@ -81,8 +81,8 @@ unclear — use when the caller has not described any specific need.
         specific topic this system does not serve → out_of_scope
   5. No specific need described → unclear
 
-EVENT TYPE: answered_with_followup
-  Set event_type: answered_with_followup when the utterance contains a
+SIDE QUESTIONS
+  Fill followup_query when the utterance contains a
   classifiable intent (maps to a valid intent tag above) AND also contains
   a secondary signal directed at the agent.
   Secondary signals:

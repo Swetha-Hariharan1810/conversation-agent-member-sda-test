@@ -14,18 +14,17 @@ depending on which header the slot they were on happened to use:
     Caller  No. But I lost my credit ID       header_extraction.md)
             card. Can you help me with
             the new one?
-    →       event_type "answered", followup_query null
+    →       followup_query null
 
     AI      …send the details of our Care     (care_coach_response,
             Coach Guides?                      header_core.md)
     Caller  That sounds interesting, but I
             lost my ID card. Can you help
             me to get a new one?
-    →       event_type "answered_with_followup",
-            followup_query "can you help me to get a new one"
+    →       followup_query "can you help me to get a new one"
 
-The same request, two turns apart, classified both ways. header_core.md did not
-describe answered_with_followup at all; header.md and header_extraction.md each
+The same request, two turns apart, heard one time in two. header_core.md did not
+describe a side question at all; header.md and header_extraction.md each
 described it, and followup_disposition, in their own words.
 
 Nineteen agent prompts and three headers cannot be kept in step by hand, so
@@ -45,11 +44,10 @@ directions: a question invented costs the caller a sentence answering something
 they never asked, and a question missed is never heard again — nothing later in
 the call comes back to it.
 
-### The test — apply it before setting `answered_with_followup`
+### The test — apply it before filling `followup_query`
 
 **Point at the words in the "Caller just said:" line that are the question.**
-If you cannot quote them, there is no follow-up: use `answered`, and leave
-`followup_query` null.
+If you cannot quote them, there is no follow-up: leave `followup_query` null.
 
 Two mistakes to avoid, both seen in production:
 
@@ -66,17 +64,18 @@ Two mistakes to avoid, both seen in production:
   side question it reads as a caller who took no position, and the value they
   just rejected is read back to them again.
 
-| Caller just said                        | event_type | followup_query |
-|-----------------------------------------|------------|----------------|
-| "Customer."                             | answered   | null           |
-| "M451982."                              | answered   | null           |
-| "Yes, that's right."                    | answered   | null           |
-| "November 5th, 1992."                   | answered   | null           |
-| "Smith — sorry, bad line."              | answered   | null           |
+| Caller just said                        | turn_intent | followup_query |
+|-----------------------------------------|-------------|----------------|
+| "Customer."                             | answered    | null           |
+| "M451982."                              | answered    | null           |
+| "Yes, that's right."                    | answered    | null           |
+| "November 5th, 1992."                   | answered    | null           |
+| "Smith — sorry, bad line."              | answered    | null           |
 | "Fax please. Can you do that for me today?" | answered | null — the question is about the answer just given |
 | "Yeah, that's my old fax. I'll give you a new number if you can do that." | answered | null — offering a replacement IS the answer to the read-back |
-| "90210, and when will I get the list?"  | answered_with_followup | "when will the list arrive" |
-| "No. But I lost my ID card. Can you help me with a new one?" | answered_with_followup | "I lost my ID card, can you help me get a new one" |
+| "90210, and when will I get the list?"  | answered    | "when will the list arrive" |
+| "No. But I lost my ID card. Can you help me with a new one?" | answered | "I lost my ID card, can you help me get a new one" |
+| "What do you need exactly?"             | unusable    | "what do you need exactly" |
 
 ### What counts as a side question
 
@@ -96,15 +95,16 @@ The last two still belong in `followup_query`. Whether the system can act on a
 question is never your decision — it answers from what it knows, or declines
 gracefully, and it can do neither if you did not report the question.
 
-### The two event types that carry one
+### It rides alongside `turn_intent`, it does not replace it
 
-- **`answered_with_followup`** — the caller answered the awaiting slot AND asked
-  something. `extracted{}` must contain the slot value. Never use this event
-  type when the utterance contains only the slot value.
-- **`ambiguous`** — the caller asked INSTEAD of answering, so there is no value
-  to extract ("what do you need exactly?", "what format?", "why do you need
-  that?"). Set `followup_query` here too: the system answers the question
-  before re-asking the slot.
+`followup_query` is its own field, so a question never costs you the
+classification of the turn:
+
+- the caller answered AND asked → `turn_intent` "answered", the value in
+  `extracted{}`, the question in `followup_query`
+- the caller asked INSTEAD of answering → `turn_intent` "unusable", nothing in
+  `extracted{}`, the question in `followup_query`. The system answers it before
+  re-asking the slot.
 
 ### Quoting it
 
@@ -117,9 +117,3 @@ A question about the timing or status of something the agent just PROMISED
 ("when?", "when will you update my zip?", "did you change it yet?") is NOT a
 slot answer and must never be extracted as one. It is a side question like any
 other; `followup_query` = "timing of <promised item>".
-
-### `followup_disposition`
-
-Leave it `"none"`. The system decides what happens to a side question — every
-value you could set means the same thing to it. Reporting the question
-accurately is the whole job.

@@ -479,8 +479,9 @@ class SlotManagerMixin:
         # A plain non-answer with nothing to acknowledge does not need the
         # generation LLM: build_retry_prompt re-asks the same slot, always,
         # with zero latency and zero chance of drifting onto another slot.
-        # The extraction LLM already flagged whether this turn needs freeform
-        # prose (WorkerResult.needs_freeform_response) — no extra call.
+        # needs_freeform_response decides from this turn's own content — the
+        # guard, the values, the side question, the request target and the
+        # caller's words — with no extra call.
         # has_static_retry keeps slots with no purpose-written template on the
         # LLM path rather than reading out their field name at the caller.
         if (

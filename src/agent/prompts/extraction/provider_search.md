@@ -14,9 +14,9 @@ FIELDS
     If the caller names a medical specialty that is not in the list above
     (e.g. "radiologist", "neurologist", "ophthalmologist", "urologist",
     "psychiatrist", "oncologist" etc), extract it LITERALLY as spoken. Do NOT
-    return ambiguous — the agent layer must see the value to escalate cleanly.
+    return "unusable" — the agent layer must see the value to escalate cleanly.
 
-    Only return ambiguous (leave extracted{} empty) when the utterance is
+    Only return "unusable" (leave extracted{} empty) when the utterance is
     a non-medical profession (plumber, lawyer, primary definition etc), is genuinely
     unintelligible as any kind of provider request, or is an incomplete
     sentence that names no provider type (e.g. "I'm looking for",
@@ -25,8 +25,8 @@ FIELDS
   zip_code  exactly 5 digits
     Normalize spoken digits ("one six seven eight three" → "16783").
     NEVER pad with zeros or any character to reach 5 digits.
-    Return ambiguous if the result is not exactly 5 digits after normalization.
-    (e.g. "four two" → ambiguous; "three two one zero nine" → "32109")
+    Return "unusable" if the result is not exactly 5 digits after normalization.
+    (e.g. "four two" → "unusable"; "three two one zero nine" → "32109")
 
   zip_confirmed  "yes" | "no"
     Whether the caller confirms the ZIP the agent just read aloud.
@@ -49,25 +49,26 @@ FIELDS
 
     The one case that is NEITHER: the caller genuinely does not know.
     "maybe", "not sure", "I'm not sure", "probably", "I think so?" →
-    event_type "ambiguous", leave zip_confirmed empty. The agent re-asks the
+    turn_intent "unusable", leave zip_confirmed empty. The agent re-asks the
     confirmation. Keep this narrow — it is the difference between a caller who
     cannot answer and one who is answering no. "I moved recently" is a DECLINE
     (the caller knows the value on file is wrong); "I'm not sure if that's
-    still right" is AMBIGUOUS (the caller does not know).
+    still right" is "unusable" (the caller does not know).
 
 CONFIDENCE NOTES (see header [ANCHOR: CONFIDENCE])
-- zip_code: not exactly 5 digits after normalization → ambiguous. Never pad short values.
-- provider_type: does not map to a medical provider category → ambiguous.
+- zip_code: not exactly 5 digits after normalization → "unusable". Never pad short values.
+- provider_type: does not map to a medical provider category → "unusable".
 - zip_confirmed: only extract when a ZIP was just read aloud. Anything that is
   not an affirmation and not a new ZIP is a decline — extract "no" without
-  looking for a particular wording. Only use ambiguous when the member
+  looking for a particular wording. Only use "unusable" when the member
   genuinely does not know whether the ZIP is correct.
 
 FOLLOWUP CLASSIFICATION NOTES
+Both of these are ordinary side questions — put them in followup_query and
+leave the rest to the system:
 - Questions about HOW the provider list will be delivered ("will I receive a
-  digital directory?", "sent via email?", "how will it be presented?") map to
-  delivery_method in Pending: — followup_disposition "answer", which the
-  system answers from the steps still ahead.
+  digital directory?", "sent via email?", "how will it be presented?") — the
+  system answers them from delivery_method in Pending:.
 - Questions about whether providers are accepting new patients, or filtering
-  by availability/schedule → followup_disposition "answer" (the system will
-  respond gracefully that this isn't a capability of this system).
+  by availability/schedule — the system responds gracefully that this isn't
+  something it can do.

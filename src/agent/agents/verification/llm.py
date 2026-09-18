@@ -16,7 +16,10 @@ This line said `phone_confirmation` and nothing read that key, so a
 confirmation filed under it was dropped and the caller was asked again;
 collect_post_lookup now reads both names.
 
-Corrections live in result.corrections (dict[str, str]).
+Corrections live in result.corrections (dict[str, str]). The extraction model
+does not report them: it reports every value the caller spoke in extracted{},
+and reconcile_worker_result files the ones that replace an already-confirmed
+slot. See llm.schema.WorkerResult.split_corrections.
 """
 
 from __future__ import annotations
@@ -47,8 +50,9 @@ async def extract_verification_decision(
     """
     Run one LLM call to extract identity slots from the latest user utterance.
 
-    confirmed_slots: already-confirmed slot values to include as context so
-        the LLM can classify corrections for slots it has seen before.
+    confirmed_slots: already-confirmed slot values. Rendered as the
+        "Confirmed:" context line, and used again after extraction to decide
+        which of the values the caller spoke are corrections.
     pending_slots: slots still to be collected later this call, so a follow-up
         question about a step still ahead can be answered from them.
     attempt: how many collection attempts have been made for awaiting_slot.
@@ -70,9 +74,15 @@ async def extract_verification_decision(
     )
     try:
         result: WorkerResult = await llm.with_structured_output(WorkerResult).ainvoke(messages)
-        # Regex fallback + veto layer (request_detection): fills a missed
-        # update_target/request_kind and clears WAIT on correction turns.
-        result = reconcile_worker_result(result, last_user_message)
+        # Reconcile layer (request_detection): fills a missed request intent
+        # from the caller's words, and files spoken values that replace a
+        # confirmed slot as corrections.
+        result = reconcile_worker_result(
+            result,
+            last_user_message,
+            confirmed_slots=confirmed_slots,
+            awaiting_slot=awaiting_slot,
+        )
         return result
     except Exception as _exc:
         _code = getattr(_exc, "code", None) or getattr(getattr(_exc, "error", None), "code", None)
@@ -118,8 +128,10 @@ async def extract_name_confirmation(
     )
     try:
         result: WorkerResult = await llm.with_structured_output(WorkerResult).ainvoke(messages)
-        # Regex fallback + veto layer (request_detection): fills a missed
-        # update_target/request_kind and clears WAIT on correction turns.
+        # Reconcile layer (request_detection). No Confirmed: view is built for
+        # the readback, so nothing is split into corrections here — an inline
+        # name fix on this turn is an answer to the readback, which is what
+        # name_confirmation.md collects.
         result = reconcile_worker_result(result, last_user_message)
         return result
     except Exception:

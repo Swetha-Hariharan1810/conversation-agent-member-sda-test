@@ -7,7 +7,7 @@ coordination flow cannot handle — prior authorization, new authorization,
 starting a new procedure request, referrals, billing, enrollment, or any
 other service outside of medical records submission — leave all slot fields
 empty and set:
-  event_type: "ambiguous"
+  turn_intent: "unusable"
   followup_query: short description of what the caller requested
 The agent will decline the request gracefully before re-asking for the current slot.
 This applies regardless of how the request is phrased.
@@ -74,10 +74,10 @@ FIELDS
     Only extract when the agent just read back an email address to the member.
 
     Governing rule: anything other than a clear affirmation is a decline →
-    "no", not "ambiguous". The affirmations are a closed set and are listed
+    "no", not "unusable". The affirmations are a closed set and are listed
     below; the ways of declining are not, so do not look for a wording among
     them — if the member is not affirming the address and is not giving you a
-    different one, they are declining it. Reserve "ambiguous" for a member who
+    different one, they are declining it. Reserve "unusable" for a member who
     genuinely does not know ("I'm not sure", "I think so?"), which is the one
     case the agent re-asks rather than collecting a new address.
 
@@ -94,15 +94,15 @@ FIELDS
       "not anymore", "actually no", "use a different one",
       any statement indicating the address is stale, wrong, or no longer used.
 
-    Genuine uncertainty → leave extracted{} empty, event_type "ambiguous":
+    Genuine uncertainty → leave extracted{} empty, turn_intent "unusable":
       "I think so", "maybe", "not sure", "I'm not 100% sure",
       "hmm", "let me think"
       These express doubt about whether the address is correct,
       not a decision to decline it. Re-ask for clarification.
 
     Key distinction: "that's my old email" is a DECLINE (the member knows
-    it is wrong). "I'm not sure if that's still active" is AMBIGUOUS
-    (the member does not know). Only use ambiguous when the member
+    it is wrong). "I'm not sure if that's still active" is "unusable"
+    (the member does not know). Only use "unusable" when the member
     genuinely cannot confirm or deny.
 
     If the member declines AND provides a replacement email in the same
@@ -112,13 +112,13 @@ FIELDS
     CRITICAL — decline without a new value: when the member declines but does
     NOT give a new email (e.g. "No, I changed it recently", "No, that's
     outdated"), extract ONLY email_confirmed as "no". Do NOT put descriptive
-    text ("changed recently", "needs updating") into corrections. Only put
-    an actual valid email address in corrections or extracted.
+    text ("changed recently", "needs updating") into extracted{}. Only an
+    actual valid email address belongs there.
 
   email  valid email string (must contain "@" and a domain)
     New email address replacing the one on file. Only extract when the
     member is actively providing a replacement.
-    Return ambiguous if format is unclear or missing "@".
+    Return "unusable" if format is unclear or missing "@".
     Preserve punctuation in the local part when converting spoken email:
     "daniel dot reed two five at gmail dot com" →
     "daniel.reed25@gmail.com". A spoken "dot" is a literal period; never
@@ -149,28 +149,28 @@ FIELDS
       without Personal Guide involvement.
 
     Temporal deferrals ("maybe some other time", "not right now", "perhaps later")
-    are functionally declines for this call — extract "no", not ambiguous.
+    are functionally declines for this call — extract "no", not "unusable".
 
     Alternative-arrangement statements ("that's not needed, my doctor's office
     will send it directly", "they'll handle it") are also declines — the member
     is indicating they do not want Personal Guide outreach.
 
-    Ambiguous ("maybe", "I think so") → event_type ambiguous, leave empty.
+    Ambiguous ("maybe", "I think so") → turn_intent "unusable", leave empty.
 
 CONFIDENCE NOTES (see header [ANCHOR: CONFIDENCE])
-- personal_guide_consent: must be unambiguous. Any doubt → ambiguous.
+- personal_guide_consent: must be unambiguous. Any doubt → "unusable".
   Exception: temporal deferrals and alternative-arrangement statements are
   unambiguous declines — extract "no".
 - upload_method: when member's first response is vague affirmation before
   upload link is offered ("okay will send it"), use doctor_direct as default.
 - email_confirmed / contact_confirmed: stale-address or wrong-address
-  statements are unambiguous declines — extract "no". Only use ambiguous
+  statements are unambiguous declines — extract "no". Only use "unusable"
   when the member genuinely does not know whether the address is correct.
 
 ## Other-slot changes are never slot answers
 A statement that a DIFFERENT slot changed ("my ZIP code changed",
 "my address changed", "I moved", "my last name is wrong", "I need to update
 my last name") is never an answer to the awaiting slot — return
-update_target (e.g. "zip_code", "last_name"), request_kind:"update",
-extracted {}. Never classify these as wait or ambiguous, even when prefixed
+turn_intent:"update" with turn_target (e.g. "zip_code", "last_name"),
+extracted {}. Never classify these as wait or "unusable", even when prefixed
 with a wait word ("wait — my address changed").

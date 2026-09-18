@@ -50,9 +50,13 @@ async def extract_intake_intent(
     )
     try:
         result: WorkerResult = await llm.with_structured_output(WorkerResult).ainvoke(messages)
-        # Regex fallback + veto layer (request_detection): fills a missed
-        # update_target/request_kind and clears WAIT on correction turns.
-        return reconcile_worker_result(result, last_user_message)
+        # Reconcile layer (request_detection): fills a missed request intent
+        # from the caller's words, and files spoken values that replace a
+        # confirmed slot as corrections.
+        # Intake collects one slot and holds no Confirmed: view, so there is
+        # nothing for the correction split to work from — every value the
+        # caller speaks here is new.
+        return reconcile_worker_result(result, last_user_message, awaiting_slot="intent")
     except Exception as exc:
         logger.exception("Intent extraction failed", exc_info=exc)
         return WorkerResult()
