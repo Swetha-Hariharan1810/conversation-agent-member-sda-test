@@ -1,0 +1,468 @@
+"""
+handlers.py — Unclear intent handling for IntakeAgent.
+
+Uses LLM 2 (Gemini, generate_recovery_message) to produce a natural
+recovery sentence. Falls back to static strings on exception.
+"""
+
+from __future__ import annotations
+
+from agent.agents.intake.constants import (
+    INTENT_SLOT,
+    LOG_INTENT_UNCLEAR,
+    LOG_MAX_RETRY,
+    LOG_OUT_OF_SCOPE,
+    MAX_CLARIFICATION_ATTEMPTS,
+    OUT_OF_SCOPE_REASON,
+    UNCLEAR_ESCALATION,
+    UNCLEAR_INTENT_REASON,
+)
+from agent.logger import get_logger
+from agent.state import State
+from agent.utils import _last_user_msg
+
+logger = get_logger(__name__)
+
+
+def _get_clarification_attempts(state: State) -> int:
+    slot = (state.get("slot_attempts") or {}).get(INTENT_SLOT, {})
+    intent_attempts = slot if isinstance(slot, int) else slot.get("attempt_count", 0)
+    offtopic_turns = state.get("offtopic_global_count") or 0
+    return intent_attempts + offtopic_turns
+
+
+async def handle_unclear_intent(agent, state: State, result=None) -> dict:
+    # Waiting is not a failed attempt — see SlotManagerMixin.wait_ack. A caller
+    # who says "hold on, let me grab my card" at the greeting has not failed to
+    # state their intent; they asked for a moment, and spending one of two
+    # clarification attempts on it brings the escalation forward by a turn.
+    if wait := agent.wait_ack(state, INTENT_SLOT, decision=result, slot_label="what you need today"):
+        return wait
+
+    attempts = _get_clarification_attempts(state)
+
+    if attempts >= MAX_CLARIFICATION_ATTEMPTS:
+        logger.warning(LOG_MAX_RETRY)
+        return agent.signal_escalate(
+            state=state,
+            message=UNCLEAR_ESCALATION,
+            reason=UNCLEAR_INTENT_REASON,
+            initiator="Agent",
+        )
+
+    agent.slot_fail(INTENT_SLOT, is_asr=False)
+    logger.info(LOG_INTENT_UNCLEAR, extra={"attempt": attempts + 1})
+    messages = list(state.get("messages") or [])
+
+    # if attempts == 0:
+    #     from agent.agents.intake.constants import UNCLEAR_FIRST_ATTEMPT_MSGS
+    #     from agent.utils import pick
+
+    #     msg = pick(UNCLEAR_FIRST_ATTEMPT_MSGS)
+    #     return agent.ask_member(state, msg)
+
+    from agent.llm.response_generator import generate_recovery_message
+
+    if attempts == 0:
+        # First failure — pure open question, no hint yet
+        # Caller may know exactly what they want, just said it vaguely
+        label_override = "the caller's reason for calling today — ask warmly and openly"
+    else:
+        # Second failure — caller genuinely does not know what this service offers
+        # Natural hint is appropriate now, but must not sound like a phone tree menu
+        # Frame it as "I can help with X or Y — what brings you in?" not "Press 1 for X"
+        label_override = (
+            "the caller's reason for calling — they seem unsure what this service offers. "
+            "Mention naturally that you can help with finding an in-network doctor "
+            "or following up on a health insurance claim, then invite them to share "
+            "what they need. Keep it warm and conversational, not a menu."
+        )
+    msg = await generate_recovery_message(
+        slot_name="intent",
+        attempt=attempts + 1,
+        guard="RETRY",
+        last_messages=messages[-4:],
+        slot_label_override=label_override,
+        caller_name=None,
+        confirmed_slots={},
+        user_utterance=_last_user_msg(messages),
+    )
+    return agent.ask_member(state, msg)
+
+
+# ── Deterministic screens, applied before the classification is trusted ──────
+# Both of the tables these read have always known the answer; they were just
+# consulted AFTER the extraction LLM had already decided the intent, so they
+# only rescued the one misclassification each was gated on. Two calls that
+# should have ended in a static handoff instead got a generated question:
+#
+#     Caller  Hi, I'm trying to find a neurologist covered under my plan.
+#     AI      Of course — and what type of provider are you looking for today?
+#
+#     Caller  I want to appeal my claim denial
+#     AI      Claim appeals are handled on a different line. How can I help
+#             you today?
+#
+# The first was classified "unclear" rather than "provider_services", so the
+# neurologist keyword check — gated on provider_services — never ran, and
+# handle_unclear_intent generated an open re-ask. Asking a caller what type of
+# provider they want one turn after they said "neurologist" is the worst
+# sentence available. The second was not classified out_of_scope, so the
+# appeals routing entry never ran either, and the call carried on instead of
+# transferring.
+#
+# Neither needed a model to be right. A named specialty and a named appeal are
+# facts about the words, so they are read from the words.
+
+
+def screen_unsupported_provider_type(intent_value: str, utterance: str) -> str:
+    """The unsupported specialty named in ``utterance``, or "".
+
+    Runs for provider_services AND unclear: a misclassified specialty is still
+    a specialty. Deliberately NOT for claim_services or out_of_scope — "check
+    my claim for the neurologist visit" and "appeal my neurologist's denial"
+    name a specialty without asking us to search for one.
+    """
+    from agent.agents.intake.models import IntentTag
+
+    if intent_value not in (IntentTag.PROVIDER_SERVICES.value, IntentTag.UNCLEAR.value):
+        return ""
+    from agent.agents.intake.constants import PROVIDER_TYPE_UNKNOWN
+
+    named = _extract_provider_type_from_utterance(utterance)
+    return "" if named == PROVIDER_TYPE_UNKNOWN else named
+
+
+def screen_out_of_scope(intent_value: str, utterance: str) -> bool:
+    """Is this plainly an appeal or grievance, whatever the classifier said?
+
+    APPEAL_GRIEVANCE_KEYWORDS is the repo's existing definition of the topic —
+    follow_up already screens on it and reroutes such a caller back through
+    intake precisely so intake can hand them to the appeals team. Intake not
+    recognising them closed that loop onto itself.
+
+    Only appeals are screened here. The rest of OUT_OF_SCOPE_KEYWORD_ROUTING is
+    a routing table, not a classifier: "coverage", "payment" and "drug" all
+    appear in ordinary claims and provider calls, and screening on them would
+    take real work away from the flows that handle it.
+    """
+    import re
+
+    from agent.agents.follow_up.constants import APPEAL_GRIEVANCE_KEYWORDS
+    from agent.agents.intake.models import IntentTag
+
+    if intent_value == IntentTag.OUT_OF_SCOPE.value:
+        return False  # already going to the right handler
+    pattern = r"\b(?:" + "|".join(re.escape(k) for k in sorted(APPEAL_GRIEVANCE_KEYWORDS)) + r")\b"
+    return bool(re.search(pattern, utterance or "", re.IGNORECASE))
+
+
+def _match_out_of_scope_routing(utterance: str) -> tuple[str, str, str]:
+    """
+    Match the caller's utterance against the keyword routing table.
+    Returns (matched_phrase, team, number).
+    Falls back to defaults if no keyword matches.
+    Runs in <0.1ms — no LLM call, no token cost.
+    """
+    from agent.agents.intake.constants import (
+        OUT_OF_SCOPE_FALLBACK_NUMBER,
+        OUT_OF_SCOPE_FALLBACK_TEAM,
+        OUT_OF_SCOPE_KEYWORD_ROUTING,
+    )
+
+    t = (utterance or "").lower()
+    for keyword, team, number in OUT_OF_SCOPE_KEYWORD_ROUTING:
+        if keyword in t:
+            return keyword, team, number
+    return "", OUT_OF_SCOPE_FALLBACK_TEAM, OUT_OF_SCOPE_FALLBACK_NUMBER
+
+
+async def handle_out_of_scope_intent(agent, state: State, result=None) -> dict:
+    """
+    Called when the extraction LLM classifies intent as out_of_scope.
+
+    Team and phone number are resolved by keyword-matching the caller's
+    last utterance — no LLM extraction needed, no silent fallback risk.
+    Routes directly to END (not escalation_agent) so the caller hears
+    exactly one message, not the out-of-scope message followed by the
+    escalation agent's ref number message.
+    """
+    import random
+
+    from agent.agents.intake.constants import (
+        OUT_OF_SCOPE_MSG_TEMPLATES,
+    )
+    from agent.utils import _last_user_msg
+
+    logger.warning(LOG_OUT_OF_SCOPE)
+
+    # Get the caller's last utterance from state messages
+    messages = list(state.get("messages") or [])
+    last_user = _last_user_msg(messages)
+
+    # Keyword match — O(n) over a small fixed list, <0.1ms
+    keyword, team, number = _match_out_of_scope_routing(last_user)
+
+    # Build topic description from matched keyword or generic fallback
+    if keyword:
+        # Make it sound natural: "billing" → "your billing question"
+        topic_description = f"your {keyword} question"
+    else:
+        topic_description = "your request"
+
+    msg = random.choice(OUT_OF_SCOPE_MSG_TEMPLATES).format(
+        topic_description=topic_description,
+        team=team,
+        number=number,
+    )
+
+    # Route directly to END — do not go through escalation_agent.
+    # The message already says "I'll connect you now" and gives the number.
+    # escalation_agent would add a second message with a reference number.
+    result = agent.ask_member(state, msg)
+    result["next_node"] = "END"
+    result["escalation_reason"] = OUT_OF_SCOPE_REASON
+    result["is_interrupt"] = False
+    return result
+
+
+# The five supported types, as the single words the suffix rule below would
+# otherwise catch. Cardiologist and Dermatologist both end in "ologist" and
+# Pediatrician in "iatrician", so without these the rule would escalate the
+# calls this system exists to serve.
+_SUPPORTED_SPECIALTIES: frozenset[str] = frozenset(
+    {"cardiologist", "dermatologist", "pediatrician", "orthopedist", "physician"}
+)
+
+
+def _extract_provider_type_from_utterance(utterance: str) -> str:
+    """
+    Extract a readable provider type label from the caller's raw utterance
+    for the {provider_type} placeholder in the escalation message.
+
+    Uses word-boundary regex matching so short keywords like "ent" never
+    falsely match inside common words (e.g. "efficient", "different").
+    Falls back to "this provider type" if nothing recognisable is found.
+    """
+    import re
+
+    _UNSUPPORTED_KEYWORDS: list[tuple[str, str]] = [
+        ("oncologist", "Oncologist"),
+        ("neurologist", "Neurologist"),
+        ("radiologist", "Radiologist"),
+        ("ophthalmologist", "Ophthalmologist"),
+        ("urologist", "Urologist"),
+        ("psychiatrist", "Psychiatrist"),
+        ("psychologist", "Psychologist"),
+        ("podiatrist", "Podiatrist"),
+        ("gastroenterologist", "Gastroenterologist"),
+        ("rheumatologist", "Rheumatologist"),
+        ("endocrinologist", "Endocrinologist"),
+        ("nephrologist", "Nephrologist"),
+        ("pulmonologist", "Pulmonologist"),
+        ("hematologist", "Hematologist"),
+        ("allergist", "Allergist"),
+        ("immunologist", "Immunologist"),
+        ("pain management", "Pain Management Specialist"),
+        ("physical therapist", "Physical Therapist"),
+        ("occupational therapist", "Occupational Therapist"),
+        ("speech therapist", "Speech Therapist"),
+        ("obgyn", "OB-GYN"),
+        ("ob-gyn", "OB-GYN"),
+        ("gynecologist", "Gynecologist"),
+        ("obstetrician", "Obstetrician"),
+        # "ent" is 3 chars — word-boundary match prevents false hits inside
+        # common words like "efficient", "different", "prevent", etc.
+        ("otolaryngologist", "Otolaryngologist"),
+        ("plastic surgeon", "Plastic Surgeon"),
+        ("oral surgeon", "Oral Surgeon"),
+        ("vascular", "Vascular Specialist"),
+        ("surgeon", "Surgeon"),
+        ("dentist", "Dentist"),
+        ("optometrist", "Optometrist"),
+        ("chiropractor", "Chiropractor"),
+        ("audiologist", "Audiologist"),
+        ("therapist", "Therapist"),
+        ("ent", "ENT Specialist"),
+    ]
+    t = (utterance or "").lower()
+    for keyword, label in _UNSUPPORTED_KEYWORDS:
+        if re.search(r"\b" + re.escape(keyword) + r"\b", t):
+            return label
+
+    # A hand-written list of specialties is never finished — "proctologist" was
+    # not on it, so a caller asking for one fell through to the ordinary flow
+    # and got put through identity verification for a search that cannot serve
+    # them. English names most specialities with a handful of suffixes, so any
+    # word ending in one is a specialty, and any specialty that is not one of
+    # the five supported ones is unsupported. That inverts the list: it no
+    # longer has to anticipate the caller, only the exceptions.
+    for match in re.finditer(r"\b([a-z]+(?:ologist|iatrist|iatrician|opedist|ontist|ometrist))\b", t):
+        word = match.group(1)
+        if word not in _SUPPORTED_SPECIALTIES:
+            return word.capitalize()
+    return "this provider type"
+
+
+async def handle_unsupported_provider_type(agent, state: State, result=None) -> dict:
+    """
+    Called when the extraction LLM classifies intent as provider_type_unsupported.
+
+    Immediately routes to escalation_agent with a pre-message that names the
+    unsupported specialty and lists the five supported types. No verification
+    runs — the member hears one clear message before being transferred.
+
+    Design: uses signal_escalate() (not ask_member + END) so escalation_agent
+    appends a reference number and the call ends through the normal transfer path.
+    This is identical to the pattern in provider_search_agent.
+    """
+    import random
+
+    from agent.agents.intake.constants import (
+        LOG_PROVIDER_TYPE_UNSUPPORTED,
+        PROVIDER_TYPE_UNKNOWN,
+        PROVIDER_TYPE_UNSUPPORTED_ESCALATION,
+        PROVIDER_TYPE_UNSUPPORTED_REASON,
+        PROVIDER_TYPE_UNSUPPORTED_UNNAMED_ESCALATION,
+    )
+    from agent.utils import _last_user_msg
+
+    logger.warning(LOG_PROVIDER_TYPE_UNSUPPORTED)
+
+    messages = list(state.get("messages") or [])
+    last_user = _last_user_msg(messages)
+
+    provider_type = _extract_provider_type_from_utterance(last_user)
+    if provider_type == PROVIDER_TYPE_UNKNOWN:
+        # The classifier says unsupported but the words name nothing we can read
+        # back ("I need a proctologist"). Naming it anyway produced "looking for
+        # a this provider type" — the decision is still right, so escalate with
+        # a message that does not try to name what it does not know.
+        msg = random.choice(PROVIDER_TYPE_UNSUPPORTED_UNNAMED_ESCALATION)
+    else:
+        msg = random.choice(PROVIDER_TYPE_UNSUPPORTED_ESCALATION).format(provider_type=provider_type)
+
+    return agent.signal_escalate(
+        state=state,
+        message=msg,
+        reason=PROVIDER_TYPE_UNSUPPORTED_REASON,
+        initiator="Agent",
+    )
+
+
+# ── Withdrawal screen, applied before the same-member question is re-asked ───
+# The same-member question ("same member, or a different member?") assumes the
+# caller still wants the thing they just asked for. A caller who has changed
+# their mind does not answer it — they close the call:
+#
+#     AI      Is this request for the same member we've been discussing, or is
+#             this for a different member?
+#     Caller  no worries, that's fine. no, that's everything — thanks for the help
+#     AI      Could you clarify — is this for the member we already have on
+#             file, or a different person?
+#     Caller  really, that's all — thanks
+#     AI      Could you clarify — is this for the member we already have on
+#             file, or a different person?
+#
+# The classifier has no category for this, so every one of those turns came
+# back "unclear" and the question was asked again, verbatim, for as long as the
+# caller kept saying goodbye. "That's everything" is a fact about the words, so
+# — like the specialty and appeal screens above — it is read from the words,
+# before the model is asked anything.
+
+_WITHDRAWAL_PHRASES: tuple[str, ...] = (
+    "that's all",
+    "thats all",
+    "that's it",
+    "thats it",
+    "that's everything",
+    "thats everything",
+    "that will be all",
+    "that'll be all",
+    "thatll be all",
+    "nothing else",
+    "nothing more",
+    "nothing further",
+    "no thanks",
+    "no thank you",
+    "all set",
+    "all good",
+    "i'm good",
+    "im good",
+    "i'm done",
+    "im done",
+    "we're done",
+    "were done",
+    "never mind",
+    "nevermind",
+    "forget it",
+    "forget about it",
+    "don't worry about it",
+    "dont worry about it",
+    "leave it",
+    "skip it",
+    "goodbye",
+    "good bye",
+    "bye",
+    "take care",
+)
+# Deliberately not here: "that's fine", "okay", "sure". Ending a call wrongly
+# costs more than one more question, and those can just as easily mean "fine,
+# use the same member". They are left to the classifier, which reads them next
+# to what was asked; the screen only claims the sentences that can mean nothing
+# else.
+
+# Anything that names a member — or points at one — means the turn is an answer
+# to the question, not a withdrawal, however it ends. "That's all, it's for my
+# wife" is a different member and a closing breath, and the member wins.
+_MEMBER_REFERENCE_PHRASES: tuple[str, ...] = (
+    "same",
+    "different",
+    "someone else",
+    "somebody else",
+    "another",
+    "new member",
+    "new patient",
+    "on file",
+    "for her",
+    "for him",
+    "for them",
+    "my wife",
+    "my husband",
+    "my spouse",
+    "my son",
+    "my daughter",
+    "my mother",
+    "my father",
+    "my mom",
+    "my dad",
+    "my child",
+    "my kid",
+    "my partner",
+    "myself",
+)
+
+
+def _phrase_hit(phrases: tuple[str, ...], utterance: str) -> bool:
+    """Word-boundary match of any phrase in ``phrases`` against ``utterance``.
+
+    Word boundaries, not ``in``: "no" lives inside "nothing", "now" and "know",
+    and "new" inside "renew" — substring matching on either list turns a caller
+    saying goodbye into a caller naming a different member.
+    """
+    import re
+
+    text = (utterance or "").lower().replace("’", "'").replace("‘", "'")
+    pattern = r"\b(?:" + "|".join(re.escape(p) for p in phrases) + r")\b"
+    return bool(re.search(pattern, text))
+
+
+def screen_request_withdrawn(utterance: str) -> bool:
+    """Is the caller dropping the request rather than answering the question?
+
+    True only when the turn closes the call AND names no member: a withdrawal
+    is what is left when nothing in the sentence answers "same or different".
+    """
+    return _phrase_hit(_WITHDRAWAL_PHRASES, utterance) and not _phrase_hit(
+        _MEMBER_REFERENCE_PHRASES, utterance
+    )
