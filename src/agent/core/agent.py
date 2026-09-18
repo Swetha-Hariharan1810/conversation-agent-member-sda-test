@@ -86,6 +86,13 @@ class BaseAgent(ConversationGuardsMixin, SlotManagerMixin, SignalsMixin, ABC):
         the way through _generate_slot_retry_response; and whatever is left
         here is put in front of what the turn says. A new slot cannot silently
         drop a question, because no handler has to do anything to keep it.
+
+        The same is true of a handler that answers by ACTING — routing the
+        update, opening a detour, asking for the new value. Those paths speak
+        without generating and so consume nothing, and the net used to answer
+        over the top of them. It reads what the turn returned instead now, so
+        they are covered without being asked to do anything either. See
+        SlotManagerMixin.honors_request.
         """
         result = await self.run(state)
         result = await self._answer_unanswered_side_question(state, result)
@@ -147,6 +154,18 @@ class BaseAgent(ConversationGuardsMixin, SlotManagerMixin, SignalsMixin, ABC):
         pending = self.consume_side_question()
         query = (pending.get("query") or "").strip()
         if not query or not isinstance(result, dict):
+            return result
+
+        # A turn that granted the request has already answered it, in the only
+        # currency the caller cares about. Speaking here would put a second
+        # sentence about the same subject in front of the first, written
+        # without having seen it — which is how a turn came to decline and
+        # grant one ZIP change in that order. See honors_request.
+        if honored := self.honors_request(result, (pending.get("target") or "").strip()):
+            self.logger.info(
+                "execute: side question already granted by this turn — not answering it twice",
+                extra={"agent": self.AGENT_NAME, "query": query, "honored": honored},
+            )
             return result
 
         # An escalating turn speaks through escalation_pre_message and carries

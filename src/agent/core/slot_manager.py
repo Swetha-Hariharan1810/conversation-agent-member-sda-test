@@ -1077,6 +1077,12 @@ class SlotManagerMixin:
             {
                 "query": query,
                 "value": ", ".join(str(v) for v in extracted.values() if v),
+                # What the same turn asked to change, when it asked for
+                # anything. The question and the request come out of one
+                # utterance and are usually the same act — "can I change my
+                # ZIP?" is both — so the net needs the target to tell whether
+                # the turn already granted what it is about to answer.
+                "target": (getattr(result, "update_target", "") or "").strip() if result else "",
             }
             if query
             else {}
@@ -1085,11 +1091,15 @@ class SlotManagerMixin:
     def consume_side_question(self) -> dict:
         """Take the recorded question, marking it answered.
 
-        A handler that addresses the question itself calls this so the safety
+        A handler that addresses the question in PROSE calls this so the safety
         net in BaseAgent.execute does not answer it a second time. Every path
-        that already addressed one goes through _generate_slot_retry_response
-        with a followup_query, which consumes there — no handler has to
-        remember to.
+        that speaks about one goes through _generate_slot_retry_response with a
+        followup_query, which consumes there — no handler has to remember to.
+
+        A handler that ACTS on the request instead of talking about it does not
+        pass through there, and used not to be covered at all. It is now, and
+        still without remembering anything: see ``honors_request``, which reads
+        the evidence out of the update dict the handler returned.
         """
         pending = getattr(self, "_side_question", {}) or {}
         self._side_question = {}
@@ -1218,6 +1228,74 @@ class SlotManagerMixin:
             "content": cls.join_side_answer(answer, str(message.get("content") or "")),
         }
         return result
+
+    @staticmethod
+    def _same_slot_subject(a: str, b: str) -> bool:
+        """Do two slot names name the same thing to the caller?
+
+        ``fax`` and ``fax_confirmed`` are one subject with two pipeline names,
+        and so are ``delivery`` and ``delivery_method``. Comparison is on the
+        names themselves, never on the words of a sentence — a caller who asked
+        about their fax and a turn now collecting ``benefits_response`` share no
+        subject however similarly the two sentences happen to read.
+        """
+        a, b = (a or "").strip().lower(), (b or "").strip().lower()
+        if not a or not b:
+            return False
+        return a == b or a.startswith(f"{b}_") or b.startswith(f"{a}_")
+
+    @classmethod
+    def honors_request(cls, result: dict, target: str) -> str:
+        """Why this turn ACTED on the caller's request, or "" if it did not.
+
+        The safety net in BaseAgent.execute exists so a hand-written handler
+        cannot silently drop a question. Its contract was that whoever answers
+        one consumes it, and every prose path does — but a handler can also
+        answer by doing the thing, and those paths generate nothing and consume
+        nothing. The net then wrote a second sentence for the turn, blind to
+        the first, and the caller heard both:
+
+            Caller  Yeah, that's right. But my ZIP code's wrong. Can I change it?
+            AI      Got it, Emily — a representative would need to make that
+                    change to your ZIP code. Sure — let me update your zip code
+                    first. Could you give me your five-digit ZIP code?
+
+        One turn, declining and granting the same request, in that order. The
+        decline is the net answering "can I change it?" out of FOLLOWUP_RESPOND,
+        which had no way to know the turn had already routed the update to
+        provider_search and asked for the new value.
+
+        There is no need to guess at it. A turn that honors a request says so in
+        the update dict it returns, in the same keys the routing machinery
+        already reads:
+
+          - it routed the request to the owning agent, or
+          - it opened a detour to re-collect the slot, or
+          - it is now asking the caller for the very thing they asked to change.
+
+        The third is the general one and covers the handlers that do neither of
+        the first two — delivery's pre-dispatch contact update, its replay
+        branch, a re-dispatch — because whatever route a handler took, the proof
+        that the request was granted is that the caller is now being asked for
+        the new value.
+
+        This is read from state, not from prose. _declines_what_is_offered
+        matches a decline against an offer by wording and word overlap, and is
+        what was left to catch this: it needs a first-person offer marker in the
+        message, "Sure — let me update your zip code first" has none, and the
+        contradiction went out. Sentences that agree or disagree by accident of
+        phrasing are not a foundation; what the turn did is.
+        """
+        if not isinstance(result, dict):
+            return ""
+        if result.get("pending_cross_agent_request"):
+            return "routed to the owning agent"
+        if str(result.get("correction_return_to") or "").strip():
+            return "opened an update detour"
+        awaiting = str(result.get("awaiting_slot") or "").strip()
+        if target and awaiting and cls._same_slot_subject(target, awaiting):
+            return f"now collecting {awaiting}"
+        return ""
 
     @staticmethod
     def awaits_nothing(result: dict) -> bool:
