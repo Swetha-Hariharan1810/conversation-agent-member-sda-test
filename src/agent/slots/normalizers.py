@@ -25,6 +25,7 @@ __all__ = [
     "normalize_ssn",
     "normalize_dob",
     "normalize_zip_code",
+    "recover_inline_zip_code",
     "normalize_phone_number",
     "normalize_fax_number",
     "normalize_email",
@@ -745,6 +746,20 @@ def normalize_zip_code(value: str | None) -> str:
     """Normalize to 5-digit ZIP string. Handles spoken digits: 'one six seven eight three' → '16783'."""
     converted = _convert_spoken_digits(_clean(value))
     return re.sub(r"\D", "", converted)[:5]
+
+
+_INLINE_ZIP_DIGIT_RE = re.compile(
+    r"(?<!\w)(?:\d|zero|oh|one|two|three|four|five|six|seven|eight|nine)(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def recover_inline_zip_code(value: str | None) -> str:
+    """Recover a ZIP from prose only when it contains exactly five digit tokens."""
+    tokens = _INLINE_ZIP_DIGIT_RE.findall(_clean(value))
+    if len(tokens) != 5:
+        return ""
+    return normalize_zip_code(" ".join(tokens))
 
 
 # ---------------------------------------------------------------------------
