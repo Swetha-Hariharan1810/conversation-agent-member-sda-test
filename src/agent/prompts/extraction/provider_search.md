@@ -40,12 +40,16 @@ FIELDS — every name below is a key of `extracted{}`
       "no"  — the caller indicates it is NOT the one to use: it is wrong, it
               is out of date, they have moved, or they want it changed. Any
               phrasing at all. There is no list to match against — if the
-              caller is not affirming the ZIP and is not giving you a
-              different one, they are declining it.
+              caller is not affirming the ZIP, they are declining it, and a
+              new ZIP in the same breath does not make it anything else.
 
-    If the caller provides a new 5-digit ZIP alongside a negation
-    ("no, it's 10001"), extract zip_code with the new value; leave
-    zip_confirmed empty.
+    A decline and a replacement ZIP are not alternatives, and reporting one
+    must never cost the other. When the caller declines AND gives a new
+    5-digit ZIP in the same breath ("no, it's 10001", "no, my zip changed —
+    it's zero two one four zero"), report BOTH: zip_confirmed "no" AND
+    zip_code carrying the new value. Do not decide whether the ZIP you heard
+    replaces the one read back — the system compares them itself and keeps
+    the value when it differs.
 
     The one case that is NEITHER: the caller genuinely does not know.
     "maybe", "not sure", "I'm not sure", "probably", "I think so?" →
@@ -59,9 +63,10 @@ CONFIDENCE NOTES (see header [ANCHOR: CONFIDENCE])
 - zip_code: not exactly 5 digits after normalization → "unusable". Never pad short values.
 - provider_type: does not map to a medical provider category → "unusable".
 - zip_confirmed: only extract when a ZIP was just read aloud. Anything that is
-  not an affirmation and not a new ZIP is a decline — extract "no" without
-  looking for a particular wording. Only use "unusable" when the member
-  genuinely does not know whether the ZIP is correct.
+  not an affirmation is a decline — extract "no" without looking for a
+  particular wording, and extract zip_code alongside it whenever the caller
+  spoke one. Only use "unusable" when the member genuinely does not know
+  whether the ZIP is correct.
 
 FOLLOWUP CLASSIFICATION NOTES
 Both of these are ordinary side questions — put them in followup_query and
