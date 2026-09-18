@@ -306,14 +306,17 @@ pcp_zip_inline_update = Scenario(
     name="pcp_zip_inline_update",
     flow="pcp",
     mutating=True,
-    retries=1,  # inline "no + new ZIP" extraction is mildly non-deterministic:
-    # if the LLM returns zip_confirmed="no" instead of the bare zip_code, the
-    # agent asks for the ZIP on a separate turn and the script desyncs
     user_turns=PCP_VERIFY
     + [
         # Inline decline + replacement in ONE utterance at the zip_confirmed
-        # read-back: extraction contract extracts zip_code and omits
-        # zip_confirmed → provider_search accepts it directly (no read-back).
+        # read-back: extraction reports zip_confirmed "no" AND zip_code, and
+        # provider_search keeps the ZIP because it differs from the one read
+        # back (is_read_back_echo) → accepted directly, no second read-back.
+        # This scenario carried retries=1 for the turn where the model
+        # returned the confirmation field alongside the bare ZIP: the agent
+        # discarded the value and re-asked, desyncing the script. Both forms
+        # now land on the same path, so the retry is gone — a failure here is
+        # a real regression.
         "no, my zip changed — it's zero two one four zero",
         "email please",  # next AI prompt is already the delivery bridge
         "yes that's correct",  # email on file

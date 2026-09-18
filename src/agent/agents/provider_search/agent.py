@@ -35,7 +35,7 @@ from agent.agents.provider_search.pipelines import (
 )
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import confirms_value, is_not_an_answer
+from agent.core.confirmation import confirms_value, is_not_an_answer, is_read_back_echo
 from agent.llm.config import get_extraction_llm
 from agent.logger import get_logger
 from agent.slots.normalizers import normalize_provider_type, normalize_yes_no, normalize_zip_code
@@ -195,11 +195,24 @@ class ProviderSearchAgent(BaseAgent):
             zip_conf_raw = extracted.get("zip_confirmed", "")
 
             zip_conf = normalize_yes_no(zip_conf_raw) if zip_conf_raw else ""
-            # Extraction contract: a replacement ZIP and zip_confirmed are mutually
-            # exclusive ("if caller declines AND provides a new ZIP, omit
-            # zip_confirmed"). If both arrive, zip_code is an echo of the
-            # Confirmed: context line — discard it so the yes/no is honored.
-            if zip_conf in ("yes", "no"):
+            # A decline and a replacement ZIP are not mutually exclusive, whatever
+            # a prompt asks for. "no, my zip changed — it's 02140" answers the
+            # read-back AND carries the new value, and the model reports it both
+            # ways from one turn to the next: sometimes the bare zip_code,
+            # sometimes zip_confirmed "no" alongside it. This line used to clear
+            # the ZIP whenever zip_confirmed arrived at all, so the second form
+            # fell through to the decline path below and asked the caller for the
+            # ZIP they had just given — the failure core.confirmation.is_read_back_echo
+            # was written for, and which the fax, email and phone confirmation
+            # branches already guard against this way.
+            #
+            # An affirmation still clears it. A "yes" carrying a ZIP other than
+            # the one read back is a misheard read-back, not a replacement the
+            # caller can be held to, and this branch writes to Salesforce with no
+            # read-back of its own to catch it.
+            if zip_conf == "yes" or (
+                zip_conf == "no" and is_read_back_echo(new_zip_raw, zip_on_file, normalize_zip_code)
+            ):
                 new_zip_raw = ""
 
             if new_zip_raw:
