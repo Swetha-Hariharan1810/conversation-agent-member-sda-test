@@ -25,7 +25,7 @@ Precedence: update beats redo beats replay; a concrete slot target beats a
 capability topic (updates are checked first and target canonical slot names).
 
 Dependency-light on purpose: stdlib re / dataclasses / logging plus the
-dependency-free slot_ownership and slots.options registries. NEVER import from
+dependency-free slot_ownership, slots.options and slots.shapes registries. NEVER import from
 agents/ or agent.utils — the few cannot-provide negatives needed to stay out of
 detect_cannot_provide's territory are duplicated below.
 """
@@ -44,6 +44,7 @@ from agent.core.followup_grounding import (
 )
 from agent.core.slot_ownership import SLOT_OWNERSHIP
 from agent.slots.options import get_option_set, match_option
+from agent.slots.shapes import Completeness, assess, has_shape
 from agent.utils import detect_cannot_provide
 
 logger = logging.getLogger(__name__)
@@ -548,6 +549,51 @@ def _reconcile_closed_set(result: Any, last_user: str | None, awaiting_slot: str
     return result
 
 
+def _reconcile_completeness(result: Any, awaiting_slot: str) -> Any:
+    """Measure the awaited value against the slot's declared shape.
+
+    Without this a value is either present or absent, so four digits of an
+    eight-digit reference number counts as present and enters the confirmation
+    path — the caller is read back a fragment, then read back the whole number
+    again once the rest arrives. Two round-trips for one value, on a voice call.
+
+    Computed here rather than asked of the extraction model: "four two six
+    nine" is what the model perceives, and whether that is a whole reference
+    number is a fact about the slot. WorkerResult.completeness is annotated
+    SkipJsonSchema so the model is never shown the field at all.
+
+    Corrections count too — "no, it's four two six nine" is as short as the
+    first answer was.
+    """
+    if not awaiting_slot or not has_shape(awaiting_slot):
+        return result
+
+    extracted = getattr(result, "extracted", None) or {}
+    corrections = getattr(result, "corrections", None) or {}
+    raw = (extracted.get(awaiting_slot) or corrections.get(awaiting_slot) or "").strip()
+    if not raw:
+        return result
+
+    verdict = assess(awaiting_slot, raw)
+    try:
+        result.completeness = verdict
+    except (AttributeError, ValueError):  # non-WorkerResult shim in tests
+        return result
+
+    if verdict is Completeness.PARTIAL:
+        logger.info(
+            "request_detection: %s is short of its declared shape",
+            awaiting_slot,
+            extra={
+                "source": "shape_check",
+                "field": awaiting_slot,
+                "llm_value": raw[:32],
+                "final_value": verdict.value,
+            },
+        )
+    return result
+
+
 def reconcile_worker_result(result: Any, last_user: str | None, *, awaiting_slot: str = "") -> Any:
     """Fallback + veto pass over an extraction result (WorkerResult-shaped).
 
@@ -576,6 +622,9 @@ def reconcile_worker_result(result: Any, last_user: str | None, *, awaiting_slot
     - awaiting_slot is a closed set (delivery_method, upload_method, …) and the
       LLM returned no value for it, but the caller plainly named one → fill it
       from agent.slots.options. Gap fill only; see _reconcile_closed_set.
+    - awaiting_slot has a declared shape (agent.slots.shapes) and a value came
+      back for it → set completeness to complete/partial/none by measuring the
+      digits against that shape. See _reconcile_completeness.
     - detect_cannot_provide fires but the LLM left cannot_provide false →
       set it. The flag is semantic and the model is the primary source; this
       is the backstop for a missed call or an extraction that threw, so a
@@ -584,6 +633,7 @@ def reconcile_worker_result(result: Any, last_user: str | None, *, awaiting_slot
     """
     result = _strip_reserved_keys(result)
     result = _reconcile_closed_set(result, last_user, awaiting_slot)
+    result = _reconcile_completeness(result, awaiting_slot)
     result = _reconcile_cannot_provide(result, last_user)
     result = _reconcile_followup_query(result, last_user)
     result = _recover_missed_followup(result, last_user)

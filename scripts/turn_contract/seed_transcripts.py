@@ -132,6 +132,43 @@ DECLINE_AND_GRANT = Transcript(
 )
 
 
+# ── Transcript 2, as the flow produces it after the partial-value fix ────────
+# The same call, with agent.slots.shapes in place: four digits is measured
+# against the reference number's declared eight, so it is held as a fragment
+# and the caller is asked only for what is missing. The second piece completes
+# the value and the flow moves on — one exchange for the remainder instead of
+# two confirmation round-trips, and no fragment ever offered for a yes.
+#
+# The agent line here is what build_remainder_prompt emits (it draws from a
+# two-line pool; this is one of them).
+PARTIAL_REFERENCE_NUMBER_FIXED = Transcript(
+    name="t2_partial_reference_number_fixed",
+    note="the same call once a partial value is asked for rather than confirmed",
+    turns=(
+        Turn("ai", "Thank you. Is your phone number 512-555-6101?", awaiting_slot="phone_confirmed"),
+        Turn("human", "Yes. That is correct."),
+        Turn(
+            "ai",
+            "May I have the reference number of the adjustment request?",
+            awaiting_slot="reference_number",
+        ),
+        Turn("human", "It is four two six nine."),
+        Turn(
+            "ai",
+            "So far I have four two six nine. Could you give me the last four digits?",
+            awaiting_slot="reference_number",
+        ),
+        Turn("human", "five eight one seven."),
+        Turn(
+            "ai",
+            "Got it. The request is currently Review. The most recent update on file is dated 2026-01-21.",
+            awaiting_slot="upload_method",
+        ),
+        Turn("human", "Okay, thank you."),
+    ),
+)
+
+
 # ── A clean control ──────────────────────────────────────────────────────────
 # Nothing should fire on this. It exists so a check that starts flagging
 # ordinary conversation is caught immediately.
@@ -157,6 +194,7 @@ ALL_TRANSCRIPTS = (
     CLEAN_CONTROL,
     CUTOFF_WRONG_DECLINE,
     PARTIAL_REFERENCE_NUMBER,
+    PARTIAL_REFERENCE_NUMBER_FIXED,
     DECLINE_AND_GRANT,
 )
 
@@ -167,6 +205,10 @@ EXPECTED_VIOLATIONS: dict[str, set[str]] = {
     "t0_clean_control": set(),
     "t1_cutoff_wrong_decline": {"declined_open_option"},
     "t2_partial_reference_number": {"partial_readback", "repeat_readback"},
+    # The recorded calls above are frozen evidence — fixing the code does not
+    # change what was said on those calls, so their expectations never move.
+    # This is the shape the same call takes now, and nothing may fire on it.
+    "t2_partial_reference_number_fixed": set(),
     # repeat_readback is a true positive here: fax_confirmed is confirmed at
     # turn 5, then re-confirmed at turn 9 after the ZIP detour although the fax
     # never changed — the caller is asked the same thing twice.

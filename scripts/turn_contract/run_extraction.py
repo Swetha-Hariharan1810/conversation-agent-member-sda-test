@@ -9,6 +9,11 @@ seconds, so this can run on every prompt change.
     python -m scripts.turn_contract.run_extraction --case dob_clean --verbose
     python -m scripts.turn_contract.run_extraction --json out.json
 
+Each result goes through request_detection.reconcile_worker_result before it is
+compared, because production never sees a raw extraction — every agent's llm.py
+reconciles first. --raw skips that pass, which is how you tell whether a failure
+is the prompt or the deterministic layer sitting behind it.
+
 --model azure   the production extraction tier (get_extraction_llm)
 --model gemini  the same structured-output contract against Gemini. Useful when
                 the Azure host is unreachable, and as a second opinion on
@@ -151,7 +156,8 @@ def _compare(expected: dict[str, Any], payload: dict[str, Any]) -> list[str]:
     return out
 
 
-async def _run_case(case: ExtractionCase, llm, sem: asyncio.Semaphore) -> CaseResult:
+async def _run_case(case: ExtractionCase, llm, sem: asyncio.Semaphore, *, raw: bool = False) -> CaseResult:
+    from agent.core.request_detection import reconcile_worker_result
     from agent.llm.extractor import build_worker_input
     from agent.llm.schema import WorkerResult
     from agent.utils import build_extraction_prompt
@@ -181,6 +187,10 @@ async def _run_case(case: ExtractionCase, llm, sem: asyncio.Semaphore) -> CaseRe
                         await asyncio.sleep(2 * (attempt + 1))
             if result is None:
                 raise last_exc  # type: ignore[misc]
+            if not raw:
+                # What production compares against: every agent's llm.py runs
+                # this pass before anything downstream sees the result.
+                result = reconcile_worker_result(result, case.utterance, awaiting_slot=case.awaiting_slot)
             payload = _apply_normalizers(result.model_dump(mode="json"))
         except Exception as exc:
             return CaseResult(
@@ -216,12 +226,13 @@ async def _main(args: argparse.Namespace) -> int:
     llm, model_name = _get_llm(args.model)
     print(
         f"{_BOLD}Extraction contract{_RESET}  model={_CYAN}{model_name}{_RESET} "
-        f"({args.model})  cases={len(cases)}\n"
+        f"({args.model})  cases={len(cases)}"
+        f"{'  ' + _YELLOW + 'raw — no reconcile pass' + _RESET if args.raw else ''}\n"
     )
 
     sem = asyncio.Semaphore(args.concurrency)
     started = time.time()
-    results = await asyncio.gather(*(_run_case(c, llm, sem) for c in cases))
+    results = await asyncio.gather(*(_run_case(c, llm, sem, raw=args.raw) for c in cases))
     elapsed = time.time() - started
 
     contract = [r for r in results if r.status == "contract"]
@@ -265,6 +276,7 @@ async def _main(args: argparse.Namespace) -> int:
                 {
                     "model": model_name,
                     "tier": args.model,
+                    "reconciled": not args.raw,
                     "elapsed_sec": round(elapsed, 2),
                     "results": [asdict(r) for r in results],
                 },
@@ -288,6 +300,11 @@ def main() -> int:
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--verbose", "-v", action="store_true", help="print the full extraction result")
     ap.add_argument("--json", help="write results to this path")
+    ap.add_argument(
+        "--raw",
+        action="store_true",
+        help="skip reconcile_worker_result — the model's answer alone, for diagnosis",
+    )
     return asyncio.run(_main(ap.parse_args()))
 
 

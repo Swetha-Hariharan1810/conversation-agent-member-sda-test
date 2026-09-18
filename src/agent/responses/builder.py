@@ -7,6 +7,7 @@ Public API used by agents and slot infrastructure:
   build_initial_prompt(slot_type)               → str
   build_transition_prompt(slot_type, context)   → str
   build_retry_prompt(slot_type, attempt, ...)   → str
+  build_remainder_prompt(slot_name, digits)     → str
 
 All selection is pure Python — no LLM calls, no I/O, zero latency.
 """
@@ -18,12 +19,14 @@ import random
 from agent.conversation.context import (
     ConversationContext,
 )
+from agent.slots.shapes import describe_remainder, get_shape
 from agent.slots.types import SlotType
 
 __all__ = [
     "build_initial_prompt",
     "build_transition_prompt",
     "build_retry_prompt",
+    "build_remainder_prompt",
     "has_static_retry",
 ]
 
@@ -444,6 +447,68 @@ def build_retry_prompt(
     if pool is None:
         pool = _DEFAULT_RETRY_HINTED if hinted else _DEFAULT_RETRY
     return random.choice(pool).format(slot_label=label, value=value)
+
+
+# The caller is part-way through a value. These say back what we have and ask
+# only for what is missing — never as a question that can be answered "yes",
+# because a partial value must not enter the confirmation path. That is the
+# whole bug: "And that reference number is four two six nine?" invites a yes on
+# half a number, and the caller gives one.
+_REMAINDER_TEMPLATES = [
+    "I have {spoken_digits} so far — what are the last {remainder} digits?",
+    "So far I have {spoken_digits}. Could you give me the last {remainder} digits?",
+]
+
+# "the last one digits" is not a sentence, so one digit left gets its own line.
+_LAST_DIGIT_TEMPLATES = [
+    "I have {spoken_digits} — just the last digit now?",
+]
+
+
+def _speak_digits(digits: str) -> str:
+    """ "4269" → "four two six nine".
+
+    Read back one digit at a time, the way the caller said it. "Four thousand
+    two hundred and sixty-nine" is a different utterance from the one they gave
+    and invites them to correct a number that is right.
+    """
+    return " ".join(_DIGIT_WORDS[d] for d in digits if d in _DIGIT_WORDS)
+
+
+_DIGIT_WORDS = {
+    "0": "zero",
+    "1": "one",
+    "2": "two",
+    "3": "three",
+    "4": "four",
+    "5": "five",
+    "6": "six",
+    "7": "seven",
+    "8": "eight",
+    "9": "nine",
+}
+
+
+def build_remainder_prompt(slot_name: str, digits: str) -> str:
+    """Ask for the rest of a value the caller has started — static, no LLM call.
+
+    ``digits`` is the run collected so far (agent.slots.shapes.merge). Returns
+    "" when the slot has no declared shape or nothing is missing, so a caller is
+    never asked for the remainder of a value that is already whole.
+    """
+    shape = get_shape(slot_name)
+    if shape is None:
+        return ""
+    spoken = _speak_digits(digits)
+    remainder = describe_remainder(slot_name, digits)
+    if not spoken or not remainder:
+        return ""
+    pool = _LAST_DIGIT_TEMPLATES if remainder == "one" else _REMAINDER_TEMPLATES
+    return random.choice(pool).format(
+        spoken_digits=spoken,
+        remainder=remainder,
+        slot_label=shape.label,
+    )
 
 
 def has_static_retry(slot_type: SlotType | None, slot_name: str = "") -> bool:

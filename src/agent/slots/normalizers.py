@@ -35,6 +35,7 @@ __all__ = [
     "normalize_claim_number",
     "normalize_date_of_service",
     "normalize_billed_amount",
+    "spoken_digits",
     "NORMALIZER_REGISTRY",
     "get_normalizer",
     "normalize_slot_value",
@@ -739,6 +740,20 @@ def normalize_dob(value: str | None) -> str:
 # ---------------------------------------------------------------------------
 # ZIP Code
 # ---------------------------------------------------------------------------
+
+
+def spoken_digits(value: str | None) -> str:
+    """The digit run in ``value``, spoken words included, and nothing else.
+
+    "four two six nine" → "4269", "M907503" → "907503". This is the shared
+    reading behind the digit-shaped normalizers below, exposed because
+    ``agent.slots.shapes`` needs the digits of an INCOMPLETE value and several
+    of those normalizers return "" rather than a short run — normalize_ssn
+    only ever emits nine digits, so a caller who has read out five has no
+    canonical form to be measured against.
+    """
+    converted = _convert_spoken_digits(_clean(value))
+    return re.sub(r"\D", "", converted)
 
 
 def normalize_zip_code(value: str | None) -> str:

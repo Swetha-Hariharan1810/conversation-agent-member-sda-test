@@ -28,11 +28,13 @@ from agent.llm.config import Config
 from agent.logger import get_logger
 from agent.responses.builder import (
     build_initial_prompt,
+    build_remainder_prompt,
     build_retry_prompt,
     build_transition_prompt,
     has_static_retry,
 )
 from agent.responses.static import MSG_WAIT_ACK, MSG_WAIT_NUDGE, build_slot_exhausted_message
+from agent.slots.shapes import Completeness, assess, canonical_value, has_shape, merge_digits
 from agent.slots.types import SlotType
 from agent.state import State, normalize_parked_followups
 from agent.utils import (
@@ -1012,6 +1014,86 @@ class SlotManagerMixin:
             )
             return candidate
         return ""
+
+    def _collect_partial(
+        self,
+        state: State,
+        config: "_InternalSlotConfig",
+        ctx: ConversationContext,
+        pre_extracted: str,
+    ) -> Optional[Tuple[Optional[str], Optional[dict]]]:
+        """Handle a value the caller is giving in pieces.
+
+        Returns None when this is not that — the ordinary case, and the caller
+        falls through to the normal failed-value path. Otherwise:
+
+          ``(value, None)``      the pieces add up; this is the whole value.
+          ``(None, interrupt)``  short of the shape — the fragment is held and
+                                 the caller is asked only for what is missing.
+
+        The fragment is held in ``state["partial_slots"]`` and read back only
+        while this slot is the one being asked, so a run left behind by an
+        abandoned collection can never be appended to an answer to a different
+        question. It is not cleared when a collection is abandoned mid-value —
+        clearing on every failed turn would throw away a good fragment because
+        the caller said "sorry, what?" — so it is made harmless instead: a slot
+        with a valid value returns at the top of _collect_slot and never reaches
+        here, and merge_digits discards anything held that the next answer
+        overruns.
+
+        Nothing partial is ever handed to the generation LLM as a value to name
+        back. That is the bug — a fragment offered for confirmation gets
+        confirmed, because "And that reference number is four two six nine?" is
+        a question a caller says yes to.
+        """
+        slot_name = config.slot_name
+        if not has_shape(slot_name) or not pre_extracted:
+            return None
+        if state.get("awaiting_slot") != slot_name:
+            return None
+
+        held = str((state.get("partial_slots") or {}).get(slot_name, "") or "")
+        run = merge_digits(slot_name, held, pre_extracted)
+        verdict = assess(slot_name, run)
+
+        if verdict is Completeness.COMPLETE:
+            candidate = canonical_value(slot_name, run)
+            check = config.validator(candidate)
+            if not (check.valid if hasattr(check, "valid") else bool(check)):
+                return None  # the digits add up but the value does not — fail normally
+            self.logger.info(
+                "_collect_partial: the pieces add up",
+                extra={"agent": self.AGENT_NAME, "slot": slot_name, "held": held, "digits": len(run)},
+            )
+            return candidate, None
+
+        if verdict is not Completeness.PARTIAL:
+            return None
+
+        # Progress, or it is a failure. A caller repeating the same fragment —
+        # or an extraction that keeps returning the piece already held — adds no
+        # digits, and asking for the remainder again would ask forever. Falling
+        # through burns a retry attempt and re-asks the slot properly, which is
+        # the behaviour a stuck turn should have.
+        if run == held:
+            self.logger.info(
+                "_collect_partial: no new digits this turn — falling through to the retry path",
+                extra={"agent": self.AGENT_NAME, "slot": slot_name, "have": len(run)},
+            )
+            return None
+
+        msg = build_remainder_prompt(slot_name, run)
+        if not msg:
+            return None
+        self.logger.info(
+            "_collect_partial: short of the declared shape — asking for the remainder",
+            extra={"agent": self.AGENT_NAME, "slot": slot_name, "have": len(run)},
+        )
+        interrupt = self.ask_member_with_context(state, msg, ctx)
+        interrupt["awaiting_slot"] = slot_name
+        interrupt["wait_count"] = 0  # non-WAIT turn resets the wait streak
+        interrupt["partial_slots"] = {**(state.get("partial_slots") or {}), slot_name: run}
+        return None, interrupt
 
     @staticmethod
     def _value_readings(utterance: str) -> list[str]:
@@ -2020,6 +2102,21 @@ class SlotManagerMixin:
                     initiator="Agent",
                 )
             # ── END CHANGE 1 ──────────────────────────────────────────────
+
+            # ── A value arriving in pieces ────────────────────────────────
+            # validate_reference_number wants eight digits; the caller gave
+            # four. Without a partial state that is simply a failed value, so
+            # the fragment is read back for confirmation and the whole number
+            # is read back again once the rest arrives — two round-trips for
+            # one value, on a voice call. See agent.slots.shapes.
+            if partial := self._collect_partial(state, config, ctx, pre_extracted):
+                value, interrupt = partial
+                if value is not None:
+                    self.slot_ok(slot_name, value)
+                    ctx.record_slot_success(slot_name)
+                    self._pending_ambiguous_resets.add(slot_name)
+                    return value, None
+                return None, interrupt
 
             # Extracted but normaliser/validator rejected it — count as failure
             self.slot_fail(slot_name, pre_extracted)

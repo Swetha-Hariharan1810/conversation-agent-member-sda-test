@@ -2,6 +2,9 @@ from enum import Enum
 from typing import Dict, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.json_schema import SkipJsonSchema
+
+from agent.slots.shapes import Completeness
 
 
 class EventType(str, Enum):
@@ -77,6 +80,13 @@ class WorkerResult(BaseModel):
     # (no value yet). Values: "reference_number" | "claim_number" | "dos_billed"
     # | "member_id" | "ssn" | None
     fallback_pivot: Optional[str] = None
+    # How much of the awaited value the caller actually gave, measured against
+    # the slot's declared shape (agent.slots.shapes). SkipJsonSchema: the field
+    # exists on the result but is NOT in the schema handed to the extraction
+    # model, and the model is never asked for it. Whether "four two six nine"
+    # is a whole reference number is a fact about the slot, not about the
+    # utterance — request_detection.reconcile_worker_result computes it.
+    completeness: SkipJsonSchema[Completeness] = Completeness.UNKNOWN
     # Does this turn need a freeform, generated sentence (LLM 2 / Gemini)?
     # False (the default) means a plain non-answer with nothing to acknowledge:
     # the deterministic static re-ask template is correct and cheaper, and it

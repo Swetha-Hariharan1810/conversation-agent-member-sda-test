@@ -143,6 +143,11 @@ class State(TypedDict):
     # and clears the flag.
     slot_update_resume: bool
     wait_count: int  # consecutive WAIT turns for the current awaiting slot (reset on non-WAIT)
+    # slot name → the digits collected so far for a value the caller is giving
+    # in pieces ("four two six nine" … "five eight one seven"). Held only while
+    # the value is short of its declared shape (agent.slots.shapes); cleared the
+    # moment it completes, is abandoned, or the slot is confirmed.
+    partial_slots: dict
 
     # ── Verification restart boundary ────────────────────────────────────────
     verification_restart_index: int
@@ -330,6 +335,7 @@ def reset_for_new_intent(state: State, new_intent: Optional[str]) -> dict:
         "pending_slot_update": {},  # legacy key — cleared for old checkpoints
         "slot_update_resume": False,
         "wait_count": 0,
+        "partial_slots": {},
         "verification_restart_index": 0,
         # ── Provider search ──────────────────────────────────────────────────
         "provider_type": "",

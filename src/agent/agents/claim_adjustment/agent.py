@@ -52,6 +52,7 @@ from agent.core.request_detection import reconcile_worker_result
 from agent.llm.config import get_extraction_llm
 from agent.llm.schema import EventType
 from agent.logger import get_logger
+from agent.responses.builder import build_remainder_prompt
 from agent.responses.static import MSG_WAIT_ACK, MSG_WAIT_NUDGE
 from agent.slots.normalizers import (
     normalize_billed_amount,
@@ -59,6 +60,7 @@ from agent.slots.normalizers import (
     normalize_date_of_service,
     normalize_reference_number,
 )
+from agent.slots.shapes import Completeness, assess, canonical_value, merge_digits
 from agent.slots.types import SlotType
 from agent.slots.validators import (
     validate_billed_amount,
@@ -373,27 +375,96 @@ class ClaimAdjustmentAgent(BaseAgent):
 
                     if handled := self._reroute_detected_update(state, return_awaiting=current_awaiting):
                         return handled
-                    self.slot_fail("reference_number")
-                    if self.get_slot("reference_number").is_exhausted():
-                        return self.signal_escalate(
+
+                    # ── A reference number arriving in pieces ─────────────
+                    # This is transcript 2. validate_reference_number wants
+                    # eight digits and the caller gave four; with no partial
+                    # state that is just a failed value, so the fragment went
+                    # to the generation LLM as extracted_this_turn — which
+                    # names a value back for confirmation:
+                    #
+                    #     AI   And that reference number is four two six nine?
+                    #
+                    # A caller says yes to that. Then the rest arrives, the
+                    # extractor merges it from history, and the whole number is
+                    # read back a second time. Two confirmation round-trips for
+                    # one number, on a voice call.
+                    #
+                    # reference_number is collected by hand here rather than by
+                    # the slot pipeline, so it needs its own copy of what
+                    # _collect_partial does. Both read the same shape registry.
+                    held = str((state.get("partial_slots") or {}).get("reference_number", "") or "")
+                    run = merge_digits("reference_number", held, extracted_raw) if extracted_raw else ""
+                    verdict = assess("reference_number", run) if run else Completeness.NONE
+
+                    if verdict is Completeness.COMPLETE:
+                        candidate = canonical_value("reference_number", run)
+                        if validate_reference_number(candidate).valid:
+                            logger.info(
+                                "claim_adjustment_agent: reference number pieces add up",
+                                extra={"held": held, "digits": len(run)},
+                            )
+                            reference_number = candidate
+                            self.slot_ok("reference_number", reference_number)
+                            state = {
+                                **state,
+                                "reference_number": reference_number,
+                                "partial_slots": {
+                                    k: v
+                                    for k, v in (state.get("partial_slots") or {}).items()
+                                    if k != "reference_number"
+                                },
+                            }
+                            verdict = None  # collected — fall past the retry below
+
+                    if verdict is Completeness.PARTIAL and run != held:
+                        if remainder_msg := build_remainder_prompt("reference_number", run):
+                            logger.info(
+                                "claim_adjustment_agent: reference number is short of eight "
+                                "digits — asking for the remainder",
+                                extra={"have": len(run)},
+                            )
+                            part = self.ask_member(state, remainder_msg)
+                            part["awaiting_slot"] = "reference_number"
+                            part["wait_count"] = 0
+                            part["partial_slots"] = {
+                                **(state.get("partial_slots") or {}),
+                                "reference_number": run,
+                            }
+                            return part
+
+                    # verdict None means the pieces completed the value above;
+                    # Phase 2 picks it up from state.
+                    if verdict is not None:
+                        self.slot_fail("reference_number")
+                        if self.get_slot("reference_number").is_exhausted():
+                            return self.signal_escalate(
+                                state,
+                                pick(MSG_REF_EXHAUST),
+                                reason="reference_number_exhausted",
+                            )
+                        # Never hand a partial to the generation LLM as a value
+                        # to name back: the sentence it writes is a yes/no
+                        # question about half a number, and the caller says yes.
+                        # A stuck partial (no new digits this turn) lands here,
+                        # and it gets the plain re-ask rather than a read-back.
+                        read_back = normalized if normalized else extracted_raw
+                        if verdict is Completeness.PARTIAL:
+                            read_back = ""
+                        msg = await self._generate_slot_retry_response(
                             state,
-                            pick(MSG_REF_EXHAUST),
-                            reason="reference_number_exhausted",
+                            "reference_number",
+                            ConversationContext.from_state(state),
+                            messages,
+                            extracted_this_turn=read_back,
+                            guard="RETRY",
+                            decision=result,
+                            slot_type=SlotType.REFERENCE_NUMBER,
                         )
-                    msg = await self._generate_slot_retry_response(
-                        state,
-                        "reference_number",
-                        ConversationContext.from_state(state),
-                        messages,
-                        extracted_this_turn=normalized if normalized else extracted_raw,
-                        guard="RETRY",
-                        decision=result,
-                        slot_type=SlotType.REFERENCE_NUMBER,
-                    )
-                    retry = self.ask_member(state, msg)
-                    retry["awaiting_slot"] = "reference_number"
-                    retry["wait_count"] = 0  # non-WAIT turn resets the wait streak
-                    return retry
+                        retry = self.ask_member(state, msg)
+                        retry["awaiting_slot"] = "reference_number"
+                        retry["wait_count"] = 0  # non-WAIT turn resets the wait streak
+                        return retry
 
         # ── PHASE 2: Salesforce lookup ─────────────────────────────────────────
         # Use the record already found by the fallback sub-flow (claim_number or
