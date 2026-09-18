@@ -363,6 +363,36 @@ class WorkerResult(TurnReading):
 
     # ── The one derivation that needs state ──────────────────────────────────
 
+    @staticmethod
+    def _is_read_back_of(awaiting_slot: str, slot: str) -> bool:
+        """Is ``awaiting_slot`` the read-back confirmation OF ``slot``?
+
+        A confirmation slot and the value it confirms are two names for one
+        question. "Your ZIP code is 12319?" awaits zip_confirmed, and the ZIP
+        the caller says instead is the answer to it — not a correction arriving
+        while their attention was somewhere else. The literal ``slot !=
+        awaiting_slot`` test below cannot see that, because the two names
+        differ, so an inline replacement at a read-back was filed as a
+        correction and left extracted{} before the agent read it. The agent
+        then saw a bare decline, and asked the caller for the value they had
+        just given.
+
+        Derived from the naming convention rather than a list, so a new
+        confirmation slot is covered the day it is added: ``email_confirmed``
+        confirms ``email``, ``fax_confirmed`` confirms ``fax``, and
+        ``zip_confirmed`` confirms ``zip_code`` — the one whose value slot
+        carries a ``_code`` suffix the confirmation field drops.
+
+        Deliberately narrow. ``name_confirmed`` does NOT confirm ``first_name``
+        or ``last_name``: those are corrections, verification handles them as
+        corrections, and nothing here changes that.
+        """
+        suffix = "_confirmed"
+        if not awaiting_slot.endswith(suffix):
+            return False
+        stem = awaiting_slot[: -len(suffix)]
+        return bool(stem) and slot in (stem, f"{stem}_code")
+
     def split_corrections(
         self,
         confirmed_slots: Optional[Mapping[str, Any]],
@@ -376,9 +406,10 @@ class WorkerResult(TurnReading):
         different value for that slot and the caller was not being asked for it
         — which is the whole of the rule the headers used to spend three worked
         examples on. The awaiting slot is never a correction: answering the
-        question you were asked is an answer, whatever is on file. A locked
-        slot is never either, which is the LOCKED FIELDS section the headers
-        used to carry.
+        question you were asked is an answer, whatever is on file. Neither is
+        the value a read-back is asking about (_is_read_back_of) — awaiting
+        zip_confirmed IS asking for the ZIP. A locked slot is never either,
+        which is the LOCKED FIELDS section the headers used to carry.
 
         Runs once per result. The reconcile pass is re-run idempotently by
         several agents, and a second split against an already-split extracted{}
@@ -404,6 +435,7 @@ class WorkerResult(TurnReading):
             prior = confirmed_slots.get(slot)
             is_correction = (
                 slot != awaiting_slot
+                and not self._is_read_back_of(awaiting_slot, slot)
                 and isinstance(prior, str)
                 and prior.strip()
                 and prior.strip().casefold() != str(value).strip().casefold()
