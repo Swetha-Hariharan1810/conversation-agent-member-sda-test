@@ -326,7 +326,7 @@ class NotificationSetupAgent(BaseAgent):
             # value matching what we just read back is a context echo. See
             # core.confirmation.is_read_back_echo.
             if contact_conf == "no" and is_read_back_echo(
-                new_phone_raw, pending_phone or phone_on_file, normalize_phone_number
+                new_phone_raw, pending_phone or phone_on_file, normalize_phone_number, last_user=last_user
             ):
                 new_phone_raw = ""
 
@@ -468,7 +468,7 @@ class NotificationSetupAgent(BaseAgent):
             # value matching what we just read back is a context echo. See
             # core.confirmation.is_read_back_echo.
             if contact_conf == "no" and is_read_back_echo(
-                new_email_raw, pending_email or email_on_file, normalize_email
+                new_email_raw, pending_email or email_on_file, normalize_email, last_user=last_user
             ):
                 new_email_raw = ""
 
@@ -518,6 +518,14 @@ class NotificationSetupAgent(BaseAgent):
             # Not an answer to the read-back — uncertain, holding, or raising
             # something else. Re-ask it.
             if is_not_an_answer(result, last_user, owned_slots=("email", "email_confirmed")):
+                # Waiting is not a failed attempt — see wait_ack. This was the
+                # one read-back in this file that skipped the helper: the wait
+                # was routed to a re-ask correctly (is_not_an_answer consults
+                # the words), but on the way it charged an email_confirmed
+                # attempt and spent a generation call telling a caller who had
+                # just said "hold on" that we had not heard them.
+                if wait := self.wait_ack(state, "email_confirmed", decision=result):
+                    return wait
                 self.slot_fail("email_confirmed")
                 if self.get_slot("email_confirmed").is_exhausted():
                     return self.signal_escalate(

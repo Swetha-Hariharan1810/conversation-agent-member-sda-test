@@ -219,8 +219,54 @@ def confirms_value(verdict: str, last_user: str, *, owned_slots: Sequence[str] =
     return not (owned_slots and _CHANGE_INTENT_RE.search(last_user or ""))
 
 
-def is_read_back_echo(new_value: Any, read_back: str, normalizer: Callable[[str], str]) -> bool:
-    """Is the value the extractor returned just the one we read back to them?
+def _fold_spoken(text: str) -> str:
+    """Fold the spoken punctuation callers use for addresses into its symbols.
+
+    "james dot one at example dot com" → "james.one@example.com". Only used to
+    ask whether a value appears in what the caller said, so folding a stray
+    "at" inside an ordinary sentence costs nothing.
+    """
+    folded = (text or "").lower()
+    folded = re.sub(r"\s*\bdot\b\s*", ".", folded)
+    folded = re.sub(r"\s*\bat\b\s*", "@", folded)
+    return folded
+
+
+def caller_spoke(value: str, last_user: str, normalizer: Callable[[str], str]) -> bool:
+    """Did the caller actually say this value, or did the extractor supply it?
+
+    The extraction model is handed the value on file on a ``Confirmed:`` context
+    line (llm.extractor.build_worker_input). When it returns that same value it
+    may be reporting what the caller said — or parroting its own context. The
+    two are indistinguishable in ``extracted{}`` and mean opposite things, so
+    this asks the only source that can tell them apart: the utterance.
+
+    Digit values are recovered from a whole sentence by their own normalizers,
+    spoken digits and all, and come back empty when the caller spoke none:
+
+        normalize_fax_number("no, send it to six one seven ...") → "6175554199"
+        normalize_fax_number("no")                               → ""
+
+    Addresses are not — the model is what turns "dot"/"at" into punctuation —
+    so those fold the spoken form and look for the value in it.
+    """
+    value = (value or "").strip()
+    utterance = (last_user or "").strip()
+    if not value or not utterance:
+        return False
+    if value.isdigit():
+        return value in normalizer(utterance)
+    return value.lower() in _fold_spoken(utterance)
+
+
+def is_read_back_echo(
+    new_value: Any,
+    read_back: str,
+    normalizer: Callable[[str], str],
+    *,
+    last_user: str | None = None,
+) -> bool:
+    """Is the value the extractor returned one the caller never gave us?
 
     The extraction contract says a replacement contact and a yes/no on the
     read-back are mutually exclusive. The model breaks it both ways, so four
@@ -240,16 +286,38 @@ def is_read_back_echo(new_value: Any, read_back: str, normalizer: Callable[[str]
     member declined AND provided new email in same utterance", which it made
     unreachable.
 
-    Telling an echo from a replacement needs no model. An echo is the value we
-    just said; a replacement is a different one. So compare them — against what
-    the read-back actually put to the caller (the pending value when there is
-    one, otherwise the value on file), not merely against the value on file,
-    since a second read-back reads the pending value back.
+    A replacement is easy: it is a value different from the one we read back.
+    Comparison settles it, against what the read-back actually put to the caller
+    (the pending value when there is one, otherwise the value on file), since a
+    second read-back reads the pending value back.
+
+    Equality is the case that needed ``last_user``. Both of these reach this
+    function as a "no" carrying the value on file, and they are opposite turns:
+
+        AI      The fax number we have on file is 6175554199. Is that correct?
+        Caller  no, send it to six one seven five five five four one nine nine
+        →       the caller named the destination. Not an echo — take it.
+
+        AI      The fax number we have on file is 6175554199. Is that correct?
+        Caller  no
+        →       the model filled the field from its Confirmed: context line.
+                An echo — clear it, and let the decline path ask.
+
+    Treating the first as an echo asks the caller for a value they just spoke.
+    Treating the second as a replacement dispatches to the contact they just
+    declined — the failure delivery_management's fax branch carries a comment
+    about. Only the utterance separates them, so when it is given, it decides;
+    when it is not, equality alone means echo, as before.
     """
     text = str(new_value or "").strip()
     if not text:
         return True  # nothing to keep
-    return normalizer(text) == normalizer((read_back or "").strip())
+    normalized = normalizer(text)
+    if normalized != normalizer((read_back or "").strip()):
+        return False  # a different value — the caller's replacement
+    if last_user is None:
+        return True
+    return not caller_spoke(normalized, last_user, normalizer)
 
 
 # Extraction field and validation for each delivery channel a caller can name.

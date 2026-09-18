@@ -465,6 +465,37 @@ class ClaimAdjustmentAgent(BaseAgent):
             context_updates=self._completion_context(state),
         )
 
+    def _fallback_wait_ack(self, state: State, stage: str, slot: str, *, slot_label: str) -> dict:
+        """Build the interrupt for a caller who asked for time in a fallback stage.
+
+        The four wait checks in the two ref-number fallback stages — two on the
+        caller's words, two on the extractor's own WAIT label — each acked and
+        returned without touching wait_count, so MAX_WAIT_TURNS was never
+        reached and MSG_WAIT_NUDGE never fired:
+
+            AI      What is the claim number?
+            Caller  hold on                     → "Of course — take your time."
+            Caller  one sec                     → "Sure, take all the time you need."
+            Caller  bear with me                → "No rush, take your time."
+
+        Three "take your time"s and the question was never put again; the
+        caller could hold the stage open for the length of the call. The
+        reference_number collection above does maintain the count and is the
+        precedent this follows — one implementation for the four sites that did
+        not, rather than the same four lines written four more times.
+        """
+        wait_count = int(state.get("wait_count") or 0) + 1
+        msg = (
+            pick(MSG_WAIT_ACK)
+            if wait_count < MAX_WAIT_TURNS
+            else pick(MSG_WAIT_NUDGE).format(slot_label=slot_label)
+        )
+        wait_result = self.ask_member(state, msg)
+        wait_result["ref_no_fallback_stage"] = stage
+        wait_result["awaiting_slot"] = slot
+        wait_result["wait_count"] = wait_count
+        return wait_result
+
     def _replay_claim_status(self, state: State, request: dict) -> dict:
         """Replay capability (Phase 7): re-state the adjustment status from
         state — an idempotent read, exactly like delivery's
@@ -529,10 +560,9 @@ class ClaimAdjustmentAgent(BaseAgent):
         # takes the rest.
         if detect_wait_request(last_user) and not detect_transfer_request(state):
             logger.info("claim_adjustment_agent: WAIT detected during claim_number fallback")
-            wait_result = self.ask_member(state, pick(MSG_WAIT_ACK))
-            wait_result["ref_no_fallback_stage"] = "claim_number_ask"
-            wait_result["awaiting_slot"] = "fallback_claim_number"
-            return None, wait_result
+            return None, self._fallback_wait_ack(
+                state, "claim_number_ask", "fallback_claim_number", slot_label="claim number"
+            )
 
         # If user gave a bare affirmative ("Yes", "Sure", "Yep, I do") with no digits, they are
         # confirming they HAVE the claim number — re-ask without burning a retry.
@@ -553,6 +583,7 @@ class ClaimAdjustmentAgent(BaseAgent):
             reask = self.ask_member(state, pick(MSG_REF_FALLBACK_CLAIM_NUMBER_HAVE_IT))
             reask["ref_no_fallback_stage"] = "claim_number_ask"
             reask["awaiting_slot"] = "fallback_claim_number"
+            reask["wait_count"] = 0  # non-WAIT turn resets the wait streak
             return None, reask
 
         # Member offered DOS+billed info instead of claim number — forward to that stage
@@ -584,6 +615,7 @@ class ClaimAdjustmentAgent(BaseAgent):
                 reask = self.ask_member(state, pick(MSG_REF_FALLBACK_CLAIM_NUMBER_HAVE_IT))
                 reask["ref_no_fallback_stage"] = "claim_number_ask"
                 reask["awaiting_slot"] = "fallback_claim_number"
+                reask["wait_count"] = 0  # non-WAIT turn resets the wait streak
                 return None, reask
 
         # Try to extract claim_number via LLM.
@@ -636,10 +668,9 @@ class ClaimAdjustmentAgent(BaseAgent):
         # continuation guard fires.  Honor the LLM's own WAIT label as a fallback.
         if extraction is not None and extraction.asked_for_time:
             logger.info("claim_adjustment_agent: LLM WAIT detected during claim_number fallback")
-            wait_result = self.ask_member(state, pick(MSG_WAIT_ACK))
-            wait_result["ref_no_fallback_stage"] = "claim_number_ask"
-            wait_result["awaiting_slot"] = "fallback_claim_number"
-            return None, wait_result
+            return None, self._fallback_wait_ack(
+                state, "claim_number_ask", "fallback_claim_number", slot_label="claim number"
+            )
 
         # LLM-driven pivot: handles mid-sentence corrections and hesitations keywords miss
         _pivot_cn = extraction.pivot_target if extraction else ""
@@ -709,6 +740,7 @@ class ClaimAdjustmentAgent(BaseAgent):
         retry = self.ask_member(state, pick(MSG_REF_FALLBACK_CLAIM_NUMBER_RETRY))
         retry["ref_no_fallback_stage"] = "claim_number_ask"
         retry["awaiting_slot"] = "fallback_claim_number"
+        retry["wait_count"] = 0  # non-WAIT turn resets the wait streak
         # Manually bump attempt count for this slot
         updated_attempts = {**attempts_dict, "fallback_claim_number": {"attempt_count": attempt_count + 1}}
         retry["slot_attempts"] = updated_attempts
@@ -735,10 +767,9 @@ class ClaimAdjustmentAgent(BaseAgent):
         # takes the rest.
         if detect_wait_request(last_user) and not detect_transfer_request(state):
             logger.info("claim_adjustment_agent: WAIT detected during dos_billed fallback")
-            wait_result = self.ask_member(state, pick(MSG_WAIT_ACK))
-            wait_result["ref_no_fallback_stage"] = "dos_billed_ask"
-            wait_result["awaiting_slot"] = "fallback_dos_billed"
-            return None, wait_result
+            return None, self._fallback_wait_ack(
+                state, "dos_billed_ask", "fallback_dos_billed", slot_label="date of service and billed amount"
+            )
 
         # Bare affirmative with no date/amount content — re-ask without burning a retry.
         _user_stripped_db = (last_user or "").strip().lower().rstrip(".!?,")
@@ -760,6 +791,7 @@ class ClaimAdjustmentAgent(BaseAgent):
             reask = self.ask_member(state, pick(MSG_REF_FALLBACK_DOS_BILLED_HAVE_IT))
             reask["ref_no_fallback_stage"] = "dos_billed_ask"
             reask["awaiting_slot"] = "fallback_dos_billed"
+            reask["wait_count"] = 0  # non-WAIT turn resets the wait streak
             return None, reask
 
         # Member now has the reference number — pivot back to collecting it
@@ -839,10 +871,9 @@ class ClaimAdjustmentAgent(BaseAgent):
         # LLM-based WAIT check (mirrors claim_number fallback above).
         if extraction is not None and extraction.asked_for_time:
             logger.info("claim_adjustment_agent: LLM WAIT detected during dos_billed fallback")
-            wait_result = self.ask_member(state, pick(MSG_WAIT_ACK))
-            wait_result["ref_no_fallback_stage"] = "dos_billed_ask"
-            wait_result["awaiting_slot"] = "fallback_dos_billed"
-            return None, wait_result
+            return None, self._fallback_wait_ack(
+                state, "dos_billed_ask", "fallback_dos_billed", slot_label="date of service and billed amount"
+            )
 
         # LLM-driven pivot: handles mid-sentence corrections and hesitations keywords miss
         _pivot_db = extraction.pivot_target if extraction else ""
@@ -925,6 +956,7 @@ class ClaimAdjustmentAgent(BaseAgent):
         retry = self.ask_member(state, pick(MSG_REF_FALLBACK_DOS_BILLED_RETRY))
         retry["ref_no_fallback_stage"] = "dos_billed_ask"
         retry["awaiting_slot"] = "fallback_dos_billed"
+        retry["wait_count"] = 0  # non-WAIT turn resets the wait streak
         # Persist any partial values already collected
         if normalized_dos and dos_valid:
             retry["fallback_dos"] = normalized_dos

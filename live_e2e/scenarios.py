@@ -625,7 +625,8 @@ member_id_exhaustion = Scenario(
         "one two three",  # no M prefix
         "I don't know",
         "umm banana",
-        # spares in case a turn is classified as clarification (not counted)
+        # spares — kept in case the flow needs an extra turn; every ambiguous
+        # turn now costs an attempt, so they are normally unconsumed
         "no idea",
         "I really don't know it",
     ],
@@ -650,7 +651,7 @@ dob_no_year_exhaustion = Scenario(
         "April twelfth",  # no year — invalid
         "April twelfth",
         "April twelfth",
-        # spares for uncounted clarification turns
+        # spares — normally unconsumed now that every ambiguous turn counts
         "April twelfth",
         "April twelfth",
     ],
@@ -694,10 +695,10 @@ member_id_ambiguous_exhaustion = Scenario(
         "AMBIGUOUS branch. Today detect_cannot_provide() short-circuits it: the "
         "FIRST 'I don't have it' escalates immediately with reason "
         "member_id_cannot_provide (the cannot-provide check runs before the "
-        "ambiguous threshold), so the scripted spares are never consumed. Note "
-        "the ambiguous threshold itself is >= 2 again since Phase 7: a first "
-        "genuinely-ambiguous turn (not cannot-provide) gets a free CLARIFY, the "
-        "second burns an attempt — see followup/wait scenarios in section N."
+        "ambiguous threshold), so the scripted spares are never consumed. The "
+        "ambiguous threshold still decides the WORDING — a first "
+        "genuinely-ambiguous turn (not cannot-provide) gets the CLARIFY line, "
+        "later ones the plain retry — but every one of them costs an attempt."
     ),
 )
 
@@ -1054,7 +1055,7 @@ verification_repeated_dob_mismatch_escalates = Scenario(
         "m nine zero seven five zero three",  # correct Member ID throughout
         "April thirteenth nineteen eighty-eight",  # wrong dob, lookup attempt 1 → re-ask
         "April fourteenth nineteen eighty-eight",  # wrong dob, lookup attempt 2 → escalate
-        # spares (uncounted clarify turns)
+        # spares — normally unconsumed now that every ambiguous turn counts
         "April fifteenth nineteen eighty-eight",
         "April sixteenth nineteen eighty-eight",
     ],
@@ -2678,8 +2679,8 @@ zip_change_loop_escalates = Scenario(
     flow="pcp",
     timeout_s=360,
     retries=1,  # ambiguous-vs-answered classification of garbled digit strings
-    # is LLM-dependent; first AMBIGUOUS turn per slot is an uncounted CLARIFY,
-    # so exhaustion needs 3-4 invalid turns depending on classification
+    # is LLM-dependent; either classification costs an attempt now, so
+    # exhaustion lands on the 3rd invalid turn whichever way it is read
     user_turns=PCP_VERIFY
     + [
         "no, that's not my zip code",  # decline ZIP on file → asked for a new ZIP
@@ -2692,8 +2693,8 @@ zip_change_loop_escalates = Scenario(
         "zero two one",  # 3 digits
         "one two three four",  # 4 digits
         "four two",  # 2 digits
-        # spares — CLARIFY turns are not counted attempts, so the number of
-        # interrupts before exhaustion varies by ±1-2
+        # spares — every ambiguous turn costs an attempt now, so exhaustion
+        # lands on the 3rd invalid turn and these are normally unconsumed
         "seven seven seven",
         "two two",
         "still just nine eight seven",
@@ -3055,8 +3056,8 @@ pcp_confused_member = Scenario(
         "oh sorry, yes please go ahead",  # accept benefits after agent redirects
         "no thank you",  # decline Care Coach
         "no, that's everything",  # close
-        # 2 spare turns: CLARIFY turns for ZIP/email are not counted attempts;
-        # the app-question turn is also uncounted — total interrupts is variable
+        # 2 spare turns: the app-question turn is uncounted, so the total
+        # interrupt count still varies a little
         "I'm all set, thanks",
         "that was all I needed",
     ],
@@ -3071,7 +3072,7 @@ pcp_confused_member = Scenario(
     ),
     notes=(
         "Exercises: AMBIGUOUS handling for ZIP confirmation ('wait, what did you "
-        "say?' is a CLARIFY turn — not counted as a slot failure); "
+        "say?' draws the CLARIFY re-ask and costs one of the three attempts); "
         "ANSWERED_WITH_FOLLOWUP when a benign side-question ('do you guys have "
         "an app?') interrupts the benefits offer; guard non-escalation on benign "
         "confusion. retries=1: hedged delivery-method phrasing ('umm... hold on... "
@@ -3099,8 +3100,8 @@ claim_confused_member = Scenario(
         "Okay, how long will it take to finalize the request?",  # timeline question
         "email them to me",  # N2 channel
         "No, that's it. Thanks!",  # close
-        # 3 spare turns: hesitation/confusion/clarify turns are not counted
-        # as slot-failure attempts, making total interrupt count variable
+        # 3 spare turns: wait/followup turns are still uncounted, so the total
+        # interrupt count remains variable
         "I think that covers it",
         "all done from my side",
         "that's everything, thanks",

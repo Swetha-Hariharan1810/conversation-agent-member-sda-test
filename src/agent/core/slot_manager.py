@@ -2368,19 +2368,31 @@ class SlotManagerMixin:
                     )
                 # ── END cannot-provide check ──────────────────────────────
 
-                # Two consecutive AMBIGUOUS turns → treat as a genuine non-answer.
-                # (The count was just incremented, so the first ambiguous turn
-                # arrives here as 1 and must fall through to the CLARIFY block —
-                # no attempt cost; the second, as 2, burns an attempt.)
+                # EVERY ambiguous turn costs an attempt, the first one included.
+                # It used to be free: the turn fell through to the CLARIFY block
+                # below without calling slot_fail, so a caller who never landed
+                # the value was asked MAX_SLOT_ATTEMPTS + 1 times before a
+                # representative took over — four times for a slot budgeted at
+                # three. Worse, the counter this was keyed on resets on any
+                # non-clarify failure, so alternating turn kinds earned a fresh
+                # free turn each time and one slot could run to six asks.
+                #
+                # ambiguous_counts still runs, and still decides how the re-ask
+                # is WORDED — the first garbled turn gets the gentler CLARIFY
+                # line, later ones the plain retry. What it no longer decides is
+                # whether the turn is paid for. A caller who is not landing the
+                # value is not landing it, whichever turn it was.
+                self.slot_fail(slot_name, None, is_asr=True)
+                if slot.is_exhausted():
+                    return None, self.signal_escalate(
+                        state,
+                        build_slot_exhausted_message(slot_name),
+                        f"{slot_name} exhausted",
+                        initiator="Agent",
+                    )
+
+                # Second ambiguous turn onward — the plain retry wording.
                 if ambiguous_counts[slot_name] >= 2:
-                    self.slot_fail(slot_name, None, is_asr=True)
-                    if slot.is_exhausted():
-                        return None, self.signal_escalate(
-                            state,
-                            build_slot_exhausted_message(slot_name),
-                            f"{slot_name} exhausted",
-                            initiator="Agent",
-                        )
                     msg = await self._generate_slot_retry_response(
                         state, slot_name, ctx, messages, decision=decision, slot_type=slot_type
                     )
@@ -2390,7 +2402,8 @@ class SlotManagerMixin:
                     interrupt["wait_count"] = 0  # non-WAIT turn resets the wait streak
                     return None, interrupt
 
-                # First AMBIGUOUS turn — ask for clarification without counting a failure
+                # First ambiguous turn — the CLARIFY wording. The attempt it
+                # costs was already recorded above.
                 corrections = getattr(decision, "corrections", None) or {}
                 if corrections:
                     corrected_fields = list(corrections.keys())

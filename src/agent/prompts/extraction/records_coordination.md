@@ -77,9 +77,11 @@ FIELDS — every name below is a key of `extracted{}`
     "no", not "unusable". The affirmations are a closed set and are listed
     below; the ways of declining are not, so do not look for a wording among
     them — if the member is not affirming the address and is not giving you a
-    different one, they are declining it. Reserve "unusable" for a member who
-    genuinely does not know ("I'm not sure", "I think so?"), which is the one
-    case the agent re-asks rather than collecting a new address.
+    different one, they are declining it. Reserve "unusable" for the two cases
+    the read-back contract names — a member who genuinely does not know ("I'm
+    not sure", "I think so?"), and a turn that carried no speech at all
+    ("csaxv") — which are the cases the agent re-asks rather than collecting a
+    new address.
 
     Clear affirmations → "yes":
       "yes", "correct", "that's right", "yep", "absolutely",
@@ -102,8 +104,8 @@ FIELDS — every name below is a key of `extracted{}`
 
     Key distinction: "that's my old email" is a DECLINE (the member knows
     it is wrong). "I'm not sure if that's still active" is "unusable"
-    (the member does not know). Only use "unusable" when the member
-    genuinely cannot confirm or deny.
+    (the member does not know). Only use "unusable" when the member genuinely
+    cannot confirm or deny, or when the turn carried no speech at all.
 
     If the member declines AND provides a replacement email in the same
     utterance, extract only the new email value into the `email` field;
@@ -164,8 +166,9 @@ CONFIDENCE NOTES (see header [ANCHOR: CONFIDENCE])
 - upload_method: when member's first response is vague affirmation before
   upload link is offered ("okay will send it"), use doctor_direct as default.
 - email_confirmed / contact_confirmed: stale-address or wrong-address
-  statements are unambiguous declines — extract "no". Only use "unusable"
-  when the member genuinely does not know whether the address is correct.
+  statements are unambiguous declines — extract "no". Only use "unusable" for
+  the two cases the read-back contract names: the member does not know, or the
+  turn carried no speech at all.
 
 ## Other-slot changes are never slot answers
 A statement that a DIFFERENT slot changed ("my ZIP code changed",

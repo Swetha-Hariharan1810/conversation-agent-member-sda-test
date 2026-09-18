@@ -231,6 +231,57 @@ class VerificationAgent(BaseAgent):
         result["awaiting_slot"] = "member_id"
         return result
 
+    def _ssn_wait_ack(
+        self,
+        state: State,
+        stage: str,
+        *,
+        slot_label: str,
+        decision: object | None = None,
+        **carry: str,
+    ) -> dict | None:
+        """Acknowledge a caller who asked for time inside the SSN fallback.
+
+        The fallback is where a caller has already failed to give a Member ID,
+        so it is precisely where they are most likely to go looking for a card
+        or a letter — and it was the one flow with no wait handling anywhere in
+        it. "Hold on, let me get my card" fell past every intent branch into
+        the ambiguous retry and spent one of the three attempts standing
+        between the caller and an escalation:
+
+            AI      Could you provide your Social Security Number?
+            Caller  hold on, let me find my card
+            AI      I didn't catch that — could you repeat your Social
+                    Security Number?
+
+        These stages do not even reach run_conversation_guards, so the
+        suppression that hands a wait to the agent's own branch never applied
+        either. Waits are not counted: no slot_attempts write here, which is
+        what keeps a caller who is looking for their card from being escalated
+        for looking. wait_count still bounds it — MAX_WAIT_TURNS turns the ack
+        into a nudge, so holding forever is not on the table.
+
+        Two things stop the shared wait_ack from being called directly. The
+        stage lives in ssn_fallback_stage rather than awaiting_slot, so the
+        interrupt has to name it or the next turn leaves the flow entirely; and
+        wait_ack writes awaiting_slot, which no SSN stage sets — a stale "ssn"
+        left there is handed to _collect_slot as a slot to collect once the
+        fallback ends, and nothing collects it. So the stage is carried and
+        awaiting_slot is put back the way the stage found it.
+
+        Call it AFTER extraction and inside the branch where no usable value
+        was found, the same ordering wait_ack documents: a turn that carried an
+        SSN never reaches it, so "hold on — 123-45-6789" is taken as the answer
+        it is.
+        """
+        wait = self.wait_ack(state, "ssn", decision=decision, slot_label=slot_label)
+        if wait is None:
+            return None
+        wait["ssn_fallback_stage"] = stage
+        wait["awaiting_slot"] = state.get("awaiting_slot") or ""
+        wait.update(carry)
+        return wait
+
     async def _handle_ssn_fallback(self, state: State, last_user: str, messages: list) -> dict:
         """Route SSN fallback sub-stages. LLM-backed for ask/collecting/dob; deterministic for retry."""
         stage = state.get("ssn_fallback_stage") or ""
@@ -293,6 +344,13 @@ class VerificationAgent(BaseAgent):
         if self._pivots_to_member_id(extraction, last_user):
             return self._resume_member_id_collection(state, last_user)
 
+        # Waiting is not a failed attempt — see _ssn_wait_ack. SsnFallbackResult
+        # cannot report a wait (TurnReading's default asked_for_time is False for
+        # a schema with no turn_intent), so the caller's words are the only
+        # signal here and no decision is passed.
+        if wait := self._ssn_wait_ack(state, "ssn_ask", slot_label="Social Security Number"):
+            return wait
+
         # Ambiguous — re-ask with the same hardcoded question, but only so many
         # times: an unresolvable gate used to repeat verbatim forever.
         # Do NOT call LLM 2 here: ssn_ask is a yes/no gate and LLM 2 hallucinates
@@ -344,6 +402,11 @@ class VerificationAgent(BaseAgent):
         # Caller found their Member ID after all — take it over the SSN.
         if self._pivots_to_member_id(extraction, last_user):
             return self._resume_member_id_collection(state, last_user)
+
+        # Waiting is not a failed attempt — see _ssn_wait_ack. No decision:
+        # SsnFallbackResult cannot report a wait, so the words settle it.
+        if wait := self._ssn_wait_ack(state, "ssn_collecting", slot_label="Social Security Number"):
+            return wait
 
         # Ambiguous or failed normalization — retry with LLM 2 re-ask
         slot_attempts = dict(state.get("slot_attempts") or {})
@@ -423,6 +486,14 @@ class VerificationAgent(BaseAgent):
                 self.slot_ok("dob", dob_normalized)
                 state = {**state, "dob": dob_normalized, "ssn_fallback_stage": "ssn_lookup"}
                 return await self._finish_after_ssn(state, messages, call_intent)
+
+        # Waiting is not a failed attempt — see _ssn_wait_ack. This stage
+        # extracts with WorkerResult, which CAN report a wait, so its label is
+        # honoured alongside the words.
+        if wait := self._ssn_wait_ack(
+            state, "ssn_dob_collecting", slot_label="date of birth", decision=dob_result
+        ):
+            return wait
 
         # DOB invalid or absent — retry with LLM 2
         slot_attempts = dict(state.get("slot_attempts") or {})
@@ -519,6 +590,16 @@ class VerificationAgent(BaseAgent):
         # — ask for it plainly rather than repeating the either/or prompt.
         if self._pivots_to_member_id(llm_result, last_user):
             return self._resume_member_id_collection(state, last_user)
+
+        # Waiting is not a failed attempt — see _ssn_wait_ack. WorkerResult
+        # here too, so the model's own label counts.
+        if wait := self._ssn_wait_ack(
+            state,
+            "ssn_or_mid_retry",
+            slot_label="Member ID or Social Security Number",
+            decision=llm_result,
+        ):
+            return wait
 
         # Bounded, like every other stage — this prompt used to repeat forever.
         slot_attempts = dict(state.get("slot_attempts") or {})
@@ -696,6 +777,17 @@ class VerificationAgent(BaseAgent):
         value = await self._extract_recheck_value(field, state, last_user, messages)
 
         if not value:
+            # Waiting is not a failed attempt — see _ssn_wait_ack. The queue of
+            # fields still to re-check rides along, or the next turn has nothing
+            # to ask for.
+            if wait := self._ssn_wait_ack(
+                state,
+                "ssn_recheck",
+                slot_label=_SSN_FIELD_LABELS.get(field, field.replace("_", " ")),
+                ssn_recheck_fields=",".join(pending),
+            ):
+                return wait
+
             slot_attempts = dict(state.get("slot_attempts") or {})
             entry = slot_attempts.get(f"recheck_{field}") or {}
             count = (entry.get("attempt_count", 0) if isinstance(entry, dict) else 0) + 1
@@ -1417,6 +1509,29 @@ class VerificationAgent(BaseAgent):
                 "name_confirm_attempts": attempts,
             }
             return self._deliver_name_readback(new_state)
+
+        # Waiting is not a failed attempt — see wait_ack. A caller who asks for
+        # a moment is neither confirming the name nor rejecting it:
+        #
+        #     AI      I have you as J-A-N-E  C-A-R-T-E-R. Did I get that right?
+        #     Caller  hold on, let me grab my card
+        #     AI      What is the correct name?
+        #
+        # The read-back is not a "yes" and carries no correction, so it reached
+        # OUTCOME 4, charged a name_confirm_attempt and told the caller their
+        # name was wrong. The guards do run on this turn, but the wait
+        # suppression there only defers to "the agent's own wait branch", which
+        # this handler did not have. _collect_name_correction — the turn AFTER
+        # this one — has called wait_ack all along, which is one turn too late.
+        #
+        # Placed after OUTCOME 1 and 2 so a position always wins: "hold on...
+        # yes that's right" is a confirmation and "hold on, it's Carter not
+        # Watson" is a correction. Ahead of the two rejection outcomes for the
+        # reason is_not_an_answer gives for the same ordering — "no, hold on" is
+        # a caller asking for time, and asking them for a name they are still
+        # looking up is the failure above.
+        if wait := self.wait_ack(state, _NAME_CONFIRM_SLOT, decision=result, slot_label="name"):
+            return wait
 
         # ── OUTCOME 3: bare no ───────────────────────────────────────────────
         if name_conf_raw == "no":

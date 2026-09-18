@@ -420,7 +420,7 @@ class DeliveryManagementAgent(BaseAgent):
             # — let the new_fax_raw block below handle it. Only clear new_fax_raw
             # when it matches the on-file value (Confirmed: context echo).
             if contact_conf == "no" and is_read_back_echo(
-                new_fax_raw, pending_fax or fax_on_file, normalize_fax_number
+                new_fax_raw, pending_fax or fax_on_file, normalize_fax_number, last_user=last_user
             ):
                 new_fax_raw = ""
 
@@ -584,7 +584,7 @@ class DeliveryManagementAgent(BaseAgent):
             # the decline — let the new_email_raw block below handle it. Only clear
             # new_email_raw when it matches the on-file value (Confirmed: context echo).
             if contact_conf == "no" and is_read_back_echo(
-                new_email_raw, pending_email or email_on_file, normalize_email
+                new_email_raw, pending_email or email_on_file, normalize_email, last_user=last_user
             ):
                 new_email_raw = ""
 
