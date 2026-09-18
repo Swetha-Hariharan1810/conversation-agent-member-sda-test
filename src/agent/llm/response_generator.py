@@ -218,9 +218,9 @@ def needs_freeform_response(
     if decision is None:
         return True
     # Content the caller supplied that a canned re-ask cannot carry.
-    if any(v for v in (getattr(decision, "corrections", None) or {}).values()):
+    if any(v for v in (decision.corrections or {}).values()):
         return True
-    if getattr(decision, "change_target", ""):
+    if decision.change_target:
         return True
     if (getattr(decision, "followup_query", None) or "").strip():
         return True

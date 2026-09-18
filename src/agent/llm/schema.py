@@ -145,7 +145,83 @@ def _clean(value: Any) -> str:
     return str(value or "").strip()
 
 
-class WorkerResult(BaseModel):
+class TurnReading(BaseModel):
+    """The questions the shared layers ask of an extraction result — and the
+    answer a schema gives when it has no concept of what is being asked.
+
+    There is more than one extraction schema. ``WorkerResult`` covers every
+    slot-collecting turn, ``FollowUpResult`` covers follow_up, and
+    ``SsnFallbackResult`` covers the SSN branch of verification. The layers
+    they all pass through — the guard layer, the side-question net, the slot
+    pipeline — are handed whichever one the calling agent extracted with, and
+    ask it what the caller's turn did.
+
+    That was survivable while every such read went through
+    ``getattr(result, "...", default)``, which answers for a schema that has
+    never heard of the field. Narrowing WorkerResult to one intent and one
+    target replaced those with direct attribute reads, and the first result
+    from another schema to reach one took the call down:
+
+        AttributeError: 'FollowUpResult' object has no attribute
+        'asked_for_time'
+
+    So the defaults live here, once, instead of at each call site. A schema
+    that cannot report a wait says so in public; a schema that can overrides
+    the property, and the same shared code reads both the same way. Each
+    default is the honest reading for a schema with nothing to say — never the
+    one that would send a turn somewhere the caller did not ask to go.
+    """
+
+    @property
+    def has_extracted_value(self) -> bool:
+        """Did the caller speak a usable value this turn?"""
+        return any(v for v in (getattr(self, "extracted", None) or {}).values())
+
+    @property
+    def corrections(self) -> Dict[str, str]:
+        """Values this turn spoke that replace something already confirmed.
+
+        Worked out from state by ``WorkerResult.split_corrections``; a schema
+        that collects no slots has nothing to correct.
+        """
+        return {}
+
+    @property
+    def change_target(self) -> str:
+        """What the caller asked to change, redo or replay; "" when nothing."""
+        return ""
+
+    @property
+    def change_kind(self) -> str:
+        """Which of update / redo / replay the caller asked for; "" when none."""
+        return ""
+
+    @property
+    def pivot_target(self) -> str:
+        """The identifier the caller offered instead; "" when none."""
+        return ""
+
+    @property
+    def cannot_supply(self) -> bool:
+        """Did the caller say they cannot supply what was asked for?"""
+        return False
+
+    @property
+    def asked_for_time(self) -> bool:
+        """Did the caller ask for a moment?"""
+        return False
+
+    @property
+    def no_usable_value(self) -> bool:
+        """Is there nothing to take from this turn?
+
+        False for a schema that cannot tell. Answering True would claim the
+        turn was empty and send the caller down a retry they did not earn.
+        """
+        return False
+
+
+class WorkerResult(TurnReading):
     """One extraction turn: six fields the model reports, and the questions
     the pipelines ask of them.
 
@@ -348,7 +424,7 @@ class FollowUpIntent(str, Enum):
     WAIT = "wait"
 
 
-class FollowUpResult(BaseModel):
+class FollowUpResult(TurnReading):
     """Dedicated schema for follow_up_agent: WorkerResult + generated answer."""
 
     model_config = ConfigDict(extra="forbid")
@@ -365,6 +441,19 @@ class FollowUpResult(BaseModel):
     request_kind: RequestKind = RequestKind.NONE
     request_target: Optional[str] = None
 
+    # follow_up classifies a cross-call request in request_kind/request_target
+    # because it runs with no slot being collected around it. That is the same
+    # fact WorkerResult carries as an intent and a target, so the shared
+    # readings answer from it rather than reporting "no request asked".
+
+    @property
+    def change_kind(self) -> str:
+        return self.request_kind.value if self.request_kind is not RequestKind.NONE else ""
+
+    @property
+    def change_target(self) -> str:
+        return _clean(self.request_target) if self.request_kind is not RequestKind.NONE else ""
+
 
 class SsnIntent(str, Enum):
     YES_WITH_SSN = "yes_with_ssn"
@@ -378,7 +467,7 @@ class SsnIntent(str, Enum):
     AMBIGUOUS = "ambiguous"
 
 
-class SsnFallbackResult(BaseModel):
+class SsnFallbackResult(TurnReading):
     """Schema for ssn_fallback.md extraction — used by extract_ssn_decision()."""
 
     model_config = ConfigDict(extra="forbid")
