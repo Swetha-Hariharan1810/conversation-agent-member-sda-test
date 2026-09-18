@@ -1,0 +1,40 @@
+ai: Thank you for calling Sagility Health. For quality assurance purposes, your call may be monitored or recorded. Please tell me how I can assist you today.
+human: I adjusted the claim and I want to follow up
+ai: I can help with that. Can I get your first name, please?
+human: james
+ai: Thank you, James. Can you provide your last name?
+human: wilson
+ai: Thank you. Just to confirm — is your name James Wilson, J-A-M-E-S W-I-L-S-O-N, correct?
+human: yes that's correct
+ai: May I ask for your Member ID, please?
+human: m three one zero one eight eight
+ai: To validate your account, can I get your date of birth?
+human: Thirtieth of July, nineteen seventy seven
+ai: Thank you. Is your phone number 512-555-6101?
+human: yes correct
+ai: Thank you, James. May I have the reference number of the adjustment request?
+human: 42695817
+ai: Thank you. I found the request. The claim is still open for Review from our adjustment team. The last update on record was 2026-01-21. We also need a copy of the complete medical records for this request. Can you send it over?
+human: Can you contact my doctor directly to get the records?
+ai: Absolutely. I can also send you a link where you can upload the records directly. Would you like me to do that?
+human: No thanks, I'd prefer the Personal Guide to contact them.
+ai: I can have one of our Personal Guides conduct the outreach to your doctor to request a complete copy of the medical records for this request. Would you like us to proceed?
+human: Yes, please proceed with that.
+ai: Our Personal Guide will call the provider in the next 24 hours.
+We can also keep you posted on the status of the provider outreach. I can send the status updates to your email or SMS. How do you want to be notified?
+human: You can send me to my phone
+ai: The phone number we have on file is 512-555-6101. Is this correct or has it been changed?
+human: Yes, that's correct
+ai: Thank you. We will send the notification once we have reached your doctor. I can walk you through the expected timeline for this request.
+human: Okay, how long will it take to finalize the request?
+ai: It will take 5 to 10 business days from the date we receive the required additional information.
+To keep you posted, I can send you notifications whenever there are updates in this request.
+Do you want to receive them via SMS or email?
+human: email them to me
+ai: Sure, I will use the same email address on records, james.wilson@gmail.com
+Aside from this, is there anything else I can help you with today?
+human: Yes, how will I know when the adjustment is finalized?
+ai: We will send you an email notification at james.wilson@gmail.com whenever there is an update on this request, including when the adjustment is finalized.
+Aside from this, is there anything else I can help you with today?
+human: No, that's all. Thank you.
+ai: Alright. Thank you for calling Sagility Health. Be safe and enjoy the rest of your day!
