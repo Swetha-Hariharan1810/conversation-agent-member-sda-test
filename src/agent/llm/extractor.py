@@ -1,6 +1,7 @@
 import logging
 import re
 
+from agent.slots.options import render_open_options, render_options
 from agent.utils import build_history
 
 logger = logging.getLogger(__name__)
@@ -76,7 +77,9 @@ def build_worker_input(
         Slot names still to be collected later in this call, in order.
         Rendered as a "Pending:" context line so the extraction LLM can
         classify follow-up questions as parkable (followup_disposition
-        "park"). Omitted entirely when None or empty.
+        "park"). Omitted entirely when None or empty. Any of these that is a
+        closed-set slot also gets its accepted values listed, so a caller who
+        answers the question before last has somewhere for it to land.
     attempt:
         How many collection attempts have been made for awaiting_slot so far.
     recent_messages:
@@ -113,6 +116,24 @@ def build_worker_input(
             context_lines.append(f"Confirmed: {confirmed_str}")
     if pending_slots:
         context_lines.append(f"Pending: {', '.join(pending_slots)}")
+
+    # The accepted answers for the slot being collected. Without this the
+    # prompt states WHICH slot is open but never WHAT counts as an answer to
+    # it, so the model classifies by grammatical form — and "Can I ask my
+    # doctor to send them over?", a named upload_method value, reads as a
+    # question rather than as the answer it is. Rendered here rather than in
+    # the agent's Markdown file: those run to 8k tokens, and this is the line
+    # the model most needs in front of it.
+    accepted = render_options(awaiting_slot)
+    if accepted:
+        context_lines.append(accepted)
+
+    # Closed sets asked earlier and still open. An ASR cutoff pushes a caller's
+    # real answer one turn late by default, and a valid answer to the question
+    # before last has nowhere to land when only awaiting_slot can be answered.
+    open_options = render_open_options(pending_slots, exclude=awaiting_slot)
+    if open_options:
+        context_lines.append(open_options)
 
     # Explicitly surface the most recent caller utterance so the extraction
     # LLM does not have to re-parse it from the history block. This prevents

@@ -51,8 +51,9 @@ async def extract_intake_intent(
     try:
         result: WorkerResult = await llm.with_structured_output(WorkerResult).ainvoke(messages)
         # Regex fallback + veto layer (request_detection): fills a missed
-        # update_target/request_kind and clears WAIT on correction turns.
-        return reconcile_worker_result(result, last_user_message)
+        # update_target/request_kind, clears WAIT on correction turns, and
+        # reads a closed-set answer (slots.options) the model did not return.
+        return reconcile_worker_result(result, last_user_message, awaiting_slot="intent")
     except Exception as exc:
         logger.exception("Intent extraction failed", exc_info=exc)
         return WorkerResult()

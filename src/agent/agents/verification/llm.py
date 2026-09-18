@@ -71,8 +71,9 @@ async def extract_verification_decision(
     try:
         result: WorkerResult = await llm.with_structured_output(WorkerResult).ainvoke(messages)
         # Regex fallback + veto layer (request_detection): fills a missed
-        # update_target/request_kind and clears WAIT on correction turns.
-        result = reconcile_worker_result(result, last_user_message)
+        # update_target/request_kind, clears WAIT on correction turns, and
+        # reads a closed-set answer (slots.options) the model did not return.
+        result = reconcile_worker_result(result, last_user_message, awaiting_slot=awaiting_slot)
         return result
     except Exception as _exc:
         _code = getattr(_exc, "code", None) or getattr(getattr(_exc, "error", None), "code", None)
@@ -119,8 +120,9 @@ async def extract_name_confirmation(
     try:
         result: WorkerResult = await llm.with_structured_output(WorkerResult).ainvoke(messages)
         # Regex fallback + veto layer (request_detection): fills a missed
-        # update_target/request_kind and clears WAIT on correction turns.
-        result = reconcile_worker_result(result, last_user_message)
+        # update_target/request_kind, clears WAIT on correction turns, and
+        # reads a closed-set answer (slots.options) the model did not return.
+        result = reconcile_worker_result(result, last_user_message, awaiting_slot="name_confirmed")
         return result
     except Exception:
         logger.exception("extract_name_confirmation: LLM extraction failed")

@@ -220,6 +220,53 @@ CASES: tuple[ExtractionCase, ...] = (
         utterance="It is four two six nine five eight one seven.",
         expect={"extracted.reference_number": "42695817", "event_type": "answered"},
     ),
+    # ── Step 2: the accepted answers are in the prompt ───────────────────────
+    ExtractionCase(
+        id="upload_method_named_as_a_question",
+        note="the transcript-1 utterance, asked on its own slot. doctor_direct is a "
+        "defined value and the prompt now says so — asking permission is how people "
+        "pick an option.",
+        prompt_file=_RECORDS,
+        awaiting_slot="upload_method",
+        last_agent_message=(
+            "To move forward, we'll need a complete copy of the medical records for this "
+            "adjustment. Are you able to provide those?"
+        ),
+        utterance="Can I ask my doctor to send them over?",
+        expect={"extracted.upload_method": "doctor_direct"},
+    ),
+    ExtractionCase(
+        id="upload_method_personal_guide_beats_doctor",
+        note="both name the provider; the caller is asking US to go and get them",
+        prompt_file=_RECORDS,
+        awaiting_slot="upload_method",
+        last_agent_message="Are you able to provide a copy of the medical records?",
+        utterance="Could you contact my doctor's office and get them yourselves?",
+        expect={"extracted.upload_method": "personal_guide"},
+    ),
+    ExtractionCase(
+        id="delivery_method_chosen_as_a_question",
+        note="transcript 3, turn 5 — a choice phrased as a question",
+        prompt_file=_DELIVERY,
+        awaiting_slot="delivery_method",
+        last_agent_message=(
+            "I have a list of in-network providers in your area ready to send. "
+            "Shall I deliver it by fax or email?"
+        ),
+        utterance="And you send it to my fax, please?",
+        confirmed={"first_name": "Emily", "zip_code": "12139"},
+        expect={"extracted.delivery_method": "fax", "event_type": "answered"},
+    ),
+    ExtractionCase(
+        id="closed_set_is_not_forced",
+        note="the accepted-answers block must not make the model pick one. An empty "
+        "slot is recoverable; a wrong one that reaches confirmation is not.",
+        prompt_file=_DELIVERY,
+        awaiting_slot="delivery_method",
+        last_agent_message="Shall I deliver it by fax or email?",
+        utterance="How long does it usually take to arrive?",
+        expect={"extracted.delivery_method": None},
+    ),
     # ── Guards must keep working ─────────────────────────────────────────────
     ExtractionCase(
         id="guard_transfer",

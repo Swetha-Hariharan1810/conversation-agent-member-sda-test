@@ -25,8 +25,8 @@ Precedence: update beats redo beats replay; a concrete slot target beats a
 capability topic (updates are checked first and target canonical slot names).
 
 Dependency-light on purpose: stdlib re / dataclasses / logging plus the
-dependency-free slot_ownership registry. NEVER import from agents/ or
-agent.utils — the few cannot-provide negatives needed to stay out of
+dependency-free slot_ownership and slots.options registries. NEVER import from
+agents/ or agent.utils — the few cannot-provide negatives needed to stay out of
 detect_cannot_provide's territory are duplicated below.
 """
 
@@ -43,6 +43,7 @@ from agent.core.followup_grounding import (
     recover_side_question,
 )
 from agent.core.slot_ownership import SLOT_OWNERSHIP
+from agent.slots.options import get_option_set, match_option
 from agent.utils import detect_cannot_provide
 
 logger = logging.getLogger(__name__)
@@ -476,7 +477,78 @@ def _reconcile_cannot_provide(result: Any, last_user: str | None) -> Any:
     return result
 
 
-def reconcile_worker_result(result: Any, last_user: str | None) -> Any:
+def _reconcile_closed_set(result: Any, last_user: str | None, awaiting_slot: str) -> Any:
+    """Read a closed-set answer the extraction model did not return.
+
+    ``upload_method`` is the slot this was written for: it is branch-selecting,
+    it had no normalizer, and the extraction model was the single point of
+    failure for it. The caller says "my doctor will send them over", the model
+    returns nothing, the turn burns a retry attempt and the agent re-asks a
+    question that was already answered.
+
+    Strictly a gap filler, in the narrowest window that is still useful:
+
+      * only the slot being asked — a closed-set value read out of a turn about
+        something else is how a caller ends up confirming a choice they never
+        made;
+      * only when extraction returned no value and no correction for it;
+      * never over a guard, a cannot-provide, or a wait. "Put me through to a
+        person" contains none of the option words, but an extraction that threw
+        returns an empty result, and reading an option out of a transfer
+        request is the worst available outcome.
+
+    The event is promoted out of AMBIGUOUS when a value is recovered, because
+    AMBIGUOUS with a value in ``extracted`` is a combination no downstream
+    branch expects. Any other event — ANSWERED_WITH_FOLLOWUP above all — is
+    left exactly as the model classified it: the caller may well have answered
+    AND asked, and flattening that back to ANSWERED drops the question.
+    """
+    if not awaiting_slot or get_option_set(awaiting_slot) is None:
+        return result
+
+    extracted = getattr(result, "extracted", None) or {}
+    corrections = getattr(result, "corrections", None) or {}
+    if (extracted.get(awaiting_slot) or "").strip() or (corrections.get(awaiting_slot) or "").strip():
+        return result  # the model answered — never contradict it
+
+    guard = getattr(result, "guard", None)
+    guard_value = str(getattr(guard, "value", guard) or "").strip().upper()
+    if guard_value and guard_value != "NONE":
+        return result
+    if getattr(result, "cannot_provide", False):
+        return result
+
+    event_raw = getattr(result, "event_type", None)
+    event = str(getattr(event_raw, "value", event_raw) or "").strip().lower()
+    if event == "wait":
+        return result
+
+    value = match_option(awaiting_slot, last_user)
+    if not value:
+        return result
+
+    try:
+        result.extracted = {**extracted, awaiting_slot: value}
+        if event in ("", "ambiguous"):
+            result.event_type = _coerce_like(event_raw, "answered")
+    except (AttributeError, ValueError):  # non-WorkerResult shim in tests
+        return result
+
+    logger.info(
+        "request_detection: closed_set_fallback filled %s",
+        awaiting_slot,
+        extra={
+            "source": "closed_set_fallback",
+            "field": awaiting_slot,
+            "llm_value": "",
+            "final_value": value,
+            "event_before": event,
+        },
+    )
+    return result
+
+
+def reconcile_worker_result(result: Any, last_user: str | None, *, awaiting_slot: str = "") -> Any:
     """Fallback + veto pass over an extraction result (WorkerResult-shaped).
 
     - LLM produced update_target/request_kind → kept as-is; the regex never
@@ -501,6 +573,9 @@ def reconcile_worker_result(result: Any, last_user: str | None) -> Any:
     - extracted{} or corrections{} carry a schema field name as a key
       ("update_target": "ID card") → drop it; those dicts are slot → value and
       every consumer reads them that way. See _strip_reserved_keys.
+    - awaiting_slot is a closed set (delivery_method, upload_method, …) and the
+      LLM returned no value for it, but the caller plainly named one → fill it
+      from agent.slots.options. Gap fill only; see _reconcile_closed_set.
     - detect_cannot_provide fires but the LLM left cannot_provide false →
       set it. The flag is semantic and the model is the primary source; this
       is the backstop for a missed call or an extraction that threw, so a
@@ -508,6 +583,7 @@ def reconcile_worker_result(result: Any, last_user: str | None) -> Any:
     - Neither detects → result returned untouched.
     """
     result = _strip_reserved_keys(result)
+    result = _reconcile_closed_set(result, last_user, awaiting_slot)
     result = _reconcile_cannot_provide(result, last_user)
     result = _reconcile_followup_query(result, last_user)
     result = _recover_missed_followup(result, last_user)

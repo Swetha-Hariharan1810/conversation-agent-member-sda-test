@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import re
-
 from agent.logger import get_logger
+from agent.slots.options import match_option
 from agent.state import State
 from agent.utils import pick
 
@@ -99,60 +98,14 @@ async def dispatch_personal_guide(agent, state: State) -> dict | None:
 # the extraction model was the single point of failure. This is the deterministic
 # reading, consulted when extraction produced nothing.
 
-# Who is going to do the sending. Order matters and is the whole design:
-# "can you get them from the provider" names the provider AND asks us to chase
-# it, so PERSONAL_GUIDE has to be tested before DOCTOR_DIRECT; and "can I ask my
-# doctor to send it" opens with "I" while the sender is the doctor, so
-# DOCTOR_DIRECT has to be tested before MEMBER_UPLOAD.
-_SEND_VERB = (
-    r"(?:send|sends|sending|fax|faxes|forward|forwards|mail|mails|submit|submits"
-    r"|share|shares|get|gets|pull|pulls|request|requests|obtain)"
-)
-_DOCTOR = (
-    r"(?:doctor|doctor'?s|physician|provider|provider'?s|clinic|hospital"
-    r"|surgery|office|specialist|gp)"
-)
-
-_UPLOAD_METHOD_SCREENS: tuple[tuple[str, re.Pattern], ...] = (
-    # personal_guide — the caller asks US to go and get them.
-    (
-        "personal_guide",
-        re.compile(
-            rf"\b(?:you|your\s+team|someone\s+there|somebody\s+there)\b[^.?!]{{0,30}}?"
-            rf"\b(?:contact|call|reach\s+out|chase|{_SEND_VERB})\b"
-            rf"|\bon\s+my\s+behalf\b",
-            re.IGNORECASE,
-        ),
-    ),
-    # doctor_direct — the doctor, provider or office does the sending.
-    (
-        "doctor_direct",
-        re.compile(
-            rf"\b{_DOCTOR}\b[^.?!]{{0,30}}?\b(?:can|could|will|would|to|should)?\s*{_SEND_VERB}\b"
-            rf"|\b{_SEND_VERB}\b[^.?!]{{0,20}}?\bfrom\s+(?:my\s+|the\s+)?{_DOCTOR}\b"
-            rf"|\bhave\s+(?:my\s+|the\s+)?{_DOCTOR}\b"
-            rf"|\bask\s+(?:my\s+|the\s+)?{_DOCTOR}\b"
-            rf"|\b{_DOCTOR}\s+(?:will|can|could)\s+handle\b",
-            re.IGNORECASE,
-        ),
-    ),
-    # member_upload — the caller does it themselves.
-    (
-        "member_upload",
-        re.compile(
-            rf"\bi(?:'ll|\s+will|\s+can|\s+could)?\s+(?:just\s+)?(?:{_SEND_VERB}|upload|uploads|scan|scans|do\s+it)\b"
-            rf"|\bupload\s+(?:it|them|those)\b"
-            rf"|\bsend\s+me\s+(?:the\s+|a\s+)?link\b"
-            rf"|\b(?:do|handle)\s+it\s+(?:online|myself)\b"
-            rf"|\bmyself\b",
-            re.IGNORECASE,
-        ),
-    ),
-)
-
-# "decline" is deliberately absent. Inferring one escalates the call, which is
-# the worst outcome to reach on a guess — a caller who has not refused is handed
-# to a representative they did not ask for. That stays with the model.
+# The patterns that read these three options out of the caller's words moved to
+# agent.slots.options.UPLOAD_METHOD, which is also what renders the accepted
+# answers into the extraction prompt. One table, so the list the model is shown
+# and the list this screen can read cannot drift apart.
+#
+# "decline" is still deliberately unmatchable. Inferring one escalates the call,
+# which is the worst outcome to reach on a guess — a caller who has not refused
+# is handed to a representative they did not ask for. That stays with the model.
 
 
 def screen_upload_method(utterance: str) -> str:
@@ -161,14 +114,10 @@ def screen_upload_method(utterance: str) -> str:
     Returns one of the upload_method values the agent branches on. Only the
     three positive branches are read; see the note above on "decline".
     """
-    text = (utterance or "").strip()
-    if not text:
-        return ""
-    for value, pattern in _UPLOAD_METHOD_SCREENS:
-        if pattern.search(text):
-            logger.info(
-                "screen_upload_method: read the records option from the caller's words",
-                extra={"value": value, "utterance": text[:60]},
-            )
-            return value
-    return ""
+    value = match_option("upload_method", utterance)
+    if value:
+        logger.info(
+            "screen_upload_method: read the records option from the caller's words",
+            extra={"value": value, "utterance": (utterance or "").strip()[:60]},
+        )
+    return value
