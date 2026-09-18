@@ -275,7 +275,9 @@ pcp_zip_update = Scenario(
     turn_expectations={
         # The AI prompt that precedes "send it to my fax" must be the delivery
         # bridge — proving the ZIP was accepted with no confirmation step.
-        10: TurnExpectation(ai_contains=[r"fax or email"]),
+        # 0-based into user_turns: PCP_VERIFY is 0-6, the ZIP decline 7, the
+        # new ZIP 8, "send it to my fax" 9.
+        9: TurnExpectation(ai_contains=[r"fax or email"]),
     },
     expect=Expected(
         completed=True,
@@ -322,7 +324,8 @@ pcp_zip_inline_update = Scenario(
     turn_expectations={
         # The AI prompt preceding "email please" must be the delivery bridge —
         # the inline-replacement path must not produce a confirmation read-back.
-        9: TurnExpectation(ai_contains=[r"fax or email"]),
+        # 0-based: PCP_VERIFY is 0-6, the inline decline 7, "email please" 8.
+        8: TurnExpectation(ai_contains=[r"fax or email"]),
     },
     expect=Expected(
         completed=True,
@@ -5177,14 +5180,16 @@ zip_update_during_fax_confirmation = Scenario(
         "no that's all, thanks",  # close
     ],
     turn_expectations={
+        # 0-based into user_turns: PCP_VERIFY is 0-6, the ZIP confirm 7,
+        # the delivery choice 8, the ZIP interjection 9, the new ZIP 10.
         # Before the ZIP interjection: the fax read-back question.
-        10: TurnExpectation(ai_contains=[r"fax"], slot_awaiting="fax_confirmed"),
+        9: TurnExpectation(ai_contains=[r"fax"], slot_awaiting="fax_confirmed"),
         # The hand-off: honest "update your ZIP first" ask — awaiting flips to
         # zip_code and the next turn is owned by provider_search.
-        11: TurnExpectation(ai_contains=[r"zip"], slot_awaiting="zip_code"),
+        10: TurnExpectation(ai_contains=[r"zip"], slot_awaiting="zip_code"),
         # The resume: ZIP-update acknowledgement naming the NEW ZIP plus the
         # re-asked fax read-back — dispatch never fired from the disputed ZIP.
-        12: TurnExpectation(ai_contains=[r"02141", r"fax"], slot_awaiting="fax_confirmed"),
+        11: TurnExpectation(ai_contains=[r"02141", r"fax"], slot_awaiting="fax_confirmed"),
     },
     expect=Expected(
         completed=True,
@@ -5475,14 +5480,16 @@ zip_update_during_fax_paraphrased = Scenario(
         "no that's all, thanks",  # close
     ],
     turn_expectations={
+        # 0-based into user_turns: PCP_VERIFY is 0-6, the ZIP confirm 7,
+        # the delivery choice 8, the ZIP interjection 9, the new ZIP 10.
         # Before the ZIP interjection: the fax read-back question.
-        10: TurnExpectation(ai_contains=[r"fax"], slot_awaiting="fax_confirmed"),
+        9: TurnExpectation(ai_contains=[r"fax"], slot_awaiting="fax_confirmed"),
         # The hand-off: honest "update your ZIP first" ask — awaiting flips to
         # zip_code and the next turn is owned by provider_search.
-        11: TurnExpectation(ai_contains=[r"zip"], slot_awaiting="zip_code"),
+        10: TurnExpectation(ai_contains=[r"zip"], slot_awaiting="zip_code"),
         # The resume: ZIP-update acknowledgement naming the NEW ZIP plus the
         # re-asked fax read-back — dispatch never fired from the disputed ZIP.
-        12: TurnExpectation(ai_contains=[r"02143", r"fax"], slot_awaiting="fax_confirmed"),
+        11: TurnExpectation(ai_contains=[r"02143", r"fax"], slot_awaiting="fax_confirmed"),
     },
     expect=Expected(
         completed=True,
