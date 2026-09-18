@@ -168,13 +168,13 @@ class VerificationAgent(BaseAgent):
         """Caller wants their Member ID instead of the SSN.
 
         The extraction model decides (SsnIntent.HAS_MEMBER_ID, or the shared
-        fallback_pivot field); the phrase list is only the backstop for when it
+        pivot intent); the phrase list is only the backstop for when it
         misses or the extraction call failed outright.
         """
         intent = getattr(getattr(extraction, "ssn_intent", None), "value", None)
         if intent == "has_member_id":
             return True
-        if (getattr(extraction, "fallback_pivot", None) or "").strip() == "member_id":
+        if extraction is not None and extraction.pivot_target == "member_id":
             return True
         return VerificationAgent._wants_member_id(text)
 
@@ -995,7 +995,7 @@ class VerificationAgent(BaseAgent):
         # llm.py already reconciles on success, but extraction fallbacks (and
         # monkeypatched results) bypass it — re-running here is idempotent and
         # guarantees a mid-verification update request ("also I need to update
-        # my last name") reaches the pipeline as update_target.
+        # my last name") reaches the pipeline as an update intent.
         #
         # It runs BEFORE the guards, not after. run_conversation_guards is where
         # note_side_question records the turn's side question, and reconcile is
@@ -1019,20 +1019,17 @@ class VerificationAgent(BaseAgent):
         # that actually generalises: the extraction model judges meaning, so
         # phrasings no list anticipates ("that's in my wallet at home") still
         # reach the SSN offer instead of the escalation in _collect_slot.
-        # fallback_pivot == "ssn" is the caller naming the alternative outright.
+        # A pivot to "ssn" is the caller naming the alternative outright.
         if (
             awaiting_slot == "member_id"
             and not state.get("member_id")
             and not state.get("ssn")
             and not (result.extracted or {}).get("member_id")
-            and (
-                getattr(result, "cannot_provide", False)
-                or (getattr(result, "fallback_pivot", None) or "").strip() == "ssn"
-            )
+            and (result.cannot_supply or result.pivot_target == "ssn")
         ):
             logger.info(
                 "VerificationAgent: member_id unavailable (extraction) — starting SSN fallback",
-                extra={"fallback_pivot": getattr(result, "fallback_pivot", None)},
+                extra={"pivot_target": result.pivot_target},
             )
             ssn_offer = self.ask_member(state, MSG_SSN_ASK)
             ssn_offer["ssn_fallback_stage"] = "ssn_ask"
@@ -1327,7 +1324,16 @@ class VerificationAgent(BaseAgent):
           4. ambiguous                       → slot_fail → retry readback or escalate
         """
         last_agent = _last_assistant_msg(messages)
-        attempt_count = self.get_slot(_NAME_CONFIRM_SLOT).attempt_count
+        # The readback keeps its own count in name_confirm_attempts: every
+        # branch below increments it, the three confirm paths reset it, and
+        # MAX_NAME_CONFIRM_ATTEMPTS caps it. The name_confirmed slot record is
+        # not that counter — nothing in this flow writes it, and the one place
+        # that would (the off-topic deflection in guards.py) is gated on the
+        # count already being above zero, so it never starts. Reading it handed
+        # the extractor attempt=0 on every retry, which is the one time the
+        # attempt number does anything: build_worker_input narrows the history
+        # window at 2, and the readback and the correction both live in it.
+        attempt_count = int(state.get("name_confirm_attempts") or 0)
 
         result = await extract_name_confirmation(
             get_extraction_llm(),
@@ -1382,10 +1388,8 @@ class VerificationAgent(BaseAgent):
             logger.info(LOG_NAME_CONFIRMED)
             # When the caller confirmed AND asked a side question, address it
             # before moving to member_id — never silently skip a caller's question.
-            _event_raw = getattr(result, "event_type", None)
-            _event_str = str(getattr(_event_raw, "value", _event_raw) or "").lower()
             _followup_q = (getattr(result, "followup_query", None) or "").strip()
-            if _event_str == "answered_with_followup" and _followup_q:
+            if _followup_q and result.has_extracted_value:
                 return await self._name_confirmed_with_followup(state, messages, _followup_q)
             return await self._name_confirmed_proceed(state, messages)
 
@@ -1565,7 +1569,7 @@ class VerificationAgent(BaseAgent):
         """Name confirmed with a side question — address the question then ask for member_id.
 
         Mirrors the FOLLOWUP_RESPOND path in _collect_slot._handle_answered_followup.
-        Called when event_type==ANSWERED_WITH_FOLLOWUP on the name_confirmed turn.
+        Called when the name_confirmed turn also carried a side question.
         """
         from agent.responses.builder import build_transition_prompt
         from agent.slots.types import SlotType

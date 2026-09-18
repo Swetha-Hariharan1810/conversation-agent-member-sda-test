@@ -40,7 +40,7 @@ from agent.state import State
 from agent.utils import _last_user_msg, detect_transfer_request, detect_wait_request, pick
 
 if TYPE_CHECKING:
-    from agent.llm.schema import WorkerResult
+    from agent.llm.schema import TurnReading
 
 _NON_MEMBER_ROUTING: dict[str, tuple[str, str]] = {
     "provider": ("providers", "1-740-660-3977"),
@@ -190,7 +190,8 @@ class ConversationGuardsMixin:
         state: State,
         *,
         user_text: str,
-        result: Optional["WorkerResult"] = None,
+        # Any extraction schema — follow_up passes a FollowUpResult here.
+        result: Optional["TurnReading"] = None,
     ) -> Optional[dict]:
         """Run the guards. A guard that takes the turn owns the whole response,
         so the side question recorded for this turn is dropped with it — a
@@ -205,7 +206,8 @@ class ConversationGuardsMixin:
         state: State,
         *,
         user_text: str,
-        result: Optional["WorkerResult"] = None,
+        # Any extraction schema — follow_up passes a FollowUpResult here.
+        result: Optional["TurnReading"] = None,
     ) -> Optional[dict]:
         # ── Passive caller type detection ─────────────────────────────
         # Fires at any point in the conversation when caller explicitly
@@ -238,15 +240,13 @@ class ConversationGuardsMixin:
             # phrase in front of abuse or a safety signal changes nothing.
             # Returning None hands the turn to the agent, whose own wait branch
             # owns it — one implementation, not a fourth copy here.
-            # The model's own WAIT label counts as asking for a moment, the
+            # The model's own WAIT intent counts as asking for a moment, the
             # same as the words do. detect_wait_request misses a wait carried
             # with meta-commentary ("hold on, I need to look this up") because
             # the continuation guard fires, which is why several agents honour
             # the label as a fallback — a soft guard reaching the turn first
             # would take it before they could.
-            _said_wait = detect_wait_request(user_text) or (
-                str(getattr(getattr(result, "event_type", None), "value", "") or "").lower() == "wait"
-            )
+            _said_wait = detect_wait_request(user_text) or (result is not None and result.asked_for_time)
             if guard in ("INTERRUPTION", "OFFTOPIC_GLOBAL", "OFFTOPIC_AGENT") and _said_wait:
                 self.logger.info(
                     "%s: %s suppressed — the caller asked for a moment",

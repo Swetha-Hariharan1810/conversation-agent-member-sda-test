@@ -39,9 +39,15 @@ async def extract_claim_adjustment_decision(
     )
     try:
         result: WorkerResult = await llm.with_structured_output(WorkerResult).ainvoke(messages)
-        # Regex fallback + veto layer (request_detection): fills a missed
-        # update_target/request_kind and clears WAIT on correction turns.
-        result = reconcile_worker_result(result, last_user_message)
+        # Reconcile layer (request_detection): fills a missed request intent
+        # from the caller's words, and files spoken values that replace a
+        # confirmed slot as corrections.
+        result = reconcile_worker_result(
+            result,
+            last_user_message,
+            confirmed_slots=confirmed_slots,
+            awaiting_slot=awaiting_slot,
+        )
         return result
     except Exception:
         logger.exception("extract_claim_adjustment_decision: LLM extraction failed")

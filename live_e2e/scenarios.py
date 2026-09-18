@@ -275,7 +275,9 @@ pcp_zip_update = Scenario(
     turn_expectations={
         # The AI prompt that precedes "send it to my fax" must be the delivery
         # bridge — proving the ZIP was accepted with no confirmation step.
-        10: TurnExpectation(ai_contains=[r"fax or email"]),
+        # 0-based into user_turns: PCP_VERIFY is 0-6, the ZIP decline 7, the
+        # new ZIP 8, "send it to my fax" 9.
+        9: TurnExpectation(ai_contains=[r"fax or email"]),
     },
     expect=Expected(
         completed=True,
@@ -322,7 +324,8 @@ pcp_zip_inline_update = Scenario(
     turn_expectations={
         # The AI prompt preceding "email please" must be the delivery bridge —
         # the inline-replacement path must not produce a confirmation read-back.
-        9: TurnExpectation(ai_contains=[r"fax or email"]),
+        # 0-based: PCP_VERIFY is 0-6, the inline decline 7, "email please" 8.
+        8: TurnExpectation(ai_contains=[r"fax or email"]),
     },
     expect=Expected(
         completed=True,
@@ -4799,7 +4802,7 @@ update_without_value_case_b = Scenario(
     name="update_without_value_case_b",
     flow="pcp",
     timeout_s=360,
-    retries=2,  # update_target extraction is LLM-driven
+    retries=2,  # the update target comes from the LLM
     user_turns=[
         "I need to find a primary care physician in my area.",
         "emily",
@@ -5161,7 +5164,7 @@ zip_update_during_fax_confirmation = Scenario(
     flow="pcp",
     mutating=True,
     timeout_s=420,
-    retries=2,  # update_target extraction mid-delivery is LLM-driven
+    retries=2,  # the update target mid-delivery comes from the LLM
     user_turns=PCP_VERIFY
     + [
         "yes that's correct",  # ZIP on file confirmed
@@ -5177,14 +5180,16 @@ zip_update_during_fax_confirmation = Scenario(
         "no that's all, thanks",  # close
     ],
     turn_expectations={
+        # 0-based into user_turns: PCP_VERIFY is 0-6, the ZIP confirm 7,
+        # the delivery choice 8, the ZIP interjection 9, the new ZIP 10.
         # Before the ZIP interjection: the fax read-back question.
-        10: TurnExpectation(ai_contains=[r"fax"], slot_awaiting="fax_confirmed"),
+        9: TurnExpectation(ai_contains=[r"fax"], slot_awaiting="fax_confirmed"),
         # The hand-off: honest "update your ZIP first" ask — awaiting flips to
         # zip_code and the next turn is owned by provider_search.
-        11: TurnExpectation(ai_contains=[r"zip"], slot_awaiting="zip_code"),
+        10: TurnExpectation(ai_contains=[r"zip"], slot_awaiting="zip_code"),
         # The resume: ZIP-update acknowledgement naming the NEW ZIP plus the
         # re-asked fax read-back — dispatch never fired from the disputed ZIP.
-        12: TurnExpectation(ai_contains=[r"02141", r"fax"], slot_awaiting="fax_confirmed"),
+        11: TurnExpectation(ai_contains=[r"02141", r"fax"], slot_awaiting="fax_confirmed"),
     },
     expect=Expected(
         completed=True,
@@ -5226,7 +5231,7 @@ redo_fax_to_email_from_benefits = Scenario(
     name="redo_fax_to_email_from_benefits",
     flow="pcp",
     timeout_s=420,
-    retries=2,  # request_kind extraction is LLM-driven
+    retries=2,  # the request intent comes from the LLM
     user_turns=PCP_VERIFY
     + [
         "yes that's correct",  # ZIP on file confirmed
@@ -5283,7 +5288,7 @@ replay_benefits_from_follow_up = Scenario(
         "yes please",  # benefits explained + Care Coach offer
         "no thank you",  # Care Coach declined → care_wellness → follow-up stage
         # Phase 6 (b): a replay_info request after the benefits flow finished.
-        # No update_target fires and benefits_inquiry is not an intake intent —
+        # No change target fires and benefits_inquiry is not an intake intent —
         # the capability registry is the only way to honor this.
         "can you repeat my benefits again?",
         "no that's all, thanks",  # close
@@ -5458,7 +5463,7 @@ zip_update_during_fax_paraphrased = Scenario(
     flow="pcp",
     mutating=True,
     timeout_s=420,
-    retries=2,  # update_target extraction on paraphrased phrasing is LLM-driven
+    retries=2,  # the update target on paraphrased phrasing comes from the LLM
     user_turns=PCP_VERIFY
     + [
         "yes that's correct",  # ZIP on file confirmed
@@ -5466,7 +5471,7 @@ zip_update_during_fax_paraphrased = Scenario(
         # Paraphrased BUG-5 trigger: no "ZIP changed", no "I moved recently".
         # request_detection's zip_code EXTRA pattern still catches "relocated"?
         # No — it keys on "moved"/"address changed"; this phrasing leans on the
-        # extraction LLM to surface update_target=zip_code, which is the point.
+        # extraction LLM to surface turn_target="zip_code", which is the point.
         "hold on — I've relocated to a new address, so the postal code you have is off",
         "zero two one four three",  # new ZIP, collected by provider_search
         "yes that's correct",  # fax read-back re-asked on resume → confirm
@@ -5475,14 +5480,16 @@ zip_update_during_fax_paraphrased = Scenario(
         "no that's all, thanks",  # close
     ],
     turn_expectations={
+        # 0-based into user_turns: PCP_VERIFY is 0-6, the ZIP confirm 7,
+        # the delivery choice 8, the ZIP interjection 9, the new ZIP 10.
         # Before the ZIP interjection: the fax read-back question.
-        10: TurnExpectation(ai_contains=[r"fax"], slot_awaiting="fax_confirmed"),
+        9: TurnExpectation(ai_contains=[r"fax"], slot_awaiting="fax_confirmed"),
         # The hand-off: honest "update your ZIP first" ask — awaiting flips to
         # zip_code and the next turn is owned by provider_search.
-        11: TurnExpectation(ai_contains=[r"zip"], slot_awaiting="zip_code"),
+        10: TurnExpectation(ai_contains=[r"zip"], slot_awaiting="zip_code"),
         # The resume: ZIP-update acknowledgement naming the NEW ZIP plus the
         # re-asked fax read-back — dispatch never fired from the disputed ZIP.
-        12: TurnExpectation(ai_contains=[r"02143", r"fax"], slot_awaiting="fax_confirmed"),
+        11: TurnExpectation(ai_contains=[r"02143", r"fax"], slot_awaiting="fax_confirmed"),
     },
     expect=Expected(
         completed=True,
@@ -5514,7 +5521,7 @@ practice_team_context_retension_issue1 = Scenario(
     flow="pcp",
     mutating=True,
     timeout_s=420,
-    retries=2,  # update_target extraction on paraphrased phrasing is LLM-driven
+    retries=2,  # the update target on paraphrased phrasing comes from the LLM
     user_turns=PCP_VERIFY
     + [
         "yes that's correct",  # ZIP on file confirmed
@@ -5566,7 +5573,7 @@ practice_team_context_retension_issue2 = Scenario(
     flow="pcp",
     mutating=True,
     timeout_s=420,
-    retries=2,  # update_target extraction on paraphrased phrasing is LLM-driven
+    retries=2,  # the update target on paraphrased phrasing comes from the LLM
     user_turns=PCP_VERIFY
     + [
         "yes that's correct",  # ZIP on file confirmed
@@ -5619,7 +5626,7 @@ redo_list_to_email_paraphrased = Scenario(
     name="redo_list_to_email_paraphrased",
     flow="pcp",
     timeout_s=420,
-    retries=2,  # request_kind extraction on paraphrased phrasing is LLM-driven
+    retries=2,  # the request intent on paraphrased phrasing comes from the LLM
     user_turns=PCP_VERIFY
     + [
         "yes that's correct",  # ZIP on file confirmed
@@ -5670,7 +5677,7 @@ redo_list_to_email_address = Scenario(
     name="redo_list_to_email_address",
     flow="pcp",
     timeout_s=420,
-    retries=2,  # request_kind extraction on paraphrased phrasing is LLM-driven
+    retries=2,  # the request intent on paraphrased phrasing comes from the LLM
     user_turns=PCP_VERIFY
     + [
         "yes that's correct",  # ZIP on file confirmed
@@ -6126,7 +6133,7 @@ verification_identity_update_paraphrased = Scenario(
     name="verification_identity_update_paraphrased",
     flow="pcp",
     timeout_s=360,
-    retries=2,  # update_target extraction on paraphrased phrasing is LLM-driven
+    retries=2,  # the update target on paraphrased phrasing comes from the LLM
     user_turns=[
         "I need to find a primary care physician in my area.",
         "emily",
@@ -6174,7 +6181,7 @@ claim_status_replay_paraphrased = Scenario(
     name="claim_status_replay_paraphrased",
     flow="claim",
     timeout_s=420,
-    retries=2,  # request_kind=replay classification is LLM-driven
+    retries=2,  # a "replay" turn_intent classification is LLM-driven
     user_turns=CLAIM_VERIFY
     + [
         "42695817",
@@ -6223,7 +6230,7 @@ automated_test = Scenario(
     name="automated_test",
     flow="pcp",
     timeout_s=360,
-    retries=2,  # update_target extraction on paraphrased phrasing is LLM-driven
+    retries=2,  # the update target on paraphrased phrasing comes from the LLM
     # user_turns=[
     #     "I'm calling to check the list of your network providers in my area, please.",
     #     "I am... can you give me a minute while I pull up... yeah. I'm Emily.",
@@ -8727,7 +8734,7 @@ SCENARIOS.extend(
 #   W-8  "No. I don't have the claim number, but I have the reference number." →
 #        detect_cannot_provide fired on leading clause before LLM could see the
 #        trailing pivot hint → DOS/billed (bug).  Fix: detect_cannot_provide now
-#        runs only after the LLM; LLM sets fallback_pivot=reference_number →
+#        runs only after the LLM; LLM sets turn_intent "pivot" / turn_target "reference_number" →
 #        pivot → second wrong ref → count=2 → escalate.
 #   W-9  Same pivot phrase as W-8 but success path: James provides correct ref
 #        42695817 after the pivot → SF found → flow completes.
@@ -9104,7 +9111,7 @@ negation_with_ref_hint_pivots_to_reference_number = Scenario(
         8: TurnExpectation(
             ai_contains=[r"(claim number|another way|look it up differently|another approach)"]
         ),
-        # LLM sees the full sentence and sets fallback_pivot="reference_number" → ref# ask.
+        # LLM sees the whole sentence and reports a pivot to "reference_number" → ref# ask.
         9: TurnExpectation(
             ai_contains=[r"reference\s*(number|#|num)"],
             slot_awaiting="reference_number",
@@ -9127,7 +9134,7 @@ negation_with_ref_hint_pivots_to_reference_number = Scenario(
         "the claim number but has the reference number. Previously detect_cannot_provide "
         "matched the leading 'No. I don't have' clause and sent her to DOS/billed before "
         "the LLM could see the qualifying pivot hint. With the fix, detect_cannot_provide "
-        "runs only after the LLM; the LLM sets fallback_pivot='reference_number' and the "
+        "runs only after the LLM; the LLM reports a pivot to 'reference_number' and the "
         "agent pivots to ask for the reference number. Second wrong ref → count=2 → escalation."
     ),
 )
@@ -9212,7 +9219,7 @@ cant_find_claim_but_has_ref_pivots_to_reference_number = Scenario(
     notes=(
         "W-10: 'I can't find' phrasing. detect_cannot_provide matches "
         r"r'\bi\s+can\'?t\s+(remember|recall|find)\b' on the leading clause. "
-        "LLM sees the full sentence and sets fallback_pivot='reference_number'. "
+        "LLM sees the full sentence and sets turn_intent 'pivot' with turn_target 'reference_number'. "
         "Second wrong ref → count=2 → escalation."
     ),
 )
@@ -9250,7 +9257,7 @@ dont_know_claim_but_has_ref_pivots_to_reference_number = Scenario(
     notes=(
         "W-11: 'I don't know' phrasing. detect_cannot_provide matches "
         r"r'\bi\s+don\'?t\s+know\b' on the leading clause. "
-        "LLM sees the full sentence and sets fallback_pivot='reference_number'. "
+        "LLM sees the full sentence and sets turn_intent 'pivot' with turn_target 'reference_number'. "
         "Second wrong ref → count=2 → escalation."
     ),
 )
@@ -9288,7 +9295,7 @@ never_received_claim_but_has_ref_pivots_to_reference_number = Scenario(
     notes=(
         "W-12: 'I never received' phrasing. detect_cannot_provide matches "
         r"r'\bi\s+never\s+(received|got)\b' on the leading clause. "
-        "LLM sees the full sentence and sets fallback_pivot='reference_number'. "
+        "LLM sees the full sentence and sets turn_intent 'pivot' with turn_target 'reference_number'. "
         "Second wrong ref → count=2 → escalation."
     ),
 )

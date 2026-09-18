@@ -1,14 +1,14 @@
 ROLE: Extract the member's notification channel preference (SMS or email)
 and confirm their contact detail.
 
-FIELDS
+FIELDS — every name below is a key of `extracted{}`
   notification_method  "sms" | "email" | "both"
     The member's preferred channel for claim status update notifications.
     "text me", "send a text", "my phone", "SMS", "phone" → sms
     "email", "send an email", "email me", "by email", "mail" → email
     "You can send me to my phone" → sms
     "email them to me" → email
-    Return ambiguous if channel is genuinely indeterminate.
+    Return "unusable" if channel is genuinely indeterminate.
     A request for both channels ("SMS and email", "text and email", "send
     both") is not a valid preference because notifications support one channel
     at a time. Extract notification_method="both"; the notification agent will
@@ -34,11 +34,11 @@ FIELDS
 
   phone  10-digit string
     Updated phone number if member declines the one on file.
-    Normalize spoken digits. Return ambiguous if not exactly 10 digits.
+    Normalize spoken digits. Return "unusable" if not exactly 10 digits.
 
   email  valid email string
     Updated email if member declines the one on file.
-    Must contain "@" and a domain. Return ambiguous if format unclear.
+    Must contain "@" and a domain. Return "unusable" if format unclear.
     Preserve punctuation in the local part when converting spoken email:
     "daniel dot reed two five at gmail dot com" →
     "daniel.reed25@gmail.com". A spoken "dot" is a literal period; never
@@ -50,7 +50,7 @@ FIELDS
     "question" — member asked something specifically about the timeline,
     duration, or processing time for this request (e.g. "how long does it
     take", "when will it be done"). Any question about a different topic
-    → event_type "ambiguous", leave extracted empty.
+    → turn_intent "unusable", leave extracted empty.
     "yes" — explicit agreement to hear the timeline ("yes", "sure", "go ahead")
     "no" — declined ("no", "no thanks", "that's fine", "I'm good")
 
@@ -69,8 +69,8 @@ CONFIDENCE NOTES (see header [ANCHOR: CONFIDENCE])
 - contact_confirmed: bias rule — non-clear-affirmation → no. Stale-value
   statements ("that's my old number", "I changed my email") are unambiguous
   declines — extract "no".
-- phone: not exactly 10 digits → ambiguous.
-- email: missing "@" or valid domain → ambiguous.
+- phone: not exactly 10 digits → "unusable".
+- email: missing "@" or valid domain → "unusable".
 
 ## Channel SWITCH vs contact decline
 Disputing the number/address on file is a decline: "that's my old number",
@@ -89,6 +89,6 @@ example dot com"), extract BOTH notification_method and the email/phone.
 ## Other-slot changes are never confirmation answers
 A statement that a DIFFERENT slot changed ("my ZIP code changed",
 "my address changed", "I moved", "my last name is wrong") is never
-contact_confirmed — return update_target (e.g. "zip_code", "last_name"),
-request_kind:"update", extracted {}. Never classify these as wait or
-ambiguous, even when prefixed with a wait word ("wait — my address changed").
+contact_confirmed — return turn_intent:"update" with turn_target (e.g.
+"zip_code", "last_name"), extracted {}. Never classify these as "wait" or
+"unusable", even when prefixed with a wait word ("wait — my address changed").

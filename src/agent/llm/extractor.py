@@ -1,6 +1,9 @@
 import logging
 import re
 
+from pydantic import BaseModel
+
+from agent.llm.schema import WorkerResult
 from agent.utils import build_history
 
 logger = logging.getLogger(__name__)
@@ -52,6 +55,7 @@ def build_worker_input(
     pending_slots: list[str] | None = None,
     attempt: int = 0,
     recent_messages: list | None = None,
+    result_schema: type[BaseModel] = WorkerResult,
 ) -> list[dict]:
     """
     Build the message list for LLM 1 (extraction model).
@@ -74,14 +78,18 @@ def build_worker_input(
         Omitted entirely when None or empty.
     pending_slots:
         Slot names still to be collected later in this call, in order.
-        Rendered as a "Pending:" context line so the extraction LLM can
-        classify follow-up questions as parkable (followup_disposition
-        "park"). Omitted entirely when None or empty.
+        Rendered as a "Pending:" context line so a follow-up question about a
+        step still ahead can be answered from it. Omitted when None or empty.
     attempt:
         How many collection attempts have been made for awaiting_slot so far.
     recent_messages:
         Recent conversation turns. Each entry is a dict with "role" and
         "content" keys. Up to the last 6 messages are used.
+    result_schema:
+        The structured-output model this input will be extracted into. Only
+        used to decide whether the awaited slot can be bound to an
+        ``extracted`` key — schemas that report their answer in named fields
+        instead (``SsnFallbackResult``) have no such key to bind to.
     """
     # Sanitize caller utterances against prompt-injection before embedding.
     last_user_message = _sanitize_utterance(last_user_message)
@@ -106,6 +114,22 @@ def build_worker_input(
     context_lines = [
         f"Currently asking for: {awaiting_slot}",
     ]
+    # Bind the awaited slot to the field that carries its answer.
+    #
+    # An agent prompt names its slots in a FIELDS section — "intent:
+    # provider_services | claim_services | ...", "same_member: yes | no |
+    # unclear". Nothing in that section says those names are keys of
+    # extracted{}, and the shared RETURN contract describes extracted only in
+    # the abstract. A model that reads a FIELDS name as a sibling of
+    # turn_intent has nowhere to put the answer under extra="forbid", so it
+    # returns extracted {} for a caller who answered plainly, and the agent
+    # reads its own default — "unclear" — off the missing key.
+    #
+    # The binding is derived from the slot the code is already collecting, so
+    # every agent gets it from the one place that always knows the answer, and
+    # no prompt has to remember to say it.
+    if awaiting_slot and "extracted" in result_schema.model_fields:
+        context_lines.append(f'Report the answer to it as extracted["{awaiting_slot}"].')
     if confirmed_slots:
         filled = {k: _sanitize_utterance(v) for k, v in confirmed_slots.items() if isinstance(v, str) and v}
         if filled:

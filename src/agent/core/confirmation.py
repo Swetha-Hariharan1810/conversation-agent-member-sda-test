@@ -37,7 +37,6 @@ import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from agent.llm.schema import EventType, FollowupDisposition
 from agent.utils import detect_wait_request
 
 # Words that say "not this value" on a turn that reads one back. Not a list of
@@ -65,8 +64,8 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
         result is NOT this case — that is a caller whose words the model could
         not place, which on a confirmation question is a decline); here it
         means no result object at all, or the caller said nothing we can see
-      - AMBIGUOUS: "I'm not sure", "I think so?" — they do not know
-      - WAIT: "hold on a second" — they are not answering yet
+      - no usable value: "I'm not sure", "I think so?" — they do not know
+      - asked for time: "hold on a second" — they are not answering yet
       - a side question rides the turn — it gets answered or parked
       - they want to change a DIFFERENT slot — that routes to its owner
 
@@ -79,7 +78,7 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
     if result is None or not (last_user or "").strip():
         return True
 
-    if getattr(result, "event_type", None) in (EventType.AMBIGUOUS, EventType.WAIT):
+    if result.no_usable_value or result.asked_for_time:
         return True
 
     # The same case, read from the caller's words rather than from the label.
@@ -113,7 +112,7 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
     # new one was never reached.
     #
     # owned_slots was already the answer to this and only guarded the
-    # update_target test at the bottom, so the same intent put as a QUESTION
+    # change-target test at the bottom, so the same intent put as a QUESTION
     # rather than an update walked past it. A value extracted for one of these
     # slots is the caller answering the read-back; the side question rides
     # along in pending_side_answer and is answered in front of whatever is
@@ -133,11 +132,11 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
     #     AI      The fax number we have on file is 4155553211. Is this correct?
     #     Caller  Yeah. That's kind of an old fax number. I'll give you a new
     #             number if you can do that.
-    #     →       extracted {}, update_target null,
+    #     →       extracted {}, no change target,
     #             followup_query "I'll give you a new number if you can do that"
     #
     # The caller declined and offered a replacement, and the extractor reported
-    # the whole turn as a side question — no fax_confirmed, no update_target.
+    # the whole turn as a side question — no fax_confirmed, no change target.
     # Both of the outs the prompt gives it were unused, so the checks below saw
     # a bare question and re-read the number the caller had just called old.
     #
@@ -157,7 +156,7 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
     # one). This moved above the follow-up checks with the same reasoning as
     # the value test above — "can you use a different fax?" is a position on
     # the fax, however the extractor labelled the sentence carrying it.
-    target = str(getattr(result, "update_target", "") or "").strip().lower()
+    target = result.change_target.lower()
     if target:
         return target not in owned
 
@@ -167,7 +166,7 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
     #     AI      The fax number we have on file is 4155553211. Is this correct?
     #     Caller  Yeah. That's kind of an old fax number. I'll give you a new
     #             number if you can do that.
-    #     →       extracted {}, update_target null,
+    #     →       extracted {}, no change target,
     #             followup_query "I'll give you a new number if you can do that"
     #
     # The caller declined and offered a replacement, and the extractor reported
@@ -181,12 +180,6 @@ def is_not_an_answer(result: Any, last_user: str, *, owned_slots: Sequence[str] 
     # which way to lean.
     if owned and _CHANGE_INTENT_RE.search(last_user or ""):
         return False
-
-    if getattr(result, "followup_disposition", None) in (
-        FollowupDisposition.ANSWER,
-        FollowupDisposition.PARK,
-    ):
-        return True
 
     return bool(str(getattr(result, "followup_query", "") or "").strip())
 

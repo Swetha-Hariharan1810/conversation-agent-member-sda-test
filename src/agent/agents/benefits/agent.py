@@ -197,9 +197,8 @@ class BenefitsAgent(BaseAgent):
         normalized = normalize_yes_no(raw_response) if raw_response else ""
 
         # ── CROSS-CALL REQUESTS (Phase 6): redo / replay voiced mid-offer ────
-        kind_raw = getattr(result, "request_kind", None) if result else None
-        request_kind = str(getattr(kind_raw, "value", kind_raw) or "").strip().lower()
-        request_target = ((getattr(result, "update_target", None) or "").strip()) if result else ""
+        request_kind = result.change_kind if result else ""
+        request_target = result.change_target if result else ""
         if not normalized and request_kind in ("redo", "replay") and request_target:
             # Replay of our own material stays in-flow — re-explain and
             # re-ask the offer, zero routing.
@@ -246,7 +245,7 @@ class BenefitsAgent(BaseAgent):
         # "please change my email address?" during the Care Coach offer means
         # the caller wants the list re-dispatched to a different/confirmed
         # contact. Route to delivery_management as a redo so it handles the
-        # contact update + re-send. Only when request_kind is "update" (not
+        # contact update + re-send. Only when the request is an "update" (not
         # redo — that is handled above) and the list has already been sent.
         if (
             not normalized

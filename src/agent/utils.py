@@ -11,18 +11,24 @@ from agent.logger import get_logger
 logger = get_logger(__name__)
 
 
+# Maintainer notes inside a prompt file. Markdown hides them from a reader;
+# nothing hid them from the model, which was handed every word of them on every
+# turn. _followup_contract.md opens with thirty-five lines explaining which
+# transcript made its rules necessary — useful to the next person to edit it,
+# and to the extraction model exactly the kind of competing text the rules
+# below it are trying to stand out from.
+_PROMPT_COMMENT_RE = _re.compile(r"<!--.*?-->", _re.DOTALL)
+
+
 @lru_cache(maxsize=32)
 def read_prompt(file_path: str) -> str:
+    """Read a prompt file, minus anything written for a human reader."""
     try:
-        return (
-            importlib.resources.files("agent")
-            .joinpath("prompts", file_path)
-            .read_text(encoding="utf-8")
-            .strip()
-        )
+        raw = importlib.resources.files("agent").joinpath("prompts", file_path).read_text(encoding="utf-8")
     except Exception as e:
         logger.warning("Prompt not found: %s — %s", file_path, e)
         return ""
+    return _PROMPT_COMMENT_RE.sub("", raw).strip()
 
 
 def clean_asr_input(text: str) -> str:
@@ -204,6 +210,41 @@ _FOLLOWUP_CONTRACT = "extraction/_followup_contract.md"
 # value the caller was replacing still on file.
 _CONFIRMATION_CONTRACT = "extraction/_confirmation_contract.md"
 
+# The turn classification and the return shape, composed into every extraction
+# prompt from ONE file.
+#
+# The third of these, and the largest: EVENT_TYPE, WAIT, CROSS-CALL REQUESTS,
+# LOCKED FIELDS, NEEDS FREEFORM RESPONSE, CANNOT PROVIDE, FALLBACK PIVOT and a
+# RETURN block used to be written out per header, in three dialects, for eleven
+# schema fields — six of which restated each other. What the model reports now
+# is one intent and one target, described once. See the file's own header
+# comment for what came out and why.
+_INTENT_CONTRACT = "extraction/_intent_contract.md"
+
+# Three prompts are bound to a different structured-output schema, so the
+# intent contract's return shape is not theirs to fill. They are composed
+# without it.
+#
+# ssn_fallback.md returns SsnFallbackResult; follow_up.md and
+# follow_up_claims.md return FollowUpResult, which classifies a request with no
+# slot being collected around it and so reports its own request_kind.
+# Each already describes its own fields; what they used to get on top was a
+# header RETURN block for a schema they do not use.
+_NON_WORKER_RESULT_PROMPTS: frozenset[str] = frozenset(
+    {
+        "extraction/ssn_fallback.md",
+        "extraction/follow_up.md",
+        "extraction/follow_up_claims.md",
+    }
+)
+
+
+def _intent_contract_for(agent_prompt_file: str) -> str:
+    """The shared turn contract, or nothing for a prompt on another schema."""
+    if agent_prompt_file in _NON_WORKER_RESULT_PROMPTS:
+        return ""
+    return read_prompt(_INTENT_CONTRACT)
+
 
 @lru_cache(maxsize=36)
 def build_extraction_prompt(agent_prompt_file: str) -> str:
@@ -215,17 +256,18 @@ def build_extraction_prompt(agent_prompt_file: str) -> str:
     global_prompt = read_prompt("system/global_extraction.md")
     header = read_prompt("extraction/header.md")
     followup = read_prompt(_FOLLOWUP_CONTRACT)
+    intent = _intent_contract_for(agent_prompt_file)
     confirmation = read_prompt(_CONFIRMATION_CONTRACT)
     agent = read_prompt(agent_prompt_file)
-    parts = (global_prompt, header, followup, confirmation, agent)
-    return "\n\n---\n\n".join(parts) + "\n\n"
+    parts = (global_prompt, header, followup, intent, confirmation, agent)
+    return "\n\n---\n\n".join(p for p in parts if p) + "\n\n"
 
 
 @lru_cache(maxsize=36)
 def build_extraction_prompt_core(agent_prompt_file: str) -> str:
     """
     Minimal extraction prompt for agents that only need guard detection
-    and simple field extraction (no corrections, no spelling handling).
+    and simple field extraction (no spelling handling).
 
     Use for: intake, benefits, care_wellness.
 
@@ -237,18 +279,19 @@ def build_extraction_prompt_core(agent_prompt_file: str) -> str:
     global_prompt = read_prompt("system/global_extraction.md")
     core_header = read_prompt("extraction/header_core.md")
     followup = read_prompt(_FOLLOWUP_CONTRACT)
+    intent = _intent_contract_for(agent_prompt_file)
     confirmation = read_prompt(_CONFIRMATION_CONTRACT)
     agent = read_prompt(agent_prompt_file)
-    parts = (global_prompt, core_header, followup, confirmation, agent)
-    return "\n\n---\n\n".join(parts) + "\n\n"
+    parts = (global_prompt, core_header, followup, intent, confirmation, agent)
+    return "\n\n---\n\n".join(p for p in parts if p) + "\n\n"
 
 
 @lru_cache(maxsize=36)
 def build_extraction_prompt_extraction(agent_prompt_file: str) -> str:
     """
     Mid-tier extraction prompt for agents that collect structured slot
-    values and need the confidence rule and basic event_type, but not
-    the full verification machinery (SPELL_CONFIRM, CORRECTED, LOCKED).
+    values and need the grounding and confidence rules, but not the full
+    verification machinery (SPELL_CONFIRM).
 
     Use for: provider_search, delivery_management, follow_up.
     Input tokens: ~380-500 (vs ~1050-1200 with full header).
@@ -256,10 +299,11 @@ def build_extraction_prompt_extraction(agent_prompt_file: str) -> str:
     global_prompt = read_prompt("system/global_extraction.md")
     extraction_header = read_prompt("extraction/header_extraction.md")
     followup = read_prompt(_FOLLOWUP_CONTRACT)
+    intent = _intent_contract_for(agent_prompt_file)
     confirmation = read_prompt(_CONFIRMATION_CONTRACT)
     agent = read_prompt(agent_prompt_file)
-    parts = (global_prompt, extraction_header, followup, confirmation, agent)
-    return "\n\n---\n\n".join(parts) + "\n\n"
+    parts = (global_prompt, extraction_header, followup, intent, confirmation, agent)
+    return "\n\n---\n\n".join(p for p in parts if p) + "\n\n"
 
 
 @lru_cache(maxsize=36)
@@ -551,7 +595,7 @@ def detect_cannot_provide(text: str | None) -> bool:
 # WAIT detection — "give me a minute", "hold on", "let me grab my card"
 #
 # Regex fallback for the WAIT event in _collect_slot (core/slot_manager.py):
-# fires when the extraction LLM returns event_type "wait" OR mislabels a
+# fires when the extraction LLM reports turn_intent "wait" OR mislabels a
 # wait as ambiguous. Compiled once at import time.
 # ---------------------------------------------------------------------------
 

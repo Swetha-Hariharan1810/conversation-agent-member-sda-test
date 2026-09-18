@@ -88,7 +88,7 @@ _SLOT_LABELS: dict[str, str] = {
 
 # ── Recovery guard labels ────────────────────────────────────────────────────
 # These are Python-internal routing labels passed to generate_recovery_message().
-# They are NOT LLM extraction outputs (see llm/schema.py EventType for those).
+# They are NOT LLM extraction outputs (see llm/schema.py TurnIntent for those).
 #
 # Label            | Produced by              | Meaning
 # -----------------|--------------------------|-----------------------------------
@@ -191,17 +191,21 @@ def needs_freeform_response(
     False → the caller gave a plain non-answer with nothing to acknowledge;
             ``build_retry_prompt`` says the same thing deterministically.
 
-    The decision is driven by ``WorkerResult.needs_freeform_response``, set by
-    the extraction LLM that already read the utterance — no extra call. It is
-    overridden to True whenever there is content the static template cannot
-    carry (a side question, a value to name back, or an utterance that asks for
-    something), and defaults to True when no extraction result was passed, so
-    un-wired call sites keep the old always-generate behaviour.
+    The whole decision is made here, from the turn itself: the guard, the
+    values extracted, the side question, the corrections, the request target,
+    and whether the caller's own words ask for something. It defaults to True
+    when no extraction result was passed, so un-wired call sites keep the old
+    always-generate behaviour.
 
-    The content rule is a safety net under the model's flag, not a replacement
-    for it: the flag is set by a model that can be wrong about its own output,
-    and it was wrong on "Please check my claim status today" — a clear request
-    that got "I didn't catch that" twice.
+    ``WorkerResult`` used to carry a ``needs_freeform_response`` flag for this,
+    set by the extraction LLM. It was the wrong question to ask a perception
+    model: which response path is cheaper is not something it can see, and the
+    eight checks below already decided the answer ahead of it on every turn
+    that had any content at all. What was left was the case they all pass — a
+    contentless turn on a re-ask guard — where the flag could only be wrong.
+    It was, on "Please check my claim status today": a clear request that got
+    "I didn't catch that" twice. The checks are the rule now, not a safety net
+    under one.
     """
     from agent.core.followup_grounding import carries_freeform_content
 
@@ -213,20 +217,16 @@ def needs_freeform_response(
         return True
     if decision is None:
         return True
-    # Safety net: content the caller supplied that a canned re-ask cannot
-    # carry always wins over the model's flag, however it was set.
-    if any(v for v in (getattr(decision, "corrections", None) or {}).values()):
+    # Content the caller supplied that a canned re-ask cannot carry.
+    if any(v for v in (decision.corrections or {}).values()):
         return True
-    if (getattr(decision, "update_target", None) or "").strip():
+    if decision.change_target:
         return True
     if (getattr(decision, "followup_query", None) or "").strip():
         return True
     if carries_freeform_content(user_utterance):
         return True
-    flag = getattr(decision, "needs_freeform_response", None)
-    if flag is None:
-        return True
-    return bool(flag)
+    return False
 
 
 def _tone_hint(attempt: int) -> str:

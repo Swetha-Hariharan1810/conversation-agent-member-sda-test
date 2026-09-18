@@ -50,7 +50,6 @@ from agent.core.agent import BaseAgent
 from agent.core.constants import MAX_WAIT_TURNS
 from agent.core.request_detection import reconcile_worker_result
 from agent.llm.config import get_extraction_llm
-from agent.llm.schema import EventType
 from agent.logger import get_logger
 from agent.responses.static import MSG_WAIT_ACK, MSG_WAIT_NUDGE
 from agent.slots.normalizers import (
@@ -287,7 +286,7 @@ class ClaimAdjustmentAgent(BaseAgent):
                         )
                     return interrupt
 
-                update_target = (getattr(result, "update_target", None) or "").strip()
+                update_target = result.change_target
                 if update_target:
                     if route := self._route_foreign_update(
                         state, update_target, return_awaiting=current_awaiting
@@ -295,7 +294,7 @@ class ClaimAdjustmentAgent(BaseAgent):
                         return route
 
                 # LLM-driven pivot: mid-sentence correction or hesitation to a different identifier
-                _pivot_ref = (getattr(result, "fallback_pivot", None) or "").strip()
+                _pivot_ref = result.pivot_target
                 if _pivot_ref == "claim_number":
                     logger.info("claim_adjustment_agent: LLM pivot → claim_number during ref# collection")
                     _r = self.ask_member(state, pick(MSG_REF_FALLBACK_CLAIM_NUMBER_RETRY))
@@ -317,7 +316,7 @@ class ClaimAdjustmentAgent(BaseAgent):
                 # already said they cannot answer. The pre-LLM check above is a
                 # keyword fast path; this one covers the phrasings it misses
                 # ("that's in my wallet at home", "my husband handles that").
-                if not extracted_raw and getattr(result, "cannot_provide", False):
+                if not extracted_raw and result.cannot_supply:
                     logger.info(
                         "claim_adjustment_agent: reference_number unavailable (extraction) "
                         "— starting claim_number fallback"
@@ -351,10 +350,7 @@ class ClaimAdjustmentAgent(BaseAgent):
                     # same ordering _collect_slot uses and for the same reason.
                     # No slot_fail, no generation call: waiting is not a failed
                     # attempt.
-                    _event = getattr(result, "event_type", None)
-                    _is_wait = str(
-                        getattr(_event, "value", _event) or ""
-                    ) == EventType.WAIT.value or detect_wait_request(last_user)
+                    _is_wait = result.asked_for_time or detect_wait_request(last_user)
                     if _is_wait and not detect_cannot_provide(last_user):
                         wait_count = int(state.get("wait_count") or 0) + 1
                         logger.info(
@@ -638,8 +634,7 @@ class ClaimAdjustmentAgent(BaseAgent):
         # LLM-based WAIT check: detect_wait_request can miss wait phrases that are
         # followed by meta-commentary ("I need to look this up") because the
         # continuation guard fires.  Honor the LLM's own WAIT label as a fallback.
-        _evt_cn = getattr(extraction, "event_type", None) if extraction else None
-        if str(getattr(_evt_cn, "value", _evt_cn) or "").strip().lower() == "wait":
+        if extraction is not None and extraction.asked_for_time:
             logger.info("claim_adjustment_agent: LLM WAIT detected during claim_number fallback")
             wait_result = self.ask_member(state, pick(MSG_WAIT_ACK))
             wait_result["ref_no_fallback_stage"] = "claim_number_ask"
@@ -647,7 +642,7 @@ class ClaimAdjustmentAgent(BaseAgent):
             return None, wait_result
 
         # LLM-driven pivot: handles mid-sentence corrections and hesitations keywords miss
-        _pivot_cn = (getattr(extraction, "fallback_pivot", None) or "").strip()
+        _pivot_cn = extraction.pivot_target if extraction else ""
         if _pivot_cn == "reference_number":
             logger.info("claim_adjustment_agent: LLM pivot → reference_number during claim_number fallback")
             # Do NOT reset ref_lookup_fail here — Phase 2 owns that logic.
@@ -691,7 +686,7 @@ class ClaimAdjustmentAgent(BaseAgent):
         # LLM confirmed there is no qualifying pivot hint in the same utterance.
         # The flag is a superset of the regex — reconcile_worker_result fills it
         # in from detect_cannot_provide when the model misses the denial.
-        if getattr(extraction, "cannot_provide", False):
+        if extraction is not None and extraction.cannot_supply:
             logger.info("claim_adjustment_agent: cannot-provide (post-LLM) → dos_billed fallback")
             result = self.ask_member(state, pick(MSG_REF_FALLBACK_DOS_BILLED_ASK))
             result["ref_no_fallback_stage"] = "dos_billed_ask"
@@ -842,8 +837,7 @@ class ClaimAdjustmentAgent(BaseAgent):
             return None, interrupt
 
         # LLM-based WAIT check (mirrors claim_number fallback above).
-        _evt_db = getattr(extraction, "event_type", None) if extraction else None
-        if str(getattr(_evt_db, "value", _evt_db) or "").strip().lower() == "wait":
+        if extraction is not None and extraction.asked_for_time:
             logger.info("claim_adjustment_agent: LLM WAIT detected during dos_billed fallback")
             wait_result = self.ask_member(state, pick(MSG_WAIT_ACK))
             wait_result["ref_no_fallback_stage"] = "dos_billed_ask"
@@ -851,7 +845,7 @@ class ClaimAdjustmentAgent(BaseAgent):
             return None, wait_result
 
         # LLM-driven pivot: handles mid-sentence corrections and hesitations keywords miss
-        _pivot_db = (getattr(extraction, "fallback_pivot", None) or "").strip()
+        _pivot_db = extraction.pivot_target if extraction else ""
         if _pivot_db == "reference_number":
             logger.info("claim_adjustment_agent: LLM pivot → reference_number during dos_billed fallback")
             # Do NOT reset ref_lookup_fail here — Phase 2 owns that logic.

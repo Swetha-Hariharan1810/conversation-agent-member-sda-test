@@ -139,7 +139,7 @@ class RecordsCoordinationAgent(BaseAgent):
         # A ZIP or identity update voiced mid-records routes to its owner and
         # returns to the exact awaiting slot; in-flow targets (email) fall
         # through to the branches below.
-        update_target = ((getattr(result, "update_target", None) or "").strip()) if result else ""
+        update_target = result.change_target if result else ""
         if update_target:
             if route := self._route_foreign_update(state, update_target, return_awaiting=current_awaiting):
                 return route

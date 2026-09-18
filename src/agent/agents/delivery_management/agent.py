@@ -216,7 +216,7 @@ class DeliveryManagementAgent(BaseAgent):
         # invented. Reconciling afterwards left those corrections invisible to
         # the side-question net on exactly the path this call exists for — the
         # one where llm.py's reconcile did not run.
-        # It also guarantees update_target/request_kind before any branch logic.
+        # It also guarantees the request intent before any branch logic.
         result = reconcile_worker_result(result, last_user)
 
         # Conversation guards
@@ -227,9 +227,8 @@ class DeliveryManagementAgent(BaseAgent):
         # "Actually my ZIP changed" mid-delivery: zip_code is owned by
         # provider_search (route_to_owner) — hand off NOW instead of repeating
         # the fax/email question over the caller's request.
-        update_target = ((getattr(result, "update_target", None) or "").strip()) if result else ""
-        _kind_raw = getattr(result, "request_kind", None) if result else None
-        _request_kind = str(getattr(_kind_raw, "value", _kind_raw) or "").strip().lower()
+        update_target = result.change_target if result else ""
+        _request_kind = result.change_kind if result else ""
         _corrections = (
             {k: v for k, v in ((getattr(result, "corrections", None) or {}).items()) if v} if result else {}
         )
@@ -251,8 +250,8 @@ class DeliveryManagementAgent(BaseAgent):
             ):
                 logger.info(
                     "delivery_management: pre-dispatch contact update request — "
-                    "inferring delivery_method from update_target",
-                    extra={"update_target": update_target},
+                    "inferring delivery_method from the request target",
+                    extra={"target": update_target},
                 )
                 return self._ask_contact_confirmation(state, update_target, fax_on_file, email_on_file)
             # ── LIVE REDO (Phase 6): "send it by email instead" post-dispatch.
@@ -782,7 +781,7 @@ class DeliveryManagementAgent(BaseAgent):
           b. the caller answered a fax question with a valid email value (or
              vice versa) — giving the other channel's contact IS the switch;
              the value is carried through as the new pending contact;
-          c. update_target / detect_request says redo|update on the delivery
+          c. the request intent / detect_request says redo|update on the delivery
              topic ("send it to my email instead", "use the other method") —
              with only two channels, the other one is implied unless the
              caller named ONLY the current channel (that is a same-channel
@@ -824,9 +823,8 @@ class DeliveryManagementAgent(BaseAgent):
         # (c) delivery-topic redo/update with no explicit method. Live replays
         # recap what was sent — they never switch the method or re-send.
         if not new_method:
-            target = ((getattr(result, "update_target", None) or "").strip()) if result else ""
-            kind_raw = getattr(result, "request_kind", None) if result else None
-            request_kind = str(getattr(kind_raw, "value", kind_raw) or "").strip().lower()
+            target = result.change_target if result else ""
+            request_kind = result.change_kind if result else ""
             detected = detect_request(last_user)
             delivery_request = (
                 request_kind != "replay" and canonical_capability_topic("redo", target) == "delivery"

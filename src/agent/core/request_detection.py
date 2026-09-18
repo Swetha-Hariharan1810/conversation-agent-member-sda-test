@@ -1,17 +1,24 @@
 """
-request_detection.py — deterministic fallback + veto layer for cross-call
-request detection (update / redo / replay). Fixes the instability root cause:
-the extraction LLM intermittently drops update_target/request_kind or labels
-a correction turn WAIT, and the whole downstream routing hinges on those
-fields.
+request_detection.py — deterministic fallback layer for cross-call request
+detection (update / redo / replay), and the boundary where an extraction
+result is reconciled with what the pipeline already knows. Fixes the
+instability root cause: the extraction LLM intermittently drops the request
+intent or its target, or labels a correction turn WAIT, and the whole
+downstream routing hinges on it.
 
 The LLM stays PRIMARY. This module never overrides a concrete LLM detection
 with a different target — it only
-  1. fills gaps  — the LLM returned no update_target/request_kind but the
-     caller's words plainly contain one of the covered request shapes; and
-  2. vetoes      — known misclassifications (event_type WAIT on a turn that
-     is actually a correction/update request).
+  1. fills gaps  — the LLM reported no request but the caller's words plainly
+     contain one of the covered request shapes; and
+  2. supplies state — which spoken values are corrections, which the model
+     cannot know and the pipeline can (see _split_corrections).
 When neither the LLM nor the regex detects anything, behavior is unchanged.
+
+The veto half of this module is gone. It existed to repair results whose
+fields contradicted each other — a WAIT label beside an update target, an
+ANSWERED beside a bare request, an ANSWERED_WITH_FOLLOWUP beside no question.
+WorkerResult reports one intent now and derives the rest from it, so those
+states have no representation to repair.
 
 Slot patterns are DERIVED from SLOT_OWNERSHIP, not hand-written: every
 registry key gets "update/change/correct my <label>" and "<label> changed /
@@ -24,16 +31,23 @@ reserved for phrasings that don't name the slot ("I moved" → zip_code,
 Precedence: update beats redo beats replay; a concrete slot target beats a
 capability topic (updates are checked first and target canonical slot names).
 
-Dependency-light on purpose: stdlib re / dataclasses / logging plus the
-dependency-free slot_ownership registry. NEVER import from agents/ or
-agent.utils — the few cannot-provide negatives needed to stay out of
-detect_cannot_provide's territory are duplicated below.
+Dependency-light on purpose: stdlib re / dataclasses / logging, the
+dependency-free slot_ownership registry, and llm.schema, which is a leaf.
+NEVER import from agents/ — the few cannot-provide negatives needed to stay out
+of detect_cannot_provide's territory are duplicated below.
+
+This module speaks to a WorkerResult through the methods it offers —
+adopt_request, report_cannot_supply, split_corrections — rather than assigning
+fields. Each one carries the precedence that decides whether a detection is
+allowed to land at all, so the rule lives with the data instead of being
+restated at every call site here.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,6 +57,7 @@ from agent.core.followup_grounding import (
     recover_side_question,
 )
 from agent.core.slot_ownership import SLOT_OWNERSHIP
+from agent.llm.schema import TurnIntent
 from agent.utils import detect_cannot_provide
 
 logger = logging.getLogger(__name__)
@@ -247,46 +262,32 @@ def detect_request(text: str | None) -> DetectedRequest | None:
 # ── WorkerResult reconciliation (fallback + veto, called after extraction) ────
 
 
-def _coerce_like(sample: Any, value: str) -> Any:
-    """Coerce ``value`` into ``sample``'s enum class when sample is an enum
-    member (duck-typed via .value so this module never imports the schema)."""
-    if sample is not None and hasattr(sample, "value"):
-        try:
-            return type(sample)(value)
-        except ValueError:
-            pass
-    return value
-
-
 # Schema field names the extractor sometimes writes INTO extracted{} instead of
 # alongside it — seen in production as
 #     "extracted": {"care_coach_response": "yes",
-#                   "update_target": "ID card", "request_kind": "update"}
+#                   "turn_target": "ID card", "turn_intent": "update"}
 # extracted{} is slot name → caller value, and every consumer treats it that
 # way: note_side_question joins its values into the "Extracted this turn:" line
 # the generation LLM reads back ("yes, ID card, update"), and the slot
 # pipelines index it by slot name. A schema key in there is never a slot, so it
 # is dropped rather than spoken.
+#
+# These are the six names the model is given; no prompt mentions any other, so
+# there is no other name for it to leak.
 _RESERVED_RESULT_KEYS = frozenset(
     {
-        "event_type",
+        "extracted",
+        "turn_intent",
+        "turn_target",
         "guard",
         "guard_confidence",
-        "followup_disposition",
         "followup_query",
-        "update_target",
-        "request_kind",
-        "cannot_provide",
-        "fallback_pivot",
-        "needs_freeform_response",
-        "extracted",
-        "corrections",
     }
 )
 
 
 def _strip_reserved_keys(result: Any) -> Any:
-    """Remove schema field names the model wrote into extracted{}/corrections{}."""
+    """Remove schema field names the model wrote into extracted{}."""
     for field in ("extracted", "corrections"):
         values = getattr(result, field, None)
         if not isinstance(values, dict):
@@ -294,10 +295,7 @@ def _strip_reserved_keys(result: Any) -> Any:
         leaked = [k for k in values if k in _RESERVED_RESULT_KEYS]
         if not leaked:
             continue
-        try:
-            setattr(result, field, {k: v for k, v in values.items() if k not in _RESERVED_RESULT_KEYS})
-        except (AttributeError, ValueError):  # non-WorkerResult shim in tests
-            continue
+        setattr(result, field, {k: v for k, v in values.items() if k not in _RESERVED_RESULT_KEYS})
         logger.info(
             "request_detection: dropped schema keys from %s",
             field,
@@ -314,12 +312,11 @@ def _recover_missed_followup(result: Any, last_user: str | None) -> Any:
 
         Caller  No. But I lost my credit ID card. Can you help me with the
                 new one?                        (awaiting benefits_response)
-        →       event_type "answered", followup_query null
+        →       followup_query null
 
         Caller  That sounds interesting, but I lost my ID card. Can you help
                 me to get a new one?            (awaiting care_coach_response)
-        →       event_type "answered_with_followup",
-                followup_query "can you help me to get a new one"
+        →       followup_query "can you help me to get a new one"
 
     The same request, two turns apart, classified both ways. Not model
     variance: those slots run different prompt stacks. benefits_response is
@@ -340,15 +337,18 @@ def _recover_missed_followup(result: Any, last_user: str | None) -> Any:
     extractor found a value — so there is an answer half — and reported no
     question. recover_side_question is far stricter than the veto's cue test,
     because a false positive here puts words in the caller's mouth.
+
+    Setting the question is the whole edit: an ANSWERED turn that carries a
+    value and a question derives ANSWERED_WITH_FOLLOWUP by itself.
     """
     reported = (getattr(result, "followup_query", None) or "").strip()
-    if not any(v for v in (getattr(result, "extracted", None) or {}).values()):
+    if not result.has_extracted_value:
         return result
-    event_raw = getattr(result, "event_type", None)
-    event = str(getattr(event_raw, "value", event_raw) or "").strip().lower()
-    if event not in ("answered", "answered_with_followup"):
+    # Only the clean "answer, then ask" shape: a turn already classified as a
+    # request, a pivot or a denial is not one the caller merely asked alongside.
+    if result.turn_intent is not TurnIntent.ANSWERED:
         return result
-    recovered = recover_side_question(last_user, getattr(result, "extracted", None))
+    recovered = recover_side_question(last_user, result.extracted)
     if not recovered:
         return result
     # The LLM stays primary: a question it reported that is about what the
@@ -360,12 +360,7 @@ def _recover_missed_followup(result: Any, last_user: str | None) -> Any:
     # "No. But I lost my credit ID card. Can you help me with the new one?").
     if reported and quotes_the_caller(reported, last_user):
         return result
-    try:
-        result.followup_query = recovered
-        result.followup_disposition = _coerce_like(getattr(result, "followup_disposition", None), "answer")
-        result.event_type = _coerce_like(event_raw, "answered_with_followup")
-    except (AttributeError, ValueError):  # non-WorkerResult shim in tests
-        return result
+    result.followup_query = recovered
     logger.info(
         "request_detection: grounding_fallback %s followup_query",
         "replaced" if reported else "recovered",
@@ -376,16 +371,6 @@ def _recover_missed_followup(result: Any, last_user: str | None) -> Any:
             "final_value": recovered,
         },
     )
-    if event != "answered_with_followup":
-        logger.info(
-            "request_detection: grounding_fallback changed event_type",
-            extra={
-                "source": "grounding_fallback",
-                "field": "event_type",
-                "llm_value": event,
-                "final_value": "answered_with_followup",
-            },
-        )
     return result
 
 
@@ -403,23 +388,16 @@ def _reconcile_followup_query(result: Any, last_user: str | None) -> Any:
     extraction headers already forbid synthesizing a followup_query from topics
     the AI raised, in capitals, and the field keeps coming back with one.
 
-    Only the question is cleared. corrections{} and update_target are the
-    caller's own request shapes and are reconciled below on their own evidence;
-    an ANSWERED_WITH_FOLLOWUP that still carries one of those keeps its event
-    type, because the update machinery (Case A / Case B) is what handles it.
-    With the question gone and nothing else to follow up on, the event is a
-    plain answer and must take the clean confirm path — the same downgrade
-    _collect_slot already made locally for an empty follow-up, applied once
-    here so intake, records coordination and verification get it too.
+    Only the question is cleared. corrections{} and the request intent are the
+    caller's own request shapes, reconciled below on their own evidence, and
+    the pipelines read them directly — so clearing a phantom question cannot
+    take an honest update down with it, and there is no turn label left to
+    repair afterwards either.
     """
     query = (getattr(result, "followup_query", None) or "").strip()
     if not query or is_grounded_followup(query, last_user):
         return result
-    try:
-        result.followup_query = None
-        result.followup_disposition = _coerce_like(getattr(result, "followup_disposition", None), "none")
-    except (AttributeError, ValueError):  # non-WorkerResult shim in tests
-        return result
+    result.followup_query = None
     logger.info(
         "request_detection: grounding_veto cleared followup_query",
         extra={
@@ -429,85 +407,119 @@ def _reconcile_followup_query(result: Any, last_user: str | None) -> Any:
             "final_value": "",
         },
     )
-    event_raw = getattr(result, "event_type", None)
-    event = str(getattr(event_raw, "value", event_raw) or "").strip().lower()
-    has_corrections = any((getattr(result, "corrections", None) or {}).values())
-    has_target = bool((getattr(result, "update_target", None) or "").strip())
-    if event == "answered_with_followup" and not has_corrections and not has_target:
-        result.event_type = _coerce_like(event_raw, "answered")
+    return result
+
+
+# Slots a caller can never correct by saying a different value: system flags
+# and the classified call intent. handlers.CALLER_LOCKED_SLOTS is the full
+# list and drops them again downstream; these two are duplicated here because
+# this module must not import from agents/ (see the module docstring), and
+# because keeping them out of corrections{} in the first place is what stops a
+# locked slot reaching an acknowledgement path at all.
+_NEVER_CORRECTED: frozenset[str] = frozenset({"member_status_verify", "call_intent"})
+
+
+def _split_corrections(result: Any, confirmed_slots: Mapping[str, Any] | None, awaiting_slot: str) -> Any:
+    """File spoken values that replace a confirmed slot as corrections.
+
+    This is the half of the extraction contract that was never the model's to
+    answer. The headers asked it for corrections{} separately from extracted{},
+    gave it three worked examples and a rule that the keys "MUST be a slot
+    listed in Confirmed:" — a fact about the pipeline's state, handed to the
+    model as a context line so it could hand the same fact back. It reads that
+    line correctly most turns and not all of them, and a missed correction is
+    an accepted value silently overwritten.
+
+    The pipeline has the Confirmed: view already. Asking it instead costs
+    nothing and cannot disagree with itself.
+    """
+    if confirmed_slots is None or not hasattr(result, "split_corrections"):
+        return result
+    before = dict(getattr(result, "extracted", None) or {})
+    result.split_corrections(confirmed_slots, awaiting_slot, locked_slots=_NEVER_CORRECTED)
+    moved = [k for k in before if k not in (getattr(result, "extracted", None) or {})]
+    if moved:
         logger.info(
-            "request_detection: grounding_veto changed event_type",
+            "request_detection: state_split moved values into corrections",
             extra={
-                "source": "grounding_veto",
-                "field": "event_type",
-                "llm_value": event,
-                "final_value": "answered",
+                "source": "state_split",
+                "field": "corrections",
+                "final_value": ", ".join(moved),
+                "awaiting_slot": awaiting_slot,
             },
         )
     return result
 
 
 def _reconcile_cannot_provide(result: Any, last_user: str | None) -> Any:
-    """Regex backstop for the LLM's cannot_provide flag.
+    """Regex backstop for a denial the extraction model did not report.
 
     The model is the primary source — it reads phrasings no pattern list will
-    ever cover. This only fills in a miss, and never clears a True the model
-    set, so an extraction failure (which returns an empty WorkerResult) still
-    routes a "I don't have it" to the fallback offer rather than an escalation.
-    A pivot outranks a denial: when the caller named the identifier they do
-    have, leave the flag alone so the pivot path runs.
+    ever cover. This only fills in a miss, so an extraction failure (which
+    returns an empty WorkerResult) still routes an "I don't have it" to the
+    fallback offer rather than an escalation.
+
+    The precedence the headers used to spell out — a pivot outranks a denial, a
+    value outranks both — lives in report_cannot_supply, which declines on a
+    result that already reports a value, a pivot or a request of its own.
     """
-    if getattr(result, "cannot_provide", False):
-        return result
-    if (getattr(result, "fallback_pivot", None) or "").strip():
-        return result
-    if any(v for v in (getattr(result, "extracted", None) or {}).values()):
-        return result  # they answered — a denial clause is context, not a denial
     if not detect_cannot_provide(last_user):
         return result
-    try:
-        result.cannot_provide = True
-    except (AttributeError, ValueError):  # non-WorkerResult shim in tests
+    if not result.report_cannot_supply():
         return result
     logger.info(
-        "request_detection: regex_fallback set cannot_provide",
-        extra={"source": "regex_fallback", "field": "cannot_provide", "final_value": "True"},
+        "request_detection: regex_fallback reported a denial the model missed",
+        extra={"source": "regex_fallback", "field": "turn_intent", "final_value": "cannot_provide"},
     )
     return result
 
 
-def reconcile_worker_result(result: Any, last_user: str | None) -> Any:
+def reconcile_worker_result(
+    result: Any,
+    last_user: str | None,
+    *,
+    confirmed_slots: Mapping[str, Any] | None = None,
+    awaiting_slot: str = "",
+) -> Any:
     """Fallback + veto pass over an extraction result (WorkerResult-shaped).
 
-    - LLM produced update_target/request_kind → kept as-is; the regex never
-      overrides a concrete LLM detection with a different target.
-    - LLM produced neither but detect_request fires → populate both fields.
-    - LLM returned event_type WAIT but detect_request fires → clear WAIT:
-      "wait, actually my ZIP changed" is a correction, not a hold request.
-      With an extracted value in the same turn the event downgrades to
-      ANSWERED_WITH_FOLLOWUP (value wins, request handled as Case B);
-      otherwise to CORRECTED (bare request, C2).
-    - LLM returned event_type ANSWERED on a bare request (update_target set,
-      no extracted values, no corrections) → upgrade to CORRECTED: the
-      extraction contract classifies bare cross-call requests as corrected,
-      and only the CORRECTED path (C2) can honor a target with no value.
+    ``confirmed_slots`` is the same Confirmed: view the extraction prompt was
+    built from, and ``awaiting_slot`` the slot it was asked about. Together
+    they are what splits the values the caller spoke into new ones and
+    corrections — the judgement the model used to make from a context line, now
+    made from the state itself. Omit them and the split is skipped, which is
+    what the idempotent re-runs several agents do rely on.
+
+    - LLM reported a request intent (update / redo / replay) → kept as-is; the
+      regex never overrides a concrete LLM detection with a different target.
+    - LLM reported none but detect_request fires → adopt the detected kind and
+      target, which is the whole edit. A turn the model labelled WAIT becomes
+      the update it is ("wait, actually my ZIP changed" is a correction, not a
+      hold request), and a value extracted in the same turn still wins, because
+      the pipelines ask about the value and the request separately.
+    - the LLM reported a pivot or a denial → the regex stays out of it. Those
+      are readings of the slot being collected, made on the caller's words; a
+      pattern match about some other slot does not outrank one.
     - followup_query names a side question with no trace of a question or a
-      request in the caller's words → clear it, and downgrade an
-      ANSWERED_WITH_FOLLOWUP that carried nothing else to ANSWERED. See
-      _reconcile_followup_query and core.followup_grounding.
+      request in the caller's words → clear it. See _reconcile_followup_query
+      and core.followup_grounding.
     - the caller plainly answered AND then asked, and followup_query came back
-      null → recover the question from their own words and mark the event
-      ANSWERED_WITH_FOLLOWUP. See _recover_missed_followup.
-    - extracted{} or corrections{} carry a schema field name as a key
-      ("update_target": "ID card") → drop it; those dicts are slot → value and
-      every consumer reads them that way. See _strip_reserved_keys.
-    - detect_cannot_provide fires but the LLM left cannot_provide false →
-      set it. The flag is semantic and the model is the primary source; this
-      is the backstop for a missed call or an extraction that threw, so a
-      caller who cannot supply a slot still reaches the fallback offer.
+      null → recover the question from their own words. See
+      _recover_missed_followup.
+    - extracted{} carries a schema field name as a key ("turn_target": "ID
+      card") → drop it; that dict is slot → value and every consumer reads it
+      that way. See _strip_reserved_keys.
+    - detect_cannot_provide fires but the LLM reported no denial → report one.
+      The call is semantic and the model is the primary source; this is the
+      backstop for a missed call or an extraction that threw, so a caller who
+      cannot supply a slot still reaches the fallback offer.
+    - values the caller spoke for slots already confirmed → moved into
+      corrections{}, when confirmed_slots was supplied. See
+      WorkerResult.split_corrections.
     - Neither detects → result returned untouched.
     """
     result = _strip_reserved_keys(result)
+    result = _split_corrections(result, confirmed_slots, awaiting_slot)
     result = _reconcile_cannot_provide(result, last_user)
     result = _reconcile_followup_query(result, last_user)
     result = _recover_missed_followup(result, last_user)
@@ -516,32 +528,9 @@ def reconcile_worker_result(result: Any, last_user: str | None) -> Any:
     if detected is None:
         return result
 
-    llm_target = (getattr(result, "update_target", None) or "").strip()
-    kind_raw = getattr(result, "request_kind", None)
-    llm_kind = str(getattr(kind_raw, "value", kind_raw) or "").strip().lower()
-    if llm_kind == "none":
-        llm_kind = ""
-
-    # Decision provenance: every field this pass changes is logged with the
-    # LLM's original value and the final value, so production variance
-    # (how often the regex layer has to intervene) is directly measurable.
-    def _log_change(source: str, field: str, llm_value: str, final_value: str) -> None:
-        logger.info(
-            "request_detection: %s changed %s",
-            source,
-            field,
-            extra={
-                "source": source,
-                "field": field,
-                "llm_value": llm_value,
-                "final_value": final_value,
-                "matched": detected.matched,
-            },
-        )
-
-    # Each field is filled on its own. This used to require BOTH to be missing,
-    # which left a half-filled result half-filled — and every downstream branch
-    # that needs the pair then behaved as though no request had been made:
+    # Each of the two facts the detector found — the kind and the target — used
+    # to be filled on its own, because they were two fields and could arrive
+    # half-set:
     #
     #     AI      …Would you like us to send you details about our Care
     #             Coach Guides?
@@ -550,47 +539,50 @@ def reconcile_worker_result(result: Any, last_user: str | None) -> Any:
     #             and wellness coach. Would you like me to…
     #
     # detect_request reads that utterance as update/email without difficulty.
-    # The extractor returned update_target "email" and left request_kind "none",
-    # so the gap-filler declined to fill either — and benefits_agent's block for
-    # exactly this case ("please change my email address?" during the Care Coach
-    # offer, route to delivery as a redo) tests request_kind == "update" and
-    # never fired. The request was dropped and the offer re-asked.
+    # The extractor returned update_target "email" and left request_kind
+    # "none", the gap-filler declined to fill either, and benefits_agent's
+    # block for exactly this case tested request_kind == "update" and never
+    # fired. The request was dropped and the offer re-asked.
     #
-    # Filling one field is still "fills gaps", never overriding a concrete
-    # detection: a target the LLM named is kept even when the regex found a
-    # different one, and only the empty side is written.
-    if not llm_target:
-        result.update_target = detected.target
-        _log_change("regex_fallback", "update_target", llm_target, detected.target)
-    if not llm_kind:
-        result.request_kind = _coerce_like(kind_raw, detected.kind)
-        _log_change("regex_fallback", "request_kind", "none", detected.kind)
+    # One intent carries both now, so there is no half to fill: adopt_request
+    # takes the pair or leaves the result alone, and it declines whenever the
+    # model already reported a request of its own, a pivot, or a denial.
+    reported_kind, reported_target = result.change_kind, result.change_target
 
+    def _log_adopted(source: str) -> None:
+        logger.info(
+            "request_detection: %s adopted a %s request",
+            source,
+            detected.kind,
+            extra={
+                "source": source,
+                "field": "turn_intent/turn_target",
+                "llm_value": f"{reported_kind or 'none'}:{reported_target or 'none'}",
+                "final_value": f"{detected.kind}:{detected.target}",
+                "matched": detected.matched,
+            },
+        )
+
+    if not reported_target:
+        if result.adopt_request(detected.kind, detected.target):
+            _log_adopted("regex_fallback")
     # Redo-over-contact-field veto: "send that list to my email instead of fax"
-    # fires redo patterns but the LLM often sets update_target to a contact field
-    # (email/fax) because it sees that word in the text. When the regex detects
-    # redo and the LLM's target is a raw contact field rather than a capability
-    # topic, the redo detection is authoritative.
-    elif detected.kind == "redo" and llm_target in ("email", "fax", "phone_number") and llm_kind != "redo":
-        result.update_target = detected.target
-        result.request_kind = _coerce_like(kind_raw, detected.kind)
-        _log_change("regex_redo_veto", "update_target", llm_target, detected.target)
-        _log_change("regex_redo_veto", "request_kind", llm_kind or "none", detected.kind)
+    # fires redo patterns but the model often reports the target as a contact
+    # field (email/fax) because it sees that word in the text. When the regex
+    # detects redo and the reported target is a raw contact field rather than a
+    # capability topic, the redo detection is authoritative.
+    elif (
+        detected.kind == "redo"
+        and reported_target in ("email", "fax", "phone_number")
+        and reported_kind != "redo"
+    ):
+        if result.adopt_request(detected.kind, detected.target):
+            _log_adopted("regex_redo_veto")
 
-    event_raw = getattr(result, "event_type", None)
-    event = str(getattr(event_raw, "value", event_raw) or "").strip().lower()
-    has_value = any(v for v in (getattr(result, "extracted", None) or {}).values())
-    if event == "wait":
-        # A correction turn, not a hold request.
-        new_event = "answered_with_followup" if has_value else "corrected"
-        result.event_type = _coerce_like(event_raw, new_event)
-        _log_change("regex_veto", "event_type", "wait", new_event)
-    elif event == "answered" and not has_value:
-        has_corrections = any((getattr(result, "corrections", None) or {}).values())
-        target_now = (getattr(result, "update_target", None) or "").strip()
-        if target_now and not has_corrections:
-            # Bare request labeled ANSWERED — only CORRECTED (C2) honors it.
-            result.event_type = _coerce_like(event_raw, "corrected")
-            _log_change("regex_veto", "event_type", "answered", "corrected")
-
+    # The two event vetoes that used to close this function — WAIT on a turn
+    # that is really a correction, ANSWERED on a bare request that only the
+    # correction path could honor — were both repairs to a label that could
+    # disagree with the fields beside it. There is no label any more: the
+    # intent adopted above is the whole classification, so both repairs
+    # happened the moment it changed.
     return result

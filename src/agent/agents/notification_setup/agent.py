@@ -194,7 +194,7 @@ class NotificationSetupAgent(BaseAgent):
         # "wait — my address changed" mid-notification: zip_code routes to its
         # owner; identity slots route to verification (cleared for
         # re-collection). In-flow targets fall through to the branches below.
-        update_target = ((getattr(result, "update_target", None) or "").strip()) if result else ""
+        update_target = result.change_target if result else ""
         if update_target:
             if route := self._route_foreign_update(state, update_target, return_awaiting=current_awaiting):
                 return route

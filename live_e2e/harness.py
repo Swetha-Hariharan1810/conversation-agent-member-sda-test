@@ -269,9 +269,21 @@ async def _drive(scenario: Scenario, recorder: RunRecorder) -> dict:
 
             expectation = scenario.turn_expectations.get(turn_idx)
             if expectation:
+                # turn_expectations is keyed 0-based into user_turns, and the
+                # expectation is about the AI prompt asked BEFORE that turn. An
+                # index written one off lands on the next scripted utterance and
+                # reports the AI's reply instead of its question, which reads as
+                # an agent regression. Name the turn the index resolves to so
+                # the failure says which of the two it is.
+                _scripted = (
+                    repr(scenario.user_turns[turn_idx])
+                    if turn_idx < len(scenario.user_turns)
+                    else "<past the end of the script>"
+                )
+                _where = f"Turn {turn_idx} (the AI prompt before user turn {turn_idx}, {_scripted})"
                 if expectation.ai_contains and not any(_matches(p, ai_msg) for p in expectation.ai_contains):
                     raise ScenarioFailure(
-                        f"Turn {turn_idx}: AI prompt matched none of "
+                        f"{_where}: AI prompt matched none of "
                         f"{expectation.ai_contains!r}.\nAI said: {ai_msg!r}\n"
                         f"Transcript:\n{recorder.dump()}"
                     )
@@ -279,7 +291,7 @@ async def _drive(scenario: Scenario, recorder: RunRecorder) -> dict:
                     state.get("awaiting_slot") != expectation.slot_awaiting
                 ):
                     raise ScenarioFailure(
-                        f"Turn {turn_idx}: awaiting_slot="
+                        f"{_where}: awaiting_slot="
                         f"{state.get('awaiting_slot')!r}, expected "
                         f"{expectation.slot_awaiting!r}.\nTranscript:\n{recorder.dump()}"
                     )

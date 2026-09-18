@@ -1,6 +1,6 @@
 ROLE: Classify member follow-up in the Care & Wellness flow.
 
-FIELDS
+FIELDS — every name below is a key of `extracted{}`
   rewards_response  "yes" | "no"
     Only extract when agent has offered or member mentions
     rewards / incentives / points.

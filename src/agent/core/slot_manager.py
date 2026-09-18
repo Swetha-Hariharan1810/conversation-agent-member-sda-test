@@ -240,22 +240,18 @@ def _mk_session_ctx(
     return ctx
 
 
-# WorkerResult.followup_disposition → generation-LLM guard label.
-# Missing/none defaults to FOLLOWUP_RESPOND — the generation LLM self-triages
-# (answers from Confirmed: or Coming up: if it can, gracefully declines if it
-# cannot).
+# How a side question is handled → the generation-LLM guard that writes the
+# sentence. Anything unlisted, "none" included, is FOLLOWUP_RESPOND: the
+# generation LLM self-triages, answering from Confirmed: or Coming up: when it
+# can and gracefully declining when it cannot.
 #
-# "park" is no longer a disposition the extraction prompts teach: a side
-# QUESTION is handled in the turn it is asked. The mapping stays because
-# _handle_answered_followup sets the value itself for an update aimed at a
-# slot another flow owns in_flow — the one thing parking is still for — and
-# because old cached extraction results still carry it. A "park" with no such
-# update_target is downgraded to FOLLOWUP_RESPOND where the guard is chosen.
+# The extraction model used to report this, on a field the headers told it to
+# leave "none" every single turn. It is Python's alone now, and only
+# _handle_answered_followup chooses anything but the default: "park" for an
+# update aimed at a slot another flow owns in_flow, which is the one thing
+# parking is still for, and "decline" for a human-only target.
 _DISPOSITION_GUARDS: dict[str, str] = {
-    "answer": "FOLLOWUP_RESPOND",
     "park": "FOLLOWUP_PARK",
-    # Legacy aliases — kept so old cached extraction results still route correctly
-    "answer_now": "FOLLOWUP_RESPOND",
     "decline": "FOLLOWUP_RESPOND",
 }
 
@@ -338,10 +334,29 @@ class SlotManagerMixin:
         return self.get_slot(name).is_exhausted()
 
     def slots_dict(self) -> dict:
-        """Serialize slot state for LangGraph persistence."""
+        """Serialize slot state for LangGraph persistence.
+
+        A record that carries nothing is left out. ``get_slot`` creates the
+        SlotAttempt on first access, so merely READING one — the attempt count
+        to hand an extractor, say — materialises a record no attempt ever
+        wrote, and ``reset()`` returns a record to that same empty state.
+        Persisted, those show up as a slot the call never collected, sitting
+        beside the state key that says it did:
+
+            slot_attempts["name_confirmed"] = {attempt_count: 0,
+                                               confirmed: False,
+                                               last_value: None}
+            name_confirmed = True
+
+        The two do not disagree — one of them is not a record of anything.
+        Restoring an absent key builds exactly that record again (see
+        ``_restore_slot``, and ``reset`` above it), so dropping it is lossless,
+        and what survives in slot_attempts is only what the call did.
+        """
         return {
             k: {"attempt_count": v.attempt_count, "confirmed": v.confirmed, "last_value": v.last_value}
             for k, v in self._slots.items()
+            if v.attempt_count or v.confirmed or v.last_value is not None
         }
 
     @staticmethod
@@ -479,8 +494,9 @@ class SlotManagerMixin:
         # A plain non-answer with nothing to acknowledge does not need the
         # generation LLM: build_retry_prompt re-asks the same slot, always,
         # with zero latency and zero chance of drifting onto another slot.
-        # The extraction LLM already flagged whether this turn needs freeform
-        # prose (WorkerResult.needs_freeform_response) — no extra call.
+        # needs_freeform_response decides from this turn's own content — the
+        # guard, the values, the side question, the request target and the
+        # caller's words — with no extra call.
         # has_static_retry keeps slots with no purpose-written template on the
         # LLM path rather than reading out their field name at the caller.
         if (
@@ -926,8 +942,7 @@ class SlotManagerMixin:
         the numeric slots, but ordering is the guarantee.
         """
         last_user = _last_user_msg(list(state.get("messages") or []))
-        event = getattr(decision, "event_type", None)
-        is_wait = str(getattr(event, "value", event) or "") == "wait" or detect_wait_request(last_user)
+        is_wait = (decision is not None and decision.asked_for_time) or detect_wait_request(last_user)
         if not is_wait or detect_cannot_provide(last_user):
             return None
         wait_count = int(state.get("wait_count") or 0) + 1
@@ -1076,6 +1091,12 @@ class SlotManagerMixin:
             {
                 "query": query,
                 "value": ", ".join(str(v) for v in extracted.values() if v),
+                # What the same turn asked to change, when it asked for
+                # anything. The question and the request come out of one
+                # utterance and are usually the same act — "can I change my
+                # ZIP?" is both — so the net needs the target to tell whether
+                # the turn already granted what it is about to answer.
+                "target": result.change_target if result else "",
             }
             if query
             else {}
@@ -1084,11 +1105,15 @@ class SlotManagerMixin:
     def consume_side_question(self) -> dict:
         """Take the recorded question, marking it answered.
 
-        A handler that addresses the question itself calls this so the safety
+        A handler that addresses the question in PROSE calls this so the safety
         net in BaseAgent.execute does not answer it a second time. Every path
-        that already addressed one goes through _generate_slot_retry_response
-        with a followup_query, which consumes there — no handler has to
-        remember to.
+        that speaks about one goes through _generate_slot_retry_response with a
+        followup_query, which consumes there — no handler has to remember to.
+
+        A handler that ACTS on the request instead of talking about it does not
+        pass through there, and used not to be covered at all. It is now, and
+        still without remembering anything: see ``honors_request``, which reads
+        the evidence out of the update dict the handler returned.
         """
         pending = getattr(self, "_side_question", {}) or {}
         self._side_question = {}
@@ -1116,8 +1141,7 @@ class SlotManagerMixin:
         _handle_answered_followup. Every slot collected by a hand-written
         handler instead of the slot pipeline reimplemented only the "answer"
         half of answer-plus-question: it read extracted[slot], branched on the
-        value and returned, so event_type and followup_query were dropped on
-        the floor.
+        value and returned, so the side question was dropped on the floor.
 
             AI      …would you like the benefits for office visits?
             Caller  No. But I lost my ID card. Can you help me with a new one?
@@ -1217,6 +1241,74 @@ class SlotManagerMixin:
             "content": cls.join_side_answer(answer, str(message.get("content") or "")),
         }
         return result
+
+    @staticmethod
+    def _same_slot_subject(a: str, b: str) -> bool:
+        """Do two slot names name the same thing to the caller?
+
+        ``fax`` and ``fax_confirmed`` are one subject with two pipeline names,
+        and so are ``delivery`` and ``delivery_method``. Comparison is on the
+        names themselves, never on the words of a sentence — a caller who asked
+        about their fax and a turn now collecting ``benefits_response`` share no
+        subject however similarly the two sentences happen to read.
+        """
+        a, b = (a or "").strip().lower(), (b or "").strip().lower()
+        if not a or not b:
+            return False
+        return a == b or a.startswith(f"{b}_") or b.startswith(f"{a}_")
+
+    @classmethod
+    def honors_request(cls, result: dict, target: str) -> str:
+        """Why this turn ACTED on the caller's request, or "" if it did not.
+
+        The safety net in BaseAgent.execute exists so a hand-written handler
+        cannot silently drop a question. Its contract was that whoever answers
+        one consumes it, and every prose path does — but a handler can also
+        answer by doing the thing, and those paths generate nothing and consume
+        nothing. The net then wrote a second sentence for the turn, blind to
+        the first, and the caller heard both:
+
+            Caller  Yeah, that's right. But my ZIP code's wrong. Can I change it?
+            AI      Got it, Emily — a representative would need to make that
+                    change to your ZIP code. Sure — let me update your zip code
+                    first. Could you give me your five-digit ZIP code?
+
+        One turn, declining and granting the same request, in that order. The
+        decline is the net answering "can I change it?" out of FOLLOWUP_RESPOND,
+        which had no way to know the turn had already routed the update to
+        provider_search and asked for the new value.
+
+        There is no need to guess at it. A turn that honors a request says so in
+        the update dict it returns, in the same keys the routing machinery
+        already reads:
+
+          - it routed the request to the owning agent, or
+          - it opened a detour to re-collect the slot, or
+          - it is now asking the caller for the very thing they asked to change.
+
+        The third is the general one and covers the handlers that do neither of
+        the first two — delivery's pre-dispatch contact update, its replay
+        branch, a re-dispatch — because whatever route a handler took, the proof
+        that the request was granted is that the caller is now being asked for
+        the new value.
+
+        This is read from state, not from prose. _declines_what_is_offered
+        matches a decline against an offer by wording and word overlap, and is
+        what was left to catch this: it needs a first-person offer marker in the
+        message, "Sure — let me update your zip code first" has none, and the
+        contradiction went out. Sentences that agree or disagree by accident of
+        phrasing are not a foundation; what the turn did is.
+        """
+        if not isinstance(result, dict):
+            return ""
+        if result.get("pending_cross_agent_request"):
+            return "routed to the owning agent"
+        if str(result.get("correction_return_to") or "").strip():
+            return "opened an update detour"
+        awaiting = str(result.get("awaiting_slot") or "").strip()
+        if target and awaiting and cls._same_slot_subject(target, awaiting):
+            return f"now collecting {awaiting}"
+        return ""
 
     @staticmethod
     def awaits_nothing(result: dict) -> bool:
@@ -1518,7 +1610,7 @@ class SlotManagerMixin:
         """ANSWERED_WITH_FOLLOWUP: confirm the slot, route the follow-up disposition.
 
         Handles update Cases A (answer + valid corrections) and B (answer +
-        value-less update_target) inline; plain follow-ups route to the
+        value-less change request) inline; plain follow-ups route to the
         FOLLOWUP_ANSWER / FOLLOWUP_PARK / FOLLOWUP_DECLINE guard and get the
         next pending slot's static ask appended (Option A: Gemini never asks
         for a slot — Python appends the ask).
@@ -1529,13 +1621,13 @@ class SlotManagerMixin:
         slot_name = config.slot_name
         extracted = getattr(decision, "extracted", None) or {}
         corrections = {k: v for k, v in (getattr(decision, "corrections", None) or {}).items() if v}
-        update_target = (getattr(decision, "update_target", None) or "").strip()
+        update_target = decision.change_target if decision else ""
         followup_query = (getattr(decision, "followup_query", None) or "").strip()
-        disposition = getattr(decision, "followup_disposition", None)
-        disposition_value = str(getattr(disposition, "value", disposition) or "none")
+        # Set below, by this function alone — see _DISPOSITION_GUARDS.
+        disposition_value = "none"
 
         # Regex fallback (request_detection): the LLM sometimes answers the
-        # slot but drops a plainly-phrased update request from update_target.
+        # slot but drops a plainly-phrased update request.
         # Backfill BEFORE disposition routing so the detour/route invariant
         # below wins over a park/decline the LLM chose for the same words.
         if not update_target:
@@ -1557,7 +1649,7 @@ class SlotManagerMixin:
             ):
                 update_target = detected.target
                 self.logger.info(
-                    "_handle_answered_followup: regex fallback set update_target",
+                    "_handle_answered_followup: regex fallback found the update target",
                     extra={
                         "source": "regex_fallback",
                         "matched": detected.matched,
@@ -1565,7 +1657,7 @@ class SlotManagerMixin:
                     },
                 )
 
-        # An update_target equal to the slot just answered is fulfilled by
+        # A change target equal to the slot just answered is fulfilled by
         # that answer (detour completion) — consume it so it can neither
         # re-open a detour for the same slot (Case B would trip the
         # _MAX_UPDATE_DETOURS loop guard and escalate a successful capture)
@@ -1575,7 +1667,7 @@ class SlotManagerMixin:
         # disposition messaging as usual.
         if update_target == slot_name:
             self.logger.info(
-                "_handle_answered_followup: update_target fulfilled by this answer — consumed",
+                "_handle_answered_followup: change target fulfilled by this answer — consumed",
                 extra={"target": update_target},
             )
             update_target = ""
@@ -1652,11 +1744,11 @@ class SlotManagerMixin:
         # allow → detour (the detour ask REPLACES the normal next-slot ask);
         # route → hand off to the owning agent NOW (pending_cross_agent_request);
         # otherwise park in_flow-elsewhere targets, decline human-only ones.
-        # INVARIANT: when update_target is set and resolution is "allow" or
-        # "route", the LLM's followup_disposition is IGNORED — the detour /
-        # route path below returns unconditionally, so a park/decline the LLM
-        # chose for the same turn can never shadow an honorable update.
-        # (update_target == slot_name was consumed above, so a detour here is
+        # INVARIANT: when a change target is set and resolution is "allow" or
+        # "route", the detour / route path below returns unconditionally, so a
+        # park or decline chosen earlier in this function can never shadow an
+        # honorable update.
+        # (a target equal to slot_name was consumed above, so a detour here is
         # always for a DIFFERENT slot than the one just answered.)
         if update_target and update_target not in applied:
             resolution = self.resolve_update_target(update_target, ctx, state, slot_configs)
@@ -1720,7 +1812,7 @@ class SlotManagerMixin:
         # ── Answer + INVALID corrected value: the awaiting slot IS confirmed,
         # but the correction was never applied — open a detour to re-collect
         # the corrected slot instead of silently dropping the bad value.
-        # (Case B above wins when both an update_target and an invalid
+        # (Case B above wins when both a change target and an invalid
         # correction arrive in the same turn.)
         if invalid_target and self.resolve_update_target(invalid_target, ctx, state, slot_configs) == "allow":
             detour = await self._open_update_detour(
@@ -1806,7 +1898,7 @@ class SlotManagerMixin:
         if clear_verify:
             interrupt["member_status_verify"] = False
         if guard == "FOLLOWUP_PARK" and followup_query:
-            # Only an unhonored update_target reaches here (the downgrade above
+            # Only an unhonored change target reaches here (the downgrade above
             # sends everything else to FOLLOWUP_RESPOND), so the item is always
             # an action follow_up routes via the ownership registry.
             parked = normalize_parked_followups(state.get("parked_followups"))
@@ -1894,35 +1986,31 @@ class SlotManagerMixin:
                 r = validator(normalized)
                 valid = r.valid if hasattr(r, "valid") else bool(r)
                 if valid:
-                    # Check whether caller also said something that needs addressing.
-                    # Import here to avoid circular imports at module level.
-                    from agent.llm.schema import EventType
-
-                    event_type = getattr(decision, "event_type", None)
-
-                    # A valid answer accompanied by a value-less update request
-                    # must reach the followup handler even when the LLM
-                    # flattened the event to ANSWERED/CORRECTED — otherwise the
-                    # caller's request is silently dropped on the clean-confirm
-                    # path. Only bare "update" shapes route here: corrections
-                    # with values (Case A/C1) and redo/replay keep their paths.
-                    update_hint = (getattr(decision, "update_target", None) or "").strip()
-                    kind_raw = getattr(decision, "request_kind", None)
-                    kind_hint = str(getattr(kind_raw, "value", kind_raw) or "").strip().lower()
-                    corrections_hint = {
-                        k: v for k, v in (getattr(decision, "corrections", None) or {}).items() if v
-                    }
-                    answered_with_request = bool(
-                        update_hint
-                        and update_hint != slot_name
-                        and not corrections_hint
-                        and kind_hint in ("", "none", "update")
-                    )
+                    # Did the caller say anything alongside the value that
+                    # the clean confirm path would drop? A side question, a
+                    # correction to another slot, a request aimed elsewhere —
+                    # each is a separate field, so this is a plain read rather
+                    # than a turn label that could disagree with them.
+                    #
+                    # It used to be one: ANSWERED_WITH_FOLLOWUP, with two
+                    # guards under it for the states where the label and the
+                    # fields disagreed. One of those was an event that carried
+                    # no follow-up at all — "I want to check my claim status.
+                    # Can you help me with that today?" came back labelled that
+                    # way with followup_query null, and routing it into
+                    # FOLLOWUP_RESPOND left the model padding an answer to a
+                    # question that was not there. There is no label to
+                    # disagree now, so that guard went with it.
+                    change_target = decision.change_target
+                    change_kind = decision.change_kind
+                    corrections_hint = {k: v for k, v in (decision.corrections or {}).items() if v}
+                    followup_hint = (decision.followup_query or "").strip()
+                    rides_along = bool(followup_hint or corrections_hint or change_target)
 
                     # Detour-completion turn: the LLM re-emits the update
                     # request it can still see in recent context ("change my
                     # last name") alongside the answer that fulfills it. When
-                    # that request is the event's ONLY content — its target is
+                    # that request is the turn's ONLY content — its target is
                     # the slot just answered, there are no other corrections,
                     # and the followup_query (if any) is that same request —
                     # the followup is already satisfied: take the clean
@@ -1930,54 +2018,26 @@ class SlotManagerMixin:
                     # decline/park messaging about a change that was just
                     # made ("a representative will need to make that change").
                     self_fulfilled_update = False
-                    if event_type == EventType.ANSWERED_WITH_FOLLOWUP and not corrections_hint:
+                    if rides_along and not corrections_hint:
                         from agent.core.request_detection import detect_request
 
-                        followup_hint = (getattr(decision, "followup_query", None) or "").strip()
                         fq_detected = detect_request(followup_hint) if followup_hint else None
                         fq_is_self_update = bool(
                             fq_detected and fq_detected.kind == "update" and fq_detected.target == slot_name
                         )
                         self_fulfilled_update = (
-                            (update_hint == slot_name or (not update_hint and fq_is_self_update))
+                            (change_target == slot_name or (not change_target and fq_is_self_update))
                             and (not followup_hint or fq_is_self_update)
-                            and kind_hint in ("", "none", "update")
+                            and change_kind in ("", "update")
                         )
                         if self_fulfilled_update:
                             self.logger.info(
                                 "_collect_slot: followup update request fulfilled by this "
-                                "answer — downgrading to clean ANSWERED",
+                                "answer — taking the clean answered path",
                                 extra={"slot": slot_name},
                             )
 
-                    # answered_with_followup with nothing to follow up on: no
-                    # query, no corrections, no update target. The extractor
-                    # sometimes labels a request that carries its own courtesy
-                    # question this way — "I want to check my claim status. Can
-                    # you help me with that today?" — and then leaves
-                    # followup_query null, because there is no side question to
-                    # name. Entering the handler would route a clean answer
-                    # through FOLLOWUP_RESPOND, whose whole job is to answer the
-                    # "Followup:" line that this payload does not have; the
-                    # model pads instead.
-                    empty_followup = (
-                        event_type == EventType.ANSWERED_WITH_FOLLOWUP
-                        and not (getattr(decision, "followup_query", None) or "").strip()
-                        and not corrections_hint
-                        and not update_hint
-                    )
-                    if empty_followup:
-                        self.logger.info(
-                            "_collect_slot: answered_with_followup carries no follow-up "
-                            "— taking the clean answered path",
-                            extra={"slot": slot_name},
-                        )
-
-                    if (
-                        (event_type == EventType.ANSWERED_WITH_FOLLOWUP or answered_with_request)
-                        and not self_fulfilled_update
-                        and not empty_followup
-                    ):
+                    if rides_along and not self_fulfilled_update:
                         # Slot will be confirmed inside the handler — corrections
                         # (Case A) must apply BEFORE slot_ok of the awaiting slot.
                         # Attempt counter is never incremented on this path.
@@ -2042,10 +2102,19 @@ class SlotManagerMixin:
         # 2b. No extraction — classify the turn before counting a failure
         # ------------------------------------------------------------------
         if state.get("awaiting_slot") == slot_name:
-            from agent.llm.schema import EventType
-
-            event_type = getattr(decision, "event_type", None)
-            event_value = event_type.value if event_type is not None else EventType.ANSWERED.value
+            # Nothing usable came out of the turn, so what happens next is
+            # decided by what the caller DID: asked for time, asked for a
+            # change, said they cannot give it, or simply did not answer. Each
+            # is its own question put to the result, in the order that settles
+            # the turn — a value would have won before any of them, and one
+            # never reaches here.
+            #
+            # These four used to be branches on a single event label the model
+            # chose, which could name one thing while the fields beside it said
+            # another. The branch below for "CORRECTED but nothing to correct
+            # and nothing to change" logged a prompt-following failure and
+            # downgraded the turn; there is no way to report that now, so the
+            # branch and the warning are gone.
 
             # ── WAIT: caller asked for time — not a failure, not ambiguous ─
             # Detection is deliberately post-extraction only: a pre-GPT regex
@@ -2057,9 +2126,9 @@ class SlotManagerMixin:
             # ambiguous. cannot-provide outranks wait: "I don't have it"
             # falls through to the escalation checks below.
             last_user = _last_user_msg(messages)
-            if (
-                event_value == EventType.WAIT.value or detect_wait_request(last_user)
-            ) and not detect_cannot_provide(last_user):
+            if (decision is not None and decision.asked_for_time or detect_wait_request(last_user)) and (
+                not detect_cannot_provide(last_user)
+            ):
                 wait_count = int(state.get("wait_count") or 0) + 1
                 if wait_count < MAX_WAIT_TURNS:
                     msg = pick(MSG_WAIT_ACK)
@@ -2072,41 +2141,30 @@ class SlotManagerMixin:
                 interrupt["wait_count"] = wait_count
                 return None, interrupt
 
-            # ── CORRECTED: caller fixed a confirmed slot, not answering us ─
-            if event_value == EventType.CORRECTED.value:
-                corrections = {k: v for k, v in (getattr(decision, "corrections", None) or {}).items() if v}
-                update_target = (getattr(decision, "update_target", None) or "").strip()
+            # ── The caller asked for a change instead of answering us ──────
+            corrections = {k: v for k, v in ((decision.corrections if decision else None) or {}).items() if v}
+            update_target = decision.change_target if decision else ""
 
-                # Regex fallback (request_detection): a CORRECTED turn the LLM
-                # left targetless still carries the target in plain words
-                # ("I need to change my email") — recover it and take the C2
-                # path instead of downgrading the caller's request to ANSWERED.
-                if not corrections and not update_target:
-                    from agent.core.request_detection import detect_request
+            # Regex fallback (request_detection): a change request the model
+            # reported no target for still carries one in plain words ("I need
+            # to change my email") — recover it and take the C2 path.
+            if not corrections and not update_target:
+                from agent.core.request_detection import detect_request
 
-                    detected = detect_request(last_user)
-                    if detected and detected.kind == "update" and detected.target:
-                        update_target = detected.target
-                        self.logger.info(
-                            "_collect_slot: regex fallback set update_target on bare CORRECTED turn",
-                            extra={
-                                "source": "regex_fallback",
-                                "matched": detected.matched,
-                                "target": detected.target,
-                            },
-                        )
-
-                if not corrections and not update_target:
-                    # Downgrade only when BOTH corrections and update_target are
-                    # empty — a bare update request (C2) is handled below.
-                    self.logger.warning(
-                        "_collect_slot: CORRECTED event with empty corrections{} and no "
-                        "update_target — treating as ANSWERED. Slot: %s. "
-                        "This is a prompt-following failure.",
-                        slot_name,
+                detected = detect_request(last_user)
+                if detected and detected.kind == "update" and detected.target:
+                    update_target = detected.target
+                    self.logger.info(
+                        "_collect_slot: regex fallback found an update target in the caller's words",
+                        extra={
+                            "source": "regex_fallback",
+                            "matched": detected.matched,
+                            "target": detected.target,
+                        },
                     )
-                    event_value = EventType.ANSWERED.value
-                elif not corrections and update_target:
+
+            if corrections or update_target:
+                if not corrections and update_target:
                     # ── C2: bare update request ("I need to change my email") ─
                     # allow → detour: target becomes awaiting, current awaiting
                     # slot is preserved in correction_return_to to resume.
@@ -2287,8 +2345,9 @@ class SlotManagerMixin:
                     collected[slot_name] = salvaged
                 return salvaged, None
 
-            # ── AMBIGUOUS: caller signalled correction intent with no value ─
-            if event_value == EventType.AMBIGUOUS.value:
+            # ── Nothing usable: garbled, a denial, a pivot, or a question
+            #    asked instead of answering ──────────────────────────────────
+            if decision is not None and decision.no_usable_value:
                 ambiguous_counts = dict(state.get("ambiguous_counts") or {})
                 ambiguous_counts[slot_name] = ambiguous_counts.get(slot_name, 0) + 1
 
