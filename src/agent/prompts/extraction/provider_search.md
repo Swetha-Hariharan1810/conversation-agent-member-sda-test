@@ -48,8 +48,8 @@ FIELDS — every name below is a key of `extracted{}`
     5-digit ZIP in the same breath ("no, it's 10001", "no, my zip changed —
     it's zero two one four zero"), report BOTH: zip_confirmed "no" AND
     zip_code carrying the new value. Do not decide whether the ZIP you heard
-    replaces the one read back — the system compares them itself and keeps
-    the value when it differs.
+    is a replacement or a repeat of the one read back — report it either way.
+    The system decides what to do with it.
 
     The one case that is NEITHER: the caller genuinely does not know.
     "maybe", "not sure", "I'm not sure", "probably", "I think so?" →

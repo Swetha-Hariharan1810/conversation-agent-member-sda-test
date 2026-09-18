@@ -35,7 +35,7 @@ from agent.agents.provider_search.pipelines import (
 )
 from agent.conversation.context import ConversationContext
 from agent.core.agent import BaseAgent
-from agent.core.confirmation import confirms_value, is_not_an_answer, is_read_back_echo
+from agent.core.confirmation import confirms_value, is_not_an_answer
 from agent.llm.config import get_extraction_llm
 from agent.logger import get_logger
 from agent.slots.normalizers import normalize_provider_type, normalize_yes_no, normalize_zip_code
@@ -195,31 +195,44 @@ class ProviderSearchAgent(BaseAgent):
             zip_conf_raw = extracted.get("zip_confirmed", "")
 
             zip_conf = normalize_yes_no(zip_conf_raw) if zip_conf_raw else ""
-            # A decline and a replacement ZIP are not mutually exclusive, whatever
-            # a prompt asks for. "no, my zip changed — it's 02140" answers the
-            # read-back AND carries the new value, and the model reports it both
-            # ways from one turn to the next: sometimes the bare zip_code,
-            # sometimes zip_confirmed "no" alongside it. This line used to clear
-            # the ZIP whenever zip_confirmed arrived at all, so the second form
-            # fell through to the decline path below and asked the caller for the
-            # ZIP they had just given — the failure core.confirmation.is_read_back_echo
-            # was written for, and which the fax, email and phone confirmation
-            # branches already guard against this way.
+            # What the caller's turn IS decides this branch, never how the ZIP
+            # in it compares to the one on file. A decline answers the read-back
+            # in two shapes, and only one of them leaves us needing anything:
+            #
+            #   decline WITH a value — "no, my zip changed, it's 02140". The
+            #       caller has supplied the ZIP to search on. Take it and go to
+            #       delivery. There is nothing left to ask.
+            #   decline with NO value — "no", "that's not right", "I moved".
+            #       Nothing was supplied, so the decline path at the bottom of
+            #       this branch asks for the current ZIP.
+            #
+            # The comparison against zip_on_file happens below and decides one
+            # thing only: whether Salesforce needs writing. It must not decide
+            # whether the caller answered. This line used to clear the value
+            # whenever a "no" arrived carrying a ZIP equal to the one read back
+            # (core.confirmation.is_read_back_echo), which dropped a turn that
+            # HAD an answer into the path built for turns that had none — the
+            # caller was asked for a ZIP they had just spoken:
+            #
+            #     AI      I have your ZIP code as 02140. Is that right?
+            #     Caller  no, my zip changed, it's zero two one four zero
+            #     AI      No problem — what is your current 5-digit ZIP code?
             #
             # An affirmation still clears it. A "yes" carrying a ZIP other than
             # the one read back is a misheard read-back, not a replacement the
             # caller can be held to, and this branch writes to Salesforce with no
             # read-back of its own to catch it.
-            if zip_conf == "yes" or (
-                zip_conf == "no" and is_read_back_echo(new_zip_raw, zip_on_file, normalize_zip_code)
-            ):
+            if zip_conf == "yes":
                 new_zip_raw = ""
 
             if new_zip_raw:
                 normalized = normalize_zip_code(str(new_zip_raw))
                 if normalized and validate_zip_code(normalized).valid:
                     if normalized == normalize_zip_code(zip_on_file):
-                        # Member repeated the ZIP we already have on file
+                        # The ZIP the caller gave is the one already on file —
+                        # whether they confirmed it or declined and then spoke
+                        # it. Either way it is the ZIP to search on, and there
+                        # is nothing to write.
                         logger.info(LOG_ZIP_CONFIRMED, extra={"zip_code": zip_on_file})
                         return self._signal_done(state, provider_type, zip_on_file)
                     # New ZIP provided inline — accept it directly, write to
