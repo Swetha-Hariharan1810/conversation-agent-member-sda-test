@@ -49,10 +49,13 @@ Three answers matter, and they are not symmetrical.
   spring", "that hasn't been right since the divorce". No list of these is
   ever finished.
 
-So: recognise the first two, and treat **everything else as a decline** →
-`"no"`. Never `"unusable"`. You do not need to match a phrasing to decline,
-and asking for the current value is always safer than reading the same one
-back.
+So: recognise the first two, and treat **everything else the caller SAID as a
+decline** → `"no"`. You do not need to match a phrasing to decline, and asking
+for the current value is always safer than reading the same one back.
+
+`"unusable"` has exactly two homes, both named at the end of this contract: the
+caller who does not know, and the turn that carried no speech at all. Outside
+those two, an intelligible turn that is not an affirmation is a decline.
 
 ### The leading affirmative does not decide the turn
 
@@ -91,7 +94,7 @@ a side question it reads as a caller who took no position, and the value they
 just rejected gets read back to them a second time — or, worse, treated as
 confirmed.
 
-### The one case that is NEITHER
+### The first case that is NEITHER: the caller does not know
 
 The caller genuinely does not know: "maybe", "I'm not sure", "I think so?",
 "not sure if that's still active" → `turn_intent` "unusable", leave the
@@ -100,3 +103,27 @@ confirmation field empty.
 Keep this narrow. It is the difference between a caller who CANNOT answer and
 one who is answering no. "I moved recently" is a DECLINE — they know the value
 is wrong. "I'm not sure if that's still right" is "unusable" — they do not know.
+
+### The second case that is NEITHER: nothing was heard
+
+A decline is something the caller SAID. An utterance that is not words at all
+— "csaxv", a stray syllable, a fragment of line noise — said nothing, and
+"everything else is a decline" does not reach it, because there is no position
+in it to read.
+
+    AI      Just to confirm — your ZIP code is 12139?
+    Caller  csaxv
+    →       turn_intent "unusable", zip_confirmed EMPTY
+
+Read as a decline instead, a garbled second of audio becomes "the caller says
+this value is wrong", and they are asked to replace something they never
+mentioned — while the retry budget, which exists for exactly this, never
+engages, because the turn was reported as an answer rather than an unusable
+one.
+
+Still narrow, and narrow in a different direction from the case above. That one
+turns on whether the caller KNOWS; this one turns on whether they SPOKE. So
+anything INTELLIGIBLE that is not an affirmation remains a DECLINE, whatever it
+says and however little it engages with the question — "I moved", "that's my
+old one", "ugh, don't get me started", "my daughter handles all this" are all
+declines. Only genuine non-speech is "unusable" here.

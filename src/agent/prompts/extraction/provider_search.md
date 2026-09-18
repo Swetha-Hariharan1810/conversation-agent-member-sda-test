@@ -51,13 +51,14 @@ FIELDS — every name below is a key of `extracted{}`
     is a replacement or a repeat of the one read back — report it either way.
     The system decides what to do with it.
 
-    The one case that is NEITHER: the caller genuinely does not know.
-    "maybe", "not sure", "I'm not sure", "probably", "I think so?" →
-    turn_intent "unusable", leave zip_confirmed empty. The agent re-asks the
-    confirmation. Keep this narrow — it is the difference between a caller who
-    cannot answer and one who is answering no. "I moved recently" is a DECLINE
-    (the caller knows the value on file is wrong); "I'm not sure if that's
-    still right" is "unusable" (the caller does not know).
+    The two cases that are NEITHER are the ones the read-back contract above
+    names, and zip_confirmed stays empty for both — the agent re-asks the
+    confirmation rather than collecting a new ZIP:
+      - the caller does not know: "maybe", "not sure", "probably", "I think so?"
+      - the turn carried no speech at all: "csaxv", a stray syllable
+    Keep both narrow. "I moved recently" is a DECLINE (the caller knows the ZIP
+    on file is wrong); "I'm not sure if that's still right" is "unusable" (they
+    do not know); "csaxv" is "unusable" (they said nothing).
 
 CONFIDENCE NOTES (see header [ANCHOR: CONFIDENCE])
 - zip_code: not exactly 5 digits after normalization → "unusable". Never pad short values.
@@ -65,8 +66,8 @@ CONFIDENCE NOTES (see header [ANCHOR: CONFIDENCE])
 - zip_confirmed: only extract when a ZIP was just read aloud. Anything that is
   not an affirmation is a decline — extract "no" without looking for a
   particular wording, and extract zip_code alongside it whenever the caller
-  spoke one. Only use "unusable" when the member genuinely does not know
-  whether the ZIP is correct.
+  spoke one. Only use "unusable" for the two cases the read-back contract
+  names: the member does not know, or the turn carried no speech at all.
 
 FOLLOWUP CLASSIFICATION NOTES
 Both of these are ordinary side questions — put them in followup_query and
