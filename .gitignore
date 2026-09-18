@@ -10,3 +10,8 @@ __pycache__/
 
 # Runtime output
 logs/
+
+# Local secrets — never commit
+.env
+.env.*
+!.env.example
