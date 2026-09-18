@@ -334,10 +334,29 @@ class SlotManagerMixin:
         return self.get_slot(name).is_exhausted()
 
     def slots_dict(self) -> dict:
-        """Serialize slot state for LangGraph persistence."""
+        """Serialize slot state for LangGraph persistence.
+
+        A record that carries nothing is left out. ``get_slot`` creates the
+        SlotAttempt on first access, so merely READING one — the attempt count
+        to hand an extractor, say — materialises a record no attempt ever
+        wrote, and ``reset()`` returns a record to that same empty state.
+        Persisted, those show up as a slot the call never collected, sitting
+        beside the state key that says it did:
+
+            slot_attempts["name_confirmed"] = {attempt_count: 0,
+                                               confirmed: False,
+                                               last_value: None}
+            name_confirmed = True
+
+        The two do not disagree — one of them is not a record of anything.
+        Restoring an absent key builds exactly that record again (see
+        ``_restore_slot``, and ``reset`` above it), so dropping it is lossless,
+        and what survives in slot_attempts is only what the call did.
+        """
         return {
             k: {"attempt_count": v.attempt_count, "confirmed": v.confirmed, "last_value": v.last_value}
             for k, v in self._slots.items()
+            if v.attempt_count or v.confirmed or v.last_value is not None
         }
 
     @staticmethod
