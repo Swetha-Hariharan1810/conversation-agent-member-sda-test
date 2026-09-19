@@ -229,7 +229,14 @@ def _fold_spoken(text: str) -> str:
     folded = (text or "").lower()
     folded = re.sub(r"\s*\bdot\b\s*", ".", folded)
     folded = re.sub(r"\s*\bat\b\s*", "@", folded)
-    return folded
+    # Every remaining space goes too. The caller separates digits by voice and
+    # ASR writes the separation down — "daniel dot reed 25 at gmail dot com"
+    # folds to "daniel.reed 25@gmail.com", which does not contain the address
+    # it IS. caller_spoke then reads the caller's own words as an extractor
+    # echo and throws their value away. Only a substring test reads this, so a
+    # haystack with no spaces in it can only match more, and the needle is a
+    # whole address — long enough that matching more costs nothing.
+    return re.sub(r"\s+", "", folded)
 
 
 def caller_spoke(value: str, last_user: str, normalizer: Callable[[str], str]) -> bool:

@@ -327,7 +327,22 @@ class RecordsCoordinationAgent(BaseAgent):
                             done = await self._send_link_and_proceed(state, pending_email)
                             done["pending_email"] = ""
                             return done
-                        new_email_raw = ""
+                        # Declined, and the address they spoke is the one just
+                        # read back. Their words confirm the value; their "no"
+                        # rejects it — so it is the READ-BACK they are answering,
+                        # and a "no" is never dispatched over. Ask for the address
+                        # rather than reading the identical one back a second time,
+                        # which loops until email_change_cycles escalates a call
+                        # that had the right value all along.
+                        logger.info(
+                            "records_coordination: read-back declined with the same "
+                            "address — collecting it fresh",
+                            extra={"method": "email"},
+                        )
+                        ask_result = self.ask_member(state, pick(MSG_EMAIL_UPDATE_PROMPT))
+                        ask_result["awaiting_slot"] = "email"
+                        ask_result["pending_email"] = ""
+                        return ask_result
                     # New email — hold as pending until the member confirms the
                     # read-back. Spoken form ("at"/"dot") is used for the spoken
                     # message only.

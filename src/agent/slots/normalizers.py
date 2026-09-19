@@ -770,8 +770,25 @@ def normalize_phone_number(value: str | None) -> str:
 
 
 def normalize_email(value: str | None) -> str:
-    """Normalize email to lowercase."""
-    return _clean(value).lower()
+    """Normalize email to lowercase, with every space removed.
+
+    An address cannot contain a space, and a spoken one always arrives with
+    some: ASR writes "reed 25" for the digits a caller separates by voice, and
+    the extraction model carries that space through into the local part. Left
+    in, it fails validation and the caller is asked for an address they just
+    gave —
+
+        AI      …your email address is daniel dot reed25 at gmail dot com,
+                correct?
+        Caller  no it is daniel dot reed 25 at gmail dot com
+        AI      No problem — what is the correct email address?
+
+    "daniel.reed 25@gmail.com" is not a different address from
+    "daniel.reed25@gmail.com"; it is the same one with a space in it. Removing
+    the space is what makes the two comparable, both against the validator and
+    against the value being read back.
+    """
+    return re.sub(r"\s+", "", _clean(value)).lower()
 
 
 # ---------------------------------------------------------------------------

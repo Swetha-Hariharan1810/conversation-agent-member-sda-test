@@ -413,19 +413,49 @@ def name_part(source) -> str:
 # ---------------------------------------------------------------------------
 
 
+_DIGIT_WORDS = {
+    "0": "zero",
+    "1": "one",
+    "2": "two",
+    "3": "three",
+    "4": "four",
+    "5": "five",
+    "6": "six",
+    "7": "seven",
+    "8": "eight",
+    "9": "nine",
+}
+
+
 def speak_email(email: str | None) -> str:
     """
     Convert an email address to its fully spoken form for AI messages.
 
-        "jane.doe@example.com" → "jane dot doe at example dot com"
+        "jane.doe@example.com"    → "jane doe at example dot com"  (dots spoken)
+        "daniel.reed25@gmail.com" → "daniel dot reed two five at gmail dot com"
 
-    Replaces "@" with " at " AND every "." with " dot ".
-    Use this ONLY for the spoken/display string — never store or write
+    Replaces "@" with " at ", every "." with " dot ", and every digit with its
+    word. Use this ONLY for the spoken/display string — never store or write
     the spoken form back to state or Salesforce.
+
+    Digits are spoken one at a time because glued to a word they are not
+    audibly separable, and a caller who cannot hear the boundary declines a
+    read-back of their own address:
+
+        Caller  the correct id is daniel dot reed two five at gmail dot com
+        AI      …your email address is daniel dot reed25 at gmail dot com,
+                correct?
+        Caller  no it is daniel dot reed 25 at gmail dot com
+
+    The address was right both times. "reed25" is what the caller heard as
+    wrong, so they declined — and a decline is honoured, which costs the call
+    a full re-collection of a value it already had. Saying "reed two five"
+    gives back the boundary the caller themselves spoke.
     """
     if not email:
         return ""
     spoken = email.strip().replace("@", " at ").replace(".", " dot ")
+    spoken = "".join(f" {_DIGIT_WORDS[c]} " if c in _DIGIT_WORDS else c for c in spoken)
     return re.sub(r"\s+", " ", spoken).strip()
 
 

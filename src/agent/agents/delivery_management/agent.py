@@ -608,7 +608,29 @@ class DeliveryManagementAgent(BaseAgent):
                             done = await self._proceed_to_dispatch(state, delivery_method, pending_email)
                             done["pending_email"] = ""
                             return done
-                        new_email_raw = ""
+                        # Declined, and the address they spoke is the one just
+                        # read back. Their words confirm the value; their "no"
+                        # rejects it — so it is the READ-BACK they are answering,
+                        # and a "no" is never dispatched over.
+                        #
+                        # Ask for the address instead of reading the same one
+                        # back a second time. The line below used to be
+                        # `new_email_raw = ""`, which reads as "drop it and take
+                        # the decline path" and is not what Python does with it:
+                        # nothing breaks out of this block, so control fell into
+                        # the read-back under it and re-asked the identical
+                        # address, over and over, until email_change_cycles
+                        # escalated a call that had the right value all along.
+                        logger.info(
+                            "delivery_management: read-back declined with the same address — "
+                            "collecting it fresh",
+                            extra={"method": "email"},
+                        )
+                        ask_result = self.ask_member(state, pick(EMAIL_UPDATE_PROMPTS))
+                        ask_result["awaiting_slot"] = "email"
+                        ask_result["pending_email"] = ""
+                        ask_result["email"] = email_on_file
+                        return ask_result
                     # New email — hold as pending until the member confirms the
                     # read-back. Spoken form ("at"/"dot") is used for the spoken
                     # message only; the raw value stays in pending_email.

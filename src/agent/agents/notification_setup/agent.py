@@ -481,6 +481,29 @@ class NotificationSetupAgent(BaseAgent):
                         done = await self._save_and_complete(state, "email", email_on_file)
                         done["pending_email"] = ""
                         return done
+                    if (
+                        pending_email
+                        and normalized == normalize_email(pending_email)
+                        and not confirms_value(
+                            contact_conf, last_user, owned_slots=("email", "email_confirmed")
+                        )
+                    ):
+                        # Declined, and the address they spoke is the one just
+                        # read back. Their words confirm the value; their "no"
+                        # rejects it — so it is the READ-BACK they are answering,
+                        # and a "no" is never dispatched over. Ask for the address
+                        # rather than reading the identical one back a second time,
+                        # which loops until email_change_cycles escalates a call
+                        # that had the right value all along.
+                        logger.info(
+                            "notification_setup: read-back declined with the same "
+                            "address — collecting it fresh",
+                            extra={"method": "email"},
+                        )
+                        ask_result = self.ask_member(state, pick(EMAIL_UPDATE_PROMPTS))
+                        ask_result["awaiting_slot"] = "email"
+                        ask_result["pending_email"] = ""
+                        return ask_result
                     # Inline replacement = implicit rejection of the read-back.
                     # Bound the change cycle so valid-value churn cannot loop forever.
                     if escalation := self.guard_loop_limit(
