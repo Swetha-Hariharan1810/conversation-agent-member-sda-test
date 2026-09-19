@@ -22,7 +22,6 @@ from typing import Any, Callable, Optional, Tuple
 from agent.conversation.context import ConversationContext
 from agent.core.call_stages import remaining_call_stages, spoken_slot_stage
 from agent.core.constants import MAX_FREE_FOLLOWUP_TURNS, MAX_WAIT_TURNS
-from agent.core.followup_grounding import is_grounded_followup
 from agent.core.models import SlotAttempt
 from agent.llm.config import Config
 from agent.logger import get_logger
@@ -1060,32 +1059,26 @@ class SlotManagerMixin:
         answering: what the turn does with it is decided later, and most turns
         carry nothing.
 
-        ``utterances`` are the renderings of what the caller said this turn —
-        the guard layer passes both the ``user_text`` it was given and the last
-        user message in the transcript, which are the same string in production
-        and can differ in a test harness. A reported question with no trace of
-        a question or a request in ANY of them is not recorded at all: this is
-        the last gate in front of BaseAgent.execute's safety net, which
-        generates a whole extra sentence for the turn and prefixes it to what
-        the turn says. Fed a phantom, that sentence answers nothing and
-        restates what the caller is already hearing — the double-append.
-        reconcile_worker_result vetoes the same field upstream; this is here
-        because the net is reached from every agent, including the ones whose
-        extraction predates that funnel.
+        ``followup_query`` is taken as reported. This method used to hold a
+        second copy of the grounding veto — a reported question with no regex
+        cue for a question or a request in the caller's words was dropped here
+        rather than recorded, because this is the last gate in front of
+        BaseAgent.execute's safety net and a phantom question costs the turn a
+        whole extra generated sentence.
 
-        Passing no utterance at all leaves the extractor trusted: the veto
-        fires on evidence that the caller asked nothing, never on the absence
-        of a transcript to check.
+        The veto is gone, here and in reconcile_worker_result. It could only
+        trade a phantom question for a silently deleted real one, and its cue
+        list was the thing deciding which: a caller who asked in words the list
+        did not carry was never heard. Whether the caller asked something is
+        one judgement about one sentence, and the extraction model is the only
+        layer that makes it now — see extraction/_followup_contract.md, which
+        carries the test this used to apply.
+
+        ``utterances`` are kept in the signature: every call site passes them,
+        they cost nothing, and they are what a future check about the caller's
+        own words would read. Nothing reads them today.
         """
         query = (getattr(result, "followup_query", None) or "").strip() if result else ""
-        said = [u for u in utterances if (u or "").strip()]
-        if query and said and not any(is_grounded_followup(query, u) for u in said):
-            self.logger.info(
-                "note_side_question: dropped an ungrounded side question",
-                extra={"agent": self.AGENT_NAME, "query": query},
-            )
-            self._side_question = {}
-            return
         extracted = (getattr(result, "extracted", None) or {}) if result else {}
         self._side_question = (
             {

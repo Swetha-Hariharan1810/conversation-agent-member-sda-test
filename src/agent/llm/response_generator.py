@@ -168,13 +168,17 @@ _STATIC_ELIGIBLE_GUARDS = frozenset({"RETRY", "CLARIFY"})
 #     User  Please check my claim status today.
 #     AI    Sorry, I didn't catch that — could you say your first name again?
 #
-# The line used to be four words, and word count turned out to be the wrong
-# proxy: on a voice call nearly every non-answer clears four words ("um, I'm
-# not really sure about that"), so the static path almost never ran and the
-# generation LLM got a free hand on precisely the turns where — per the comment
-# above — there is nothing for it to add and a great deal for it to get wrong.
 # What separates the claim-status turn from a mumble is that it asks for
-# something, so that is what is tested: see followup_grounding.
+# something — and the turn that asks for something arrives here with
+# followup_query set, which the check below reads. Two earlier tests of the
+# same thing are gone: a four-word minimum (on a voice call nearly every
+# non-answer clears four words, so the static path almost never ran) and a
+# regex cue list over the caller's raw utterance
+# (followup_grounding.carries_freeform_content). The cue list was the last
+# place outside the extraction prompt that decided whether a caller had asked
+# for something, and it decided it from patterns rather than from the turn.
+# That judgement is the extraction model's now, in one place, reported in
+# followup_query — see extraction/_followup_contract.md.
 
 
 def needs_freeform_response(
@@ -191,11 +195,16 @@ def needs_freeform_response(
     False → the caller gave a plain non-answer with nothing to acknowledge;
             ``build_retry_prompt`` says the same thing deterministically.
 
-    The whole decision is made here, from the turn itself: the guard, the
-    values extracted, the side question, the corrections, the request target,
-    and whether the caller's own words ask for something. It defaults to True
-    when no extraction result was passed, so un-wired call sites keep the old
-    always-generate behaviour.
+    The whole decision is made here, from what the extraction model reported
+    about the turn: the guard, the values extracted, the side question, the
+    corrections, the request target. It defaults to True when no extraction
+    result was passed, so un-wired call sites keep the old always-generate
+    behaviour.
+
+    ``user_utterance`` is no longer read. It was there for a regex cue list
+    that asked the caller's raw words whether they had requested anything —
+    the last such check outside the extraction prompt. A turn that asks for
+    something now says so in ``followup_query``, which is tested above it.
 
     ``WorkerResult`` used to carry a ``needs_freeform_response`` flag for this,
     set by the extraction LLM. It was the wrong question to ask a perception
@@ -207,8 +216,6 @@ def needs_freeform_response(
     "I didn't catch that" twice. The checks are the rule now, not a safety net
     under one.
     """
-    from agent.core.followup_grounding import carries_freeform_content
-
     if guard not in _STATIC_ELIGIBLE_GUARDS:
         return True
     if followup_query:
@@ -223,8 +230,6 @@ def needs_freeform_response(
     if decision.change_target:
         return True
     if (getattr(decision, "followup_query", None) or "").strip():
-        return True
-    if carries_freeform_content(user_utterance):
         return True
     return False
 

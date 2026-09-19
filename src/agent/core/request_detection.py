@@ -14,11 +14,38 @@ with a different target — it only
      cannot know and the pipeline can (see _split_corrections).
 When neither the LLM nor the regex detects anything, behavior is unchanged.
 
-The veto half of this module is gone. It existed to repair results whose
-fields contradicted each other — a WAIT label beside an update target, an
-ANSWERED beside a bare request, an ANSWERED_WITH_FOLLOWUP beside no question.
-WorkerResult reports one intent now and derives the rest from it, so those
-states have no representation to repair.
+NOTHING HERE TOUCHES followup_query. Whether the caller asked a side question
+this turn is the extraction model's decision, start to finish: a non-empty
+followup_query routes the turn to FOLLOWUP_RESPOND and an empty one does not,
+with no Python layer in between.
+
+That layer used to exist, in two halves that were the same bug seen from
+either side. A veto (_reconcile_followup_query) cleared a reported question
+when no regex cue for a question or a request appeared in the caller's words;
+a recovery (_recover_missed_followup) split the utterance on sentence and
+contrastive boundaries and put a question back when the model had dropped one.
+Both are gone, along with core.followup_grounding, which held their patterns —
+the cue list, the courtesy-question list, the answer-restatement subset test.
+
+They were removed because each one could only trade one failure for another.
+The veto read a cue list, so a caller who asked something it did not list lost
+their question silently; the recovery read a split, so a caller whose answer
+happened to contain "but" got a question they never asked. Neither could see
+what the extraction model sees — the slot in hand, the read-back it was
+answering, the transcript above — and a regex arguing with a model over the
+meaning of a sentence loses the argument more often than it wins it.
+
+What replaced them is prompt: extraction/_followup_contract.md now carries the
+three-step test those two functions encoded, in one place, composed into every
+extraction prompt. Its header comment maps each removed check to the rule that
+now covers it. If a side question is heard wrongly, that file is where the fix
+goes — do not put a check back here.
+
+The other veto half is gone for its own reasons. It existed to repair results
+whose fields contradicted each other — a WAIT label beside an update target,
+an ANSWERED beside a bare request, an ANSWERED_WITH_FOLLOWUP beside no
+question. WorkerResult reports one intent now and derives the rest from it, so
+those states have no representation to repair.
 
 Slot patterns are DERIVED from SLOT_OWNERSHIP, not hand-written: every
 registry key gets "update/change/correct my <label>" and "<label> changed /
@@ -51,13 +78,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from agent.core.followup_grounding import (
-    is_grounded_followup,
-    quotes_the_caller,
-    recover_side_question,
-)
 from agent.core.slot_ownership import SLOT_OWNERSHIP
-from agent.llm.schema import TurnIntent
 from agent.utils import detect_cannot_provide
 
 logger = logging.getLogger(__name__)
@@ -259,7 +280,7 @@ def detect_request(text: str | None) -> DetectedRequest | None:
     return None
 
 
-# ── WorkerResult reconciliation (fallback + veto, called after extraction) ────
+# ── WorkerResult reconciliation (fallback, called after extraction) ──────────
 
 
 # Schema field names the extractor sometimes writes INTO extracted{} instead of
@@ -301,112 +322,6 @@ def _strip_reserved_keys(result: Any) -> Any:
             field,
             extra={"source": "schema_hygiene", "field": field, "llm_value": ", ".join(leaked)},
         )
-    return result
-
-
-def _recover_missed_followup(result: Any, last_user: str | None) -> Any:
-    """Fill in a side question the caller asked and the extractor did not report.
-
-    The veto below handles a question the model invented. This is the other
-    half, and it is the same bug seen from the other side:
-
-        Caller  No. But I lost my credit ID card. Can you help me with the
-                new one?                        (awaiting benefits_response)
-        →       followup_query null
-
-        Caller  That sounds interesting, but I lost my ID card. Can you help
-                me to get a new one?            (awaiting care_coach_response)
-        →       followup_query "can you help me to get a new one"
-
-    The same request, two turns apart, classified both ways. Not model
-    variance: those slots run different prompt stacks. benefits_response is
-    collected by delivery_management against header_extraction.md +
-    delivery_management.md, 4,100 words with the follow-up rules a long way
-    from the field definitions; care_coach_response by the benefits agent
-    against header_core.md + benefits.md, 1,300 words with a request block
-    directly under FIELDS. Whether the caller is heard depends on which prompt
-    file the slot they are on happens to live in.
-
-    A missed question is invisible downstream — BaseAgent.execute's safety net
-    only fires when followup_query is set, so a dropped one looks exactly like
-    a caller who asked nothing, on that turn and on every repeat of it. Nothing
-    escalates it either: the guard layer needs guard_confidence >= 0.7 and such
-    a turn carries 0.0.
-
-    Only the clean "answer, then ask" shape is recovered, and only when the
-    extractor found a value — so there is an answer half — and reported no
-    question. recover_side_question is far stricter than the veto's cue test,
-    because a false positive here puts words in the caller's mouth.
-
-    Setting the question is the whole edit: an ANSWERED turn that carries a
-    value and a question derives ANSWERED_WITH_FOLLOWUP by itself.
-    """
-    reported = (getattr(result, "followup_query", None) or "").strip()
-    if not result.has_extracted_value:
-        return result
-    # Only the clean "answer, then ask" shape: a turn already classified as a
-    # request, a pivot or a denial is not one the caller merely asked alongside.
-    if result.turn_intent is not TurnIntent.ANSWERED:
-        return result
-    recovered = recover_side_question(last_user, result.extracted)
-    if not recovered:
-        return result
-    # The LLM stays primary: a question it reported that is about what the
-    # caller talked about is its call to make, paraphrase and all. Recovery
-    # only overrides the reported question when it shares no topic word with
-    # the turn at all — the signature of one lifted from the AI's own earlier
-    # turns, which the cue-based veto cannot catch on a turn where the caller
-    # genuinely did ask something ("help with claim status" reported against
-    # "No. But I lost my credit ID card. Can you help me with the new one?").
-    if reported and quotes_the_caller(reported, last_user):
-        return result
-    result.followup_query = recovered
-    logger.info(
-        "request_detection: grounding_fallback %s followup_query",
-        "replaced" if reported else "recovered",
-        extra={
-            "source": "grounding_fallback",
-            "field": "followup_query",
-            "llm_value": reported,
-            "final_value": recovered,
-        },
-    )
-    return result
-
-
-def _reconcile_followup_query(result: Any, last_user: str | None) -> Any:
-    """Drop a side question the caller did not ask, and the event that carried it.
-
-    `followup_query` routes the turn into FOLLOWUP_RESPOND, whose whole job is
-    to answer the "Followup:" line. A phantom line has no answer, so the
-    generator pads — usually by restating the sentence the caller just heard —
-    and the same phantom reaches BaseAgent.execute's safety net, which
-    generates a second sentence for the turn and prefixes it. One hallucinated
-    field, two generation calls, two sentences saying the same thing.
-
-    See core.followup_grounding for why the check lives in Python at all: three
-    extraction headers already forbid synthesizing a followup_query from topics
-    the AI raised, in capitals, and the field keeps coming back with one.
-
-    Only the question is cleared. corrections{} and the request intent are the
-    caller's own request shapes, reconciled below on their own evidence, and
-    the pipelines read them directly — so clearing a phantom question cannot
-    take an honest update down with it, and there is no turn label left to
-    repair afterwards either.
-    """
-    query = (getattr(result, "followup_query", None) or "").strip()
-    if not query or is_grounded_followup(query, last_user):
-        return result
-    result.followup_query = None
-    logger.info(
-        "request_detection: grounding_veto cleared followup_query",
-        extra={
-            "source": "grounding_veto",
-            "field": "followup_query",
-            "llm_value": query,
-            "final_value": "",
-        },
-    )
     return result
 
 
@@ -481,7 +396,7 @@ def reconcile_worker_result(
     confirmed_slots: Mapping[str, Any] | None = None,
     awaiting_slot: str = "",
 ) -> Any:
-    """Fallback + veto pass over an extraction result (WorkerResult-shaped).
+    """Fallback pass over an extraction result (WorkerResult-shaped).
 
     ``confirmed_slots`` is the same Confirmed: view the extraction prompt was
     built from, and ``awaiting_slot`` the slot it was asked about. Together
@@ -500,12 +415,8 @@ def reconcile_worker_result(
     - the LLM reported a pivot or a denial → the regex stays out of it. Those
       are readings of the slot being collected, made on the caller's words; a
       pattern match about some other slot does not outrank one.
-    - followup_query names a side question with no trace of a question or a
-      request in the caller's words → clear it. See _reconcile_followup_query
-      and core.followup_grounding.
-    - the caller plainly answered AND then asked, and followup_query came back
-      null → recover the question from their own words. See
-      _recover_missed_followup.
+    - followup_query is NOT touched. Whether the caller asked something is the
+      extraction model's call alone — see the module docstring.
     - extracted{} carries a schema field name as a key ("turn_target": "ID
       card") → drop it; that dict is slot → value and every consumer reads it
       that way. See _strip_reserved_keys.
@@ -521,8 +432,6 @@ def reconcile_worker_result(
     result = _strip_reserved_keys(result)
     result = _split_corrections(result, confirmed_slots, awaiting_slot)
     result = _reconcile_cannot_provide(result, last_user)
-    result = _reconcile_followup_query(result, last_user)
-    result = _recover_missed_followup(result, last_user)
 
     detected = detect_request(last_user)
     if detected is None:
